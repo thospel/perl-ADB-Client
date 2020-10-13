@@ -1,0 +1,9 @@
+Changes
+Makefile.PL
+MANIFEST
+MANIFEST.SKIP
+README
+t/00_load.t
+lib/ADB/Client.pm
+lib/ADB/Client/Package.pm
+md5-versions

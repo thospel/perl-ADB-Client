@@ -1,0 +1,51 @@
+# Avoid version control files.
+\bRCS\b
+\bCVS\b
+\bSCCS\b
+,v$
+\B\.svn\b
+\b_darcs\b
+^_MTN$
+^_MTN/
+^\.mtn-ignore$
+^\.git/
+^\.gitignore$
+
+# Avoid Makemaker generated and utility files.
+\bMANIFEST\.bak
+\bMakefile$
+\bblib/
+\bMakeMaker-\d
+\bpm_to_blib\.ts$
+\bpm_to_blib$
+\bblibdirs\.ts$         # 6.18 through 6.25 generated this
+^[\w-]+-\d+\.\d+\.tar\.gz$
+^[\w-]+-\d+\.\d+\.ppm$
+^[\w-]+\.ppd$
+^ppm/[\w-]+\.ppd$
+^ppm/[\w.-]+/[\w-]+-\d+\.\d+\.tar\.gz$
+
+# Avoid Module::Build generated and utility files.
+\bBuild$
+\b_build/
+
+# Avoid temp and backup files.
+~$
+\.old$
+\#$
+\b\.#
+/\.#
+^\.#
+\.bak$
+
+# Ignore Devel::Cover and Devel::NYTProf files.
+^cover_db/
+^nytprof/
+^nytprof\.out$
+^nytprof\.out\.\d+$
+^MYMETA\.yml$
+^MYMETA\.json$
+/\.access\^$
+^\.access\^$
+
+^bl.b$

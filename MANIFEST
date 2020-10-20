@@ -1,9 +1,11 @@
 Changes
-Makefile.PL
 MANIFEST
 MANIFEST.SKIP
+Makefile.PL
 README
-t/00_load.t
 lib/ADB/Client.pm
+lib/ADB/Client/Events.pm
 lib/ADB/Client/Package.pm
+lib/ADB/Client/Timer.pm
 md5-versions
+t/00_load.t

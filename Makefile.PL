@@ -28,7 +28,8 @@ WriteMakefile
      }) : (),
      PREREQ_PM		=> {
          "LWP"			=> "5.46",
-         "Exporter::Tidy"	=> "0.05",
+         "Exporter::Tidy"	=> "0.06",
+         "IO::Socker::IP"	=> "0.38",
      },
      ABSTRACT		=> 'Download a novel from the web and convert it to epub',
      AUTHOR		=> 'Ton Hospel <ADB-Client@ton.iguana.be>',

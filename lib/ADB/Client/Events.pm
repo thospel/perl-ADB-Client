@@ -5,12 +5,16 @@ use warnings;
 use Carp;
 use Errno qw(EINTR);
 
-use ADB::Client::Timer;
+use ADB::Client::Timer qw(run_now);
+
+use Exporter::Tidy
+    other => [qw(mainloop unloop loop_level event_init $event_inited)];
 
 my $read_mask  = "";
 my $write_mask = "";
 my $error_mask = "";
-my (%read_refs, %write_refs, %error_refs, $inited, @unlooping);
+my (%read_refs, %write_refs, %error_refs, @unlooping);
+our $event_inited;
 
 package ADB::Client;
 our ($debug, $verbose);
@@ -98,11 +102,11 @@ sub loop_level {
 }
 
 sub mainloop {
-    init() if !$inited;
+    event_init() if !$inited;
     push @unlooping, undef;
     eval {
         until ($unlooping[-1]) {
-            my $timeout = ADB::Client::Timer::run_now() //
+            my $timeout = run_now() //
                 %read_refs || %write_refs || %error_refs || last;
             if ((select(my $r = $read_mask,
                         my $w = $write_mask,
@@ -122,7 +126,8 @@ sub mainloop {
     return $tmp;
 }
 
-sub init {
+sub event_init {
+    return if $inited;
     no warnings "once";
     *IO::Handle::add_read     = \&add_read;
     *IO::Handle::add_write    = \&add_write;

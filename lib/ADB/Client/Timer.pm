@@ -6,6 +6,8 @@ use Scalar::Util qw(weaken);
 use Carp;
 use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC );
 
+use Exporter::Tidy other => [qw(run_now)];
+
 my @timers = (undef);
 # @immediate must be persistent so no timers get lost if a callback dies
 my (@immediate, $now);

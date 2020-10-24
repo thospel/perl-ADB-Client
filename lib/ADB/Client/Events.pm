@@ -10,7 +10,7 @@ use ADB::Client::Timer;
 my $read_mask  = "";
 my $write_mask = "";
 my $error_mask = "";
-my (%read_refs, %write_refs, %error_refs, $inited);
+my (%read_refs, %write_refs, %error_refs, $inited, @unlooping);
 
 package ADB::Client;
 our ($debug, $verbose);
@@ -88,22 +88,38 @@ sub delete_error(*) {
     }
 }
 
+sub unloop {
+    my $loop_level = shift;
+    $unlooping[$loop_level] = shift || 1;
+}
+
+sub loop_level {
+    return scalar @unlooping;
+}
+
 sub mainloop {
     init() if !$inited;
-    while (1) {
-        my $timeout = ADB::Client::Timer::run_now();
-        last unless defined $timeout ||
-            %read_refs || %write_refs || %error_refs;
-        if ((select(my $r = $read_mask, my $w = $write_mask, my $e = $error_mask, $timeout) || next) > 0) {
-            $$_ && $$_->() for
-                \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
-                \@write_refs{grep vec($w, $_, 1), keys %write_refs},
-                \@error_refs{grep vec($e, $_, 1), keys %error_refs};
-        } elsif ($! != EINTR) {
-            die "Select failed: $^E";
+    push @unlooping, undef;
+    eval {
+        until ($unlooping[-1]) {
+            my $timeout = ADB::Client::Timer::run_now() //
+                %read_refs || %write_refs || %error_refs || last;
+            if ((select(my $r = $read_mask,
+                        my $w = $write_mask,
+                        my $e = $error_mask, $timeout) || next) > 0) {
+                $$_ && $$_->() for
+                    \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
+                    \@write_refs{grep vec($w, $_, 1), keys %write_refs},
+                    \@error_refs{grep vec($e, $_, 1), keys %error_refs};
+            } elsif ($! != EINTR) {
+                die "Select failed: $^E";
+            }
         }
-    }
-    ::info("Exiting mainloop") if $verbose;
+        ::info("Exiting mainloop") if $verbose;
+    };
+    my $tmp = pop @unlooping;
+    die $@ if $@;
+    return $tmp;
 }
 
 sub init {

@@ -114,9 +114,10 @@ sub DESTROY {
 sub run_now {
     $now = clock_gettime($CLOCK_TYPE);
     goto EXPIRED if @timers <= 1 || $timers[1][TIME] > $now;
+    # @timers > 2 makes sure that if we pop @timers we don't remove $timers[1]
     while (@timers > 2) {
-        push @immediate, $timers[1];
         $timers[1][INDEX] = 0;
+        weaken($immediate[@immediate] = $timers[1]);
 
         my $time = $timers[-1][TIME];
         my $n = @timers-2;
@@ -153,12 +154,14 @@ sub run_now {
     }
     if (@timers == 2) {
         $timers[1][INDEX] = 0;
-        push @immediate, pop @timers;
+        weaken($immediate[@immediate] = pop @timers);
     }
   EXPIRED:
-    my $fun;
-    $fun->[CODE] && $fun->[CODE]->() while $fun = shift @immediate;
-    $now = clock_gettime($CLOCK_TYPE);
+    if (@immediate) {
+        my $fun;
+        ($fun = shift @immediate)->[CODE] && $fun->[CODE]->() while @immediate;
+        $now = clock_gettime($CLOCK_TYPE);
+    }
     return
         @timers <= 1 ? undef :
         $timers[1][0]-$now > 0 ? $timers[1][0]-$now :

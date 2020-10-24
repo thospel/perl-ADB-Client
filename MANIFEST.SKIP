@@ -47,5 +47,6 @@
 ^MYMETA\.json$
 /\.access\^$
 ^\.access\^$
+^core$
 
 ^bl.b$

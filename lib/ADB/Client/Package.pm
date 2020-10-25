@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "006";
-$release_time = 1603545780;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "008";
+$release_time = 1603664145;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -26,6 +26,9 @@ $release_time = 1603545780;	## no critic (UselessNoCritic MagicNumbers)
   'README' => {
     '1.000' => '1.000'
   },
+  'lib/ADB/Client.pm' => {
+    '1.000' => '1.000'
+  },
   'lib/ADB/Client/Events.pm' => {
     '1.000' => '1.000'
   },
@@ -35,10 +38,22 @@ $release_time = 1603545780;	## no critic (UselessNoCritic MagicNumbers)
   'lib/ADB/Client/Ref.pm' => {
     '1.000' => '1.000'
   },
+  'lib/ADB/Client/ServerStart.pm' => {
+    '1.000' => '1.000'
+  },
+  'lib/ADB/Client/Starter.pm' => {
+    '1.000' => '1.000'
+  },
   'lib/ADB/Client/Timer.pm' => {
     '1.000' => '1.000'
   },
+  'lib/ADB/Client/Utils.pm' => {
+    '1.000' => '1.000'
+  },
   't/00_load.t' => {
+    '1.000' => '1.000'
+  },
+  'version_check' => {
     '1.000' => '1.000'
   }
 );

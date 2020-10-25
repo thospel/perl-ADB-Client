@@ -5,24 +5,33 @@ use warnings;
 use Carp;
 use Errno qw(EINTR);
 
-use ADB::Client::Timer qw(run_now);
+use ADB::Client::Timer qw(run_now realtime clocktime
+                          $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE);
+use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_level event_init $event_inited)];
+    other => [qw(mainloop unloop loop_level event_init realtime clocktime
+                 $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $IGNORE_PIPE_LOCAL
+                 $EVENT_INITER)];
+
+# We want errors reported at the call site since they are bugs
+# our @CARP_NOT = qw(ADB::Client::Ref);
+
+our $IGNORE_PIPE_LOCAL = 0;
 
 my $read_mask  = "";
 my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
-our $event_inited;
+our $EVENT_INITER = \&event_init;
 
 package ADB::Client;
-our ($debug, $verbose);
+our ($DEBUG, $VERBOSE);
 
 package ADB::Client::Events;
 sub add_read(*$ ) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("add_read $fd") if $debug;
+    caller_info("add_read $fd") if $DEBUG;
     croak "Descriptor $fd already selected for read" if $read_refs{$fd};
     $read_refs{$fd} = shift;
     vec($read_mask, $fd, 1) = 1;
@@ -30,7 +39,7 @@ sub add_read(*$ ) {
 
 sub add_write(*$ ) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("add_write $fd") if $debug;
+    caller_info("add_write $fd") if $DEBUG;
     croak "Descriptor $fd already selected for write" if $write_refs{$fd};
     $write_refs{$fd} = shift;
     vec($write_mask, $fd, 1) = 1;
@@ -38,7 +47,7 @@ sub add_write(*$ ) {
 
 sub add_error(*$ ) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("add_error $fd") if $debug;
+    caller_info("add_error $fd") if $DEBUG;
     croak "Descriptor $fd already selected for error" if $error_refs{$fd};
     $error_refs{$fd} = shift;
     vec($error_mask, $fd, 1) = 1;
@@ -46,7 +55,7 @@ sub add_error(*$ ) {
 
 sub delete_read(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("delete_read $fd") if $debug;
+    caller_info("delete_read $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for read" unless $read_refs{$fd};
     # This strange assign before delete is to poison the reference @work in
     # sub mainloop may still have
@@ -62,7 +71,7 @@ sub delete_read(*) {
 
 sub delete_write(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("delete_write $fd") if $debug;
+    caller_info("delete_write $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for write " unless $write_refs{$fd};
     # This strange assign before delete is to poison the reference @work in
     # sub mainloop may still have
@@ -78,7 +87,7 @@ sub delete_write(*) {
 
 sub delete_error(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
-    ADB::Client::caller_info("delete_error $fd") if $debug;
+    caller_info("delete_error $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for error " unless $error_refs{$fd};
     # This strange assign before delete is to poison the reference @work in
     # sub mainloop may still have
@@ -102,12 +111,15 @@ sub loop_level {
 }
 
 sub mainloop {
-    event_init() if !$inited;
+    $EVENT_INITER->() if $EVENT_INITER;
     push @unlooping, undef;
     eval {
+        info("Entering mainloop") if $VERBOSE;
+        local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
         until ($unlooping[-1]) {
-            my $timeout = run_now() //
-                %read_refs || %write_refs || %error_refs || last;
+            my $timeout = run_now();
+            $timeout = $timeout //
+                (%read_refs || %write_refs || %error_refs || last);
             if ((select(my $r = $read_mask,
                         my $w = $write_mask,
                         my $e = $error_mask, $timeout) || next) > 0) {
@@ -119,7 +131,7 @@ sub mainloop {
                 die "Select failed: $^E";
             }
         }
-        ::info("Exiting mainloop") if $verbose;
+        info("Exiting mainloop") if $VERBOSE;
     };
     my $tmp = pop @unlooping;
     die $@ if $@;
@@ -127,7 +139,10 @@ sub mainloop {
 }
 
 sub event_init {
-    return if $inited;
+    $EVENT_INITER || return;
+
+    $SIG{PIPE} = "IGNORE" if defined $IGNORE_PIPE_LOCAL && !$IGNORE_PIPE_LOCAL;
+
     no warnings "once";
     *IO::Handle::add_read     = \&add_read;
     *IO::Handle::add_write    = \&add_write;
@@ -135,7 +150,7 @@ sub event_init {
     *IO::Handle::delete_read  = \&delete_read;
     *IO::Handle::delete_write = \&delete_write;
     *IO::Handle::delete_error = \&delete_error;
-    $inited = 1;
+    $EVENT_INITER = undef;
 }
 
 1;

@@ -4,9 +4,10 @@ use strict;
 use warnings;
 use Scalar::Util qw(weaken);
 use Carp;
-use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC );
+use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
 
-use Exporter::Tidy other => [qw(run_now)];
+use Exporter::Tidy other => [qw(run_now realtime clocktime
+                                $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE)];
 
 my @timers = (undef);
 # @immediate must be persistent so no timers get lost if a callback dies
@@ -40,7 +41,6 @@ sub new {
 
     $now = clock_gettime($CLOCK_TYPE);
     $time = $time + $now;
-    $time = 0.5+1/3-$time if $time < 1;
     my $i = @timers;
     while ($i > 1 && $time < $timers[$i >> 1][TIME]) {
         weaken($timers[$i] = $timers[$i >> 1]);

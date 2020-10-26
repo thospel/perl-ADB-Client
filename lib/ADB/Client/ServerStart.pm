@@ -13,68 +13,67 @@ use Errno qw(EWOULDBLOCK EINPROGRESS ECONNREFUSED EACCES EPERM ENETUNREACH
              ETIMEDOUT EAGAIN EINTR ECONNRESET);
 
 use ADB::Client::Starter;
-use ADB::Client::Utils qw(dumper addr_info info caller_info $DEBUG);
+use ADB::Client::Utils qw(dumper addr_info info adb_check_response
+                          string_from_value $DEBUG
+                          OKAY FAIL FAILED BAD_ADB ASSERTION);
 
 our @CARP_NOT = qw(ADB::Client::Ref);
-
-use constant {
-    # Code assumes OKAY and FAIL both have length 4, so you can't change this
-    OKAY		=> "OKAY",
-    FAIL		=> "FAIL",
-};
 
 sub new {
     my ($class, $client_ref, $callback, $arguments) = @_;
 
-    my $kill	= delete $arguments->{kill};
-    my $version_min = delete $arguments->{version_min} || 0;
-    my $adb	    = delete $arguments->{adb} // $client_ref->{adb};
-    my $adb_socket  = delete $arguments->{adb_socket} // $client_ref->{adb_socket};
-    my $host	= delete $arguments->{host};
-    my $port	= delete $arguments->{port};
-    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
+    my %context = (
+        client_ref	=> $client_ref,
+        callback	=> $callback,
+        address_i	=> -1,
+    );
+    weaken($context{client_ref});
 
-    $version_min =~ /^[1-9][0-9]*\z|^0\z/ ||
-        croak "Version_min is not a positive integer";
-    $version_min <= 2**16 || croak "Version_min out of range";
-
-    my $addr_info;
-    if (defined $host || defined $port) {
-        $host //= $client_ref->{host};
-        $port //= $client_ref->{port};
-        $addr_info = addr_info($host, $port);
-    } else {
+    my $connect = !$arguments;
+    if ($connect) {
         $client_ref->resolve() if $client_ref->{reresolve};
-        $addr_info = $client_ref->{addr_info};
+        $context{address} = $client_ref->{addr_info};
+        $context{connect_only} = 1;
+    } else {
+        $context{kill}		= delete $arguments->{kill};
+        $context{version_min}	= delete $arguments->{version_min} || 0;
+        $context{adb}		= delete $arguments->{adb} // $client_ref->{adb};
+        $context{adb_socket}	= delete $arguments->{adb_socket} // $client_ref->{adb_socket} // 0;
+        $context{host}		= delete $arguments->{host};
+        $context{port}		= delete $arguments->{port};
+
+        $context{version_min} =~ /^[1-9][0-9]*\z|^0\z/ ||
+            croak "Version_min is not a positive integer";
+        $context{version_min} <= 2**16 || croak "Version_min out of range";
+
+        if (defined $context{host} || defined $context{port}) {
+            $context{host} //= $client_ref->{host};
+            $context{port} //= $client_ref->{port};
+            $context{address} = addr_info($context{host}, $context{port});
+        } else {
+            $client_ref->resolve() if $client_ref->{reresolve};
+            $context{host} = $client_ref->{host};
+            $context{port} = $client_ref->{port};
+            $context{address} = $client_ref->{addr_info};
+        }
+        $context{spawn} = 1;
+        croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
     }
 
-    my $context = bless {
-        client_ref		=> undef,
-        kill		=> $kill,
-        version_min	=> $version_min,
-        callback	=> $callback,
-        host		=> $host,
-        port		=> $port,
-        adb		=> $adb,
-        adb_socket	=> $adb_socket // 0,
-        address		=> $addr_info,
-        address_i	=> -1,
-        connected	=> undef,
-        socket		=> undef,
-        in		=> "",
-        out		=> "",
-        timeout		=> undef,
-        starter		=> undef,
-        first_error	=> undef,
-        spawn		=> 1,
-    }, $class;
-    # dumper($context);
-    weaken($context->{client_ref} = $client_ref);
+    my $context = bless \%context, $class;
     $client_ref->child_add($context);
 
-    $context->{timeout} = ADB::Client::Timer->new(0, sub {$context->_start});
+    $context{timeout} = ADB::Client::Timer->new(0, $connect ? sub { $context->_check } : sub { $context->_start });
 
+    # $context->dump;
     return $context;
+}
+
+sub dump : method {
+    my ($context) = @_;
+
+    local $context->{client_ref} = "--- CLIENT_REF ---";
+    dumper($context);
 }
 
 sub delete {
@@ -87,10 +86,10 @@ sub delete {
         # Connection established
         if ($context->{out} ne "") {
             $context->{socket}->delete_write;
-            $context->{out} = "";
+            $context->{out} = undef;
         }
         $context->{socket}->delete_read;
-        $context->{in} = "";
+        $context->{in} = undef;
         $context->{connected} = undef;
     } elsif (defined $context->{connected}) {
         # Connection in progress
@@ -125,6 +124,7 @@ sub close : method {
 sub _start {
     my ($context) = @_;
 
+    # Filter out only bindable adresses
     my ($first_err, @address);
     for my $address (@{$context->{address}}) {
         eval {
@@ -132,7 +132,7 @@ sub _start {
             $udp->socket($address->{family}, SOCK_DGRAM, IPPROTO_UDP) || next;
             $udp->bind($address->{bind_addr0}) ||
                 die "Could not bind to '$context->{host}' ($address->{bind_ip}): $!\n";
-            $address->{command} = $context->{kill} ?
+            $address->{command} = $context->{kill} && !$context->{version_min} ?
                 "host:kill" : "host:version";
             push @address, $address;
         };
@@ -186,8 +186,10 @@ sub _check {
         $context->_spawn;
     } elsif ($context->{first_error}) {
         $context->close(@{$context->{first_error}});
+    } elsif ($context->{connect_only}) {
+        $context->close("Assertion: No failure reason after connection attempts");
     } else {
-        $context->close("Assertion: No reason after version check after spawn");
+        $context->close("Assertion: No failure reason after version check after spawn");
     }
 }
 
@@ -233,10 +235,21 @@ sub _connected {
 
     my $addr = $context->{address}[$context->{address_i}];
     if ($err == 0) {
+        if ($context->{connect_only}) {
+            # Must make a copy of socket since the delete method will undef it
+            my $socket = $context->{socket};
+            if ($addr->{peer_addr} = $socket->peername) {
+                $context->close(undef, $addr, $socket);
+            } else {
+                $context->close("Assertion: Could not get peername on connected socket: $^E");
+            }
+            return;
+        }
+        $context->{socket}->add_write(sub { $context->_writer });
         $context->{out} = sprintf("%04X%s",
                                   length $addr->{command}, $addr->{command});
         $context->{socket}->add_read (sub { $context->_reader });
-        $context->{socket}->add_write(sub { $context->_writer });
+        $context->{in} = "";
         $context->{timeout} = ADB::Client::Timer->new(
             $context->{client_ref}{transaction_timeout},
             sub { $context->_timeout });
@@ -295,73 +308,53 @@ sub _reader {
     my $rc = sysread($context->{socket}, my $buffer, $context->{client_ref}{block_size});
     if ($rc) {
         $context->{in} .= $buffer;
-        my $len = length($context->{in});
-        my $bad;
-        if ($len - $rc < 4) {
-            # $context->{in} was shorter than 4 bytes
-            my $have = $len < 4 ? $len : 4;
-            my $prefix = substr($context->{in}, 0, $have);
-            if ($prefix ne substr(OKAY, 0, $have) &&
-                    $prefix ne substr(FAIL, 0, $have)) {
-                # Answer is neither OKAY nor FAIL
-                $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} is not adb (bad prefix '$prefix')");
-                return;
+        my ($error, $str) = adb_check_response(
+            $context, $rc,
+            $addr->{command} eq "host:version" ? -1 : 0,
+            # Expect EOF so we will error on spurious bytes
+            1) or return;
+        if ($error) {
+            if ($error == BAD_ADB) {
+                $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} is not adb: $str");
+            } elsif ($error == FAILED) {
+                $context->close("Command '$context->{command}' failed: $str");
+            } elsif ($error == ASSERTION) {
+                $context->close($str || "Assertion: no msg from adb_check_response");
+            } else {
+                $context->close("Assertion: bad error code from adb_check_response");
             }
+            return;
         }
-        if ($len > 4 && $len - $rc < 8) {
-            # $context->{in} was shorter than 8 bytes and is now more than 4 bytes
-            my $code = substr($context->{in}, 4, $len < 8 ? $len-4 : 8-4);
-            if ($code !~ /^[0-9a-fA-F]{1,4}\z/) {
-                $context->close("Service running on $context->{connect_ip} port $addr->{connect_port} is not adb (bad code '$code'");
-                return;
-            }
+        # status is OKAY
+        if ($addr->{command} eq "host:kill") {
+            # Invariant: $context->{in} is empty beacuse we asked
+            # adb_check_response for expect_eof
+            # Put back the response.
+            $context->{in} = OKAY;
+            # Now wait for EOF. Any extra bytes we receive will cause an error
+            return;
         }
-        if ($len >= 8) {
-            my $code = substr($context->{in}, 4, 4);
-            if ($code !~ /^[0-9a-fA-F]{4}\z/) {
-                $context->close("Assertion: adb length code is suddenly '$code'");
-                return;
-            }
-            my $more = hex $code;
-            if ($len >= $more + 8) {
-                if ($len > $more + 8) {
-                    $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but sends unxpected extra bytes");
-                    return;
-                }
-                my $status = substr($context->{in}, 0, 4);
-                my $result = substr($context->{in}, 8, $more);
-                if ($status eq FAIL) {
-                    $context->close("Command '$context->{command}' failed: $result");
-                } elsif ($status eq OKAY) {
-                    $context->close;
-                    if ($addr->{command} eq "host:version") {
-                        if ($result !~ /^[0-9a-fA-F]{4}\z/) {
-                            $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but sends a bad version string");
-                            return;
-                        }
-                        my $version = hex $result;
-                        if ($version >= $context->{version_min}) {
-                            $addr->{version} = $version;
-                            $context->close(undef, $addr);
-                            return;
-                        }
-                        if (!$context->{kill}) {
-                            $addr->{version} = $version;
-                            $context->close("ADB service running on $addr->{connect_ip} port $addr->{connect_port} with version '$version', below the minimum of '$context->{version_min}'");
-                            return;
-                        }
-                        # Reconnect, but now go for the kill
-                        $addr->{command} = "host:kill";
-                        --$context->{address_i};
-                    }
-                    # Continue processing (next kill)
-                    $context->_check_result;
-                } else {
-                    $context->close("Assertion: adb status is suddenly '$status'");
-                }
-                return;
-            }
+        # Here we handle "host:version"
+        if ($str !~ /^[0-9a-fA-F]{4}\z/) {
+            $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but sends a bad version string");
+            return;
         }
+        my $version = hex $str;
+        if ($version >= $context->{version_min}) {
+            $addr->{version} = $version;
+            $context->close(undef, $addr);
+            return;
+        }
+        if (!$context->{kill}) {
+            $addr->{version} = $version;
+            $context->close("ADB service running on $addr->{connect_ip} port $addr->{connect_port} with version '$version', below the minimum of '$context->{version_min}'");
+            return;
+        }
+        $context->close;
+        # Reconnect, but now go for the kill
+        $addr->{command} = "host:kill";
+        --$context->{address_i};
+        $context->_check_result;
     } elsif (!defined $rc && ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK)) {
         return;
     } else {
@@ -370,28 +363,28 @@ sub _reader {
             $context->close("Could not read from socket: $err");
             return;
         }
+        # We should never reach EOF since proper adb responses are already
+        # processed when read. So this is not adb or the response was truncated
+        # *Except* that for "host:kill we manually put back the OKAY response
+        # since we want to wait until the adb server realy closed so we are
+        # sure we can reuse the bind address
         my $len = length $context->{in};
         if ($len < 4) {
             if ($context->{in} eq "") {
                 $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} is not adb (empty response)");
             } else {
-                $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} is not adb (bad prefix '$context->{in}')");
+                my $prefix = string_from_value($context->{in});
+                $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} is not adb: Bad prefix $prefix");
             }
             return;
         }
-        my $status = substr($context->{in}, 0, 4);
-        if ($status eq OKAY) {
-            if ($len == 4 && $addr->{command} eq "host:kill") {
-                $context->close;
-                # Continue processing (next kill)
-                $context->_check_result;
-            } else {
-                $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but OKAY reponse is truncated");
-            }
-        } elsif ($status eq FAIL) {
-            $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but FAIL reponse is truncated");
+        if ($addr->{command} eq "host:kill") {
+            # Continue processing (next kill)
+            $context->close;
+            $context->_check_result;
         } else {
-            $context->close("Assertion: adb status is suddenly '$status'");
+            my $status = string_from_value(substr($context->{in}, 0, 4));
+            $context->close("Service running on $addr->{connect_ip} port $addr->{connect_port} looks like adb but $status reponse is truncated");
         }
     }
 }

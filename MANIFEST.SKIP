@@ -45,6 +45,7 @@
 ^nytprof\.out\.\d+$
 ^MYMETA\.yml$
 ^MYMETA\.json$
+^MYMETA\.json\.lock$
 /\.access\^$
 ^\.access\^$
 ^core$

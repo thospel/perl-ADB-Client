@@ -12,7 +12,22 @@ use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
 use IO::Socket qw();
 
 use Exporter::Tidy
-    other	=>[qw(addr_info info caller_info dumper $DEBUG $VERBOSE)];
+    other	=>[qw(addr_info info caller_info dumper string_from_value
+                      display_string adb_check_response
+                      OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
+                      $DEBUG $VERBOSE)];
+
+use constant {
+    # Code assumes OKAY and FAIL both have length 4, so you can't change this
+    OKAY		=> "OKAY",
+    FAIL		=> "FAIL",
+    DISPLAY_MAX		=> 20,
+    SUCCEEDED		=> 0,	# This one must be the only false value
+    FAILED		=> 1,
+    BAD_ADB		=> 2,
+    ASSERTION		=> 3,
+    INFINITY		=> 9**9**9,
+};
 
 our ($DEBUG, $VERBOSE);
 
@@ -67,6 +82,7 @@ sub addr_info {
         $first_err ||= $@;
     }
     @address || die $first_err || "No usable resolve for ($host, $port)";
+    # dumper(\@address);
     return \@address;
 }
 
@@ -117,6 +133,144 @@ sub dumper {
     local $Data::Dumper::Sortkeys = 1;
     local $Data::Dumper::Useqq	  = 1;
     print STDERR Dumper(@_);
+}
+
+sub string_from_value {
+    local $Data::Dumper::Indent	  = 0;
+    local $Data::Dumper::Sortkeys = 1;
+    local $Data::Dumper::Useqq	  = 1;
+    local $Data::Dumper::Trailingcomma = 0;
+    # local $Data::Dumper::Varname  = "VAR";
+    local $Data::Dumper::Terse = 1;
+    local $Data::Dumper::Quotekeys = 0;
+    local $Data::Dumper::Sparseseen = 1;
+    return Dumper(shift);
+}
+
+sub display_string {
+    my $str = shift // return "undef";
+    return "$str" if ref $str;
+    return string_from_value($str) if length $str <= DISPLAY_MAX;
+    return string_from_value(substr($str, 0, DISPLAY_MAX)) . "...";
+}
+
+# We assume $len_added (number of just added bytes) > 0
+# Also length $data->{in} <= $len_added
+# $data->{in} will be modified for SUCCEEDED and FAILED
+# No modification for other non empty cases (caller should discard $data->{in})
+sub adb_check_response {
+    my ($data, $len_added, $nr, $expect_eof) = @_;
+
+    return ASSERTION, "Assertion: negative input" if $len_added < 0;
+
+    my $len = length $data->{in};
+
+    if ($len - $len_added < 4) {
+        # status bytes were added ($data->{in} was shorter than 4 bytes)
+        my $plen = $len < 4 ? $len : 4;
+        my $prefix = substr($data->{in}, 0, $plen);
+        if ($prefix ne substr(OKAY, 0, $plen) &&
+                $prefix ne substr(FAIL, 0, $plen)) {
+            # Answer will be neither OKAY nor FAIL
+            $prefix = display_string($prefix);
+            return BAD_ADB, "Bad prefix $prefix";
+        }
+    }
+
+    if ($len < 4) {
+        return if $len_added;
+        my $prefix = display_string($data->{in});
+        return BAD_ADB, "Truncated prefix $prefix";
+    }
+    # From here $len >= 4
+
+    my $response = substr($data->{in}, 0, 4);
+    # Invariant: $response = OKAY or $response = FAIL
+    # But only with correct use where you keep calling this function on the
+    # growing string. You CAN call this function out of the blue and break this
+    if ($response ne "OKAY") {
+        $nr = -1;
+        $expect_eof = 1;
+    }
+    if ($nr >= 0) {
+        if ($len - $len_added >= 4+$nr) {
+            $response = display_string($data->{in});
+            return ASSERTION, "Assertion: Should already have processed $response";
+        }
+        if ($len_added == 0) {
+            # Implies $len < 4+$nr
+            if ($nr == INFINITY) {
+                substr($data->{in}, 0, 4, "");
+                my $response = substr($data->{in}, 0, $len-4, "");
+                return SUCCEEDED, $response;
+            } else {
+                $response = display_string($data->{in});
+                return BAD_ADB, "Truncated response $response";
+            }
+        }
+
+        # Still too short
+        $len >= 4+$nr || return;
+
+        if ($len > 4+$nr && $expect_eof) {
+            my $response = display_string($data->{in});
+            return BAD_ADB, "Spurious bytes in response $response";
+        }
+        substr($data->{in}, 0, 4, "");
+        my $response = substr($data->{in}, 0, $nr, "");
+        return SUCCEEDED, $response;
+    }
+
+    if ($len > 4 && $len - $len_added < 8) {
+        # hex length bytes were added
+        # ($data->{in} was shorter than 8 bytes and is now more than 4 bytes)
+        my $code = substr($data->{in}, 4, $len < 8 ? $len-4 : 8-4);
+        if ($code !~ /^[0-9a-fA-F]{1,4}\z/) {
+            $code = display_string($code);
+            return BAD_ADB, "Bad hex length $code";
+        }
+        return BAD_ADB, qq{Truncated hex length "$code"} if $len_added == 0;
+    }
+
+    if ($len < 8) {
+        return if $len_added;
+        my $prefix = display_string($data->{in});
+        return BAD_ADB, "Truncated prefix $prefix";
+    }
+    # from here $len >= 8
+
+    my $code = substr($data->{in}, 4, 4);
+    if ($code !~ /^[0-9a-fA-F]{4}\z/) {
+        $code = display_string($code);
+        return ASSERTION, "Assertion: adb hex length is suddenly $code";
+    }
+    my $more = hex $code;
+    if ($len - $len_added >= 8 + $more) {
+        my $response = display_string($data->{in});
+        return ASSERTION, "Assertion: Should already have processed $response";
+    }
+    if ($len < 8 + $more) {
+        return if $len_added;
+        $len -= 8;
+        return BAD_ADB, "Truncated answer (expected $more, got $len bytes)";
+    }
+    # from here $len >= 8 + $more
+
+    if ($len > 8 + $more && $expect_eof) {
+        my $response = display_string($data->{in});
+        return BAD_ADB, "Spurious bytes in response $response";
+    }
+
+    my $status = substr($data->{in}, 0, 4);
+    $status =
+        $status eq OKAY ? SUCCEEDED :
+        $status eq FAIL ? FAILED :
+        do {
+            $status = display_string($status);
+            return ASSERTION, "Assertion: adb response status is suddenly $status";
+        };
+    substr($data->{in}, 0, 8, "");
+    return $status, substr($data->{in}, 0, $more, "");
 }
 
 1;

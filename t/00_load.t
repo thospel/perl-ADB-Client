@@ -9,7 +9,7 @@ use warnings;
 
 our $VERSION = "1.000";
 
-use Test::More tests => 7;
+use Test::More tests => 9;
 for my $module (qw(ADB::Client::Package)) {
     use_ok($module) || BAIL_OUT("Cannot even use $module");
 }
@@ -17,6 +17,8 @@ my $released = ADB::Client::Package->release_time;
 like($released, qr{^[0-9]+\z}, "release_time is a number");
 is(ADB::Client::Package->release_time, $released,
    "Still the same release time");
+like(ADB::Client::Package->SUB_VERSION, qr{^[0-9]{3}\z}, "SUB_VERSION is a 3 digit number");
+like(ADB::Client::Package->FULL_VERSION, qr{^[1-9][0-9]*(?:\.[0-9]{3}){2}\z}, "FULL_VERSION is a 1.3.3 digit number");
 is(ADB::Client::Package::released("ADB::Client::Package", "1.000"),
    "1.000", "Module released");
 eval { ADB::Client::Package::released("Mumble", "1.000") };

@@ -13,4 +13,5 @@ lib/ADB/Client/Timer.pm
 lib/ADB/Client/Utils.pm
 md5-versions
 t/00_load.t
+t/01_adb_check_response.t
 version_check

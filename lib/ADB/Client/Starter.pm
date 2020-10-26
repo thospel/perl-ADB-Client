@@ -5,7 +5,7 @@ use warnings;
 our $VERSION = '1.000';
 
 use POSIX qw(_exit);
-use Errno qw(EINTR EAGAIN EWOULDBLOCK);
+use Errno qw(EINTR EAGAIN EWOULDBLOCK ESRCH);
 use Carp;
 use IO::Socket qw();
 use Socket qw(AF_INET AF_INET6 SOCK_STREAM IPPROTO_TCP SOL_SOCKET SO_REUSEADDR
@@ -19,12 +19,15 @@ use constant {
 };
 
 use ADB::Client::Timer;
-use ADB::Client::Utils qw(info $DEBUG);
+use ADB::Client::Utils qw(info display_string $DEBUG);
 
 our @CARP_NOT = qw(ADB::Client::ServerStart);
 
 our $BLOCK_SIZE = 65536;
 our $LISTEN	= 128;
+our $SPAWN_TIMEOUT = 2;
+our $TERM_TIMEOUT = 2;
+our $KILL_TIMEOUT = 2;
 
 my (%starters, $ended);
 END {
@@ -37,6 +40,7 @@ sub delete {
     my ($starter, $deleted) = @_;
 
     $deleted || delete $starters{$starter->{key}};
+    $starter->{timeout} = undef;
     if ($starter->{exec_rd}) {
         $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
@@ -167,6 +171,7 @@ sub join {
             rd		=> undef,
             log_rd	=> undef,
             exec_rd	=> undef,
+            timeout	=> undef,
         }, $class;
         $context->{starter} = {
             starter	=> $starter,
@@ -283,11 +288,20 @@ sub _reader_exec {
     } elsif (defined $rc) {
         # EOF
         $starter->{pid_adb} = $1 if $starter->{in} =~ s/^PID=(\d+)\s*\n//a;
+
         if ($starter->{in} ne "") {
             $starter->{in} =~ s/^ERR=//;
             $starter->close("Could not start '$starter->{adb}': $starter->{in}");
             return;
         }
+
+        if (!$starter->{pid_adb}) {
+            $starter->close("Assertion: No pid for forked process");
+            return;
+        }
+
+        $starter->{timeout} = ADB::Client::Timer->new($SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
+
         $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
 
@@ -305,6 +319,28 @@ sub _reader_exec {
     }
 }
 
+sub _timeout {
+    my ($starter, $signal) = @_;
+
+    if (!$signal) {
+        $starter->close("Unresponsive '$starter->{adb}' even with pid $starter->{pid_adb} gone");
+        return;
+    }
+    if (!kill $signal, $starter->{pid_adb}) {
+        if ($! != ESRCH) {
+            $starter->close("Could not kill unresponsive ADB at pid $starter->{pid_adb}: $^E");
+            return;
+        }
+    } else {
+        $starter->{killed} = $signal;
+        if ($signal ne "KILL") {
+            $starter->{timeout} = ADB::Client::Timer->new($TERM_TIMEOUT, sub {$starter->_timeout("KILL")});
+            return;
+        }
+    }
+    $starter->{timeout} = ADB::Client::Timer->new($KILL_TIMEOUT, sub {$starter->_timeout});
+}
+
 sub _reader_log {
     my ($starter) = @_;
 
@@ -316,10 +352,15 @@ sub _reader_log {
         if ($starter->{rd}) {
             $starter->{log_rd}->delete_read;
             $starter->{log_rd} = undef;
-        } elsif ($starter->{in} eq OK) {
-            $starter->close(undef);
         } else {
-            $starter->_nok();
+            if ($starter->{killed}) {
+                $starter->close("Killed unresponsive '$starter->{adb}' with SIG$$starter->{killed}");
+            } elsif ($starter->{in} eq OK) {
+                $starter->close(undef);
+            } else {
+                # _nok always does a close
+                $starter->_nok();
+            }
         }
     } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
     } else {
@@ -340,12 +381,15 @@ sub _reader {
         }
     } elsif (defined $rc) {
         # EOF
-        if ($starter->{in} eq OK) {
+        if ($starter->{killed}) {
+            $starter->close("Killed unresponsive '$starter->{adb}' with SIG$starter->{killed}");
+        } elsif ($starter->{in} eq OK) {
             $starter->close(undef);
         } elsif ($starter->{log_rd}) {
             $starter->{rd}->delete_read;
             $starter->{rd} = undef;
         } else {
+            # _nok always does a close
             $starter->_nok();
         }
     } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
@@ -360,13 +404,13 @@ sub _nok {
 
     if ($starter->{in} eq "") {
         if (my ($line) = $starter->{log_in} =~ /(\S.*\S)\s*\z/) {
-            $starter->close("Started '$starter->{adb}': $line", 1);
+            $starter->close("Could not successfully start '$starter->{adb}': $line", 1);
             return;
         }
-        $starter->close("Started '$starter->{adb}' but got no reply", 1);
+        $starter->close("Could not successfully start '$starter->{adb}': Reason unknown", 1);
     } else {
-        $starter->{in} =~ s/\n/\\n/;
-        $starter->close("Started '$starter->{adb}' but got unexpected reply '$starter->{in}'");
+        my $response = display_string($starter->{in});
+        $starter->close("Could not successfully start '$starter->{adb}': Unexpected response $response)");
     }
 }
 

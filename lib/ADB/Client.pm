@@ -8,12 +8,15 @@ use Carp;
 
 use ADB::Client::Ref qw(addr_info mainloop unloop loop_level
                         info caller_info dumper realtime clocktime
+                        COMMAND_NAME @SIMPLE_COMMANDS
                         $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                         $CALLBACK_DEFAULT
                         $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE);
+use ADB::Client::Utils qw(string_from_value);
+
 use Exporter::Tidy
-    other	=>[qw(addr_info mainloop unloop loop_level dumper
-                      info caller_info realtime clocktime
+    other	=>[qw(addr_info mainloop unloop loop_level
+                      realtime clocktime string_from_value
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                       $CALLBACK_DEFAULT
                       $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE)];
@@ -37,11 +40,12 @@ sub DESTROY {
     ${shift()}->delete;
 }
 
+
 for my $name (qw(server_start)) {
     my %replace = (
-        LINE	=> __LINE__+6,
-        FILE	=> __FILE__,
         NAME	=> $name,
+        FILE	=> __FILE__,
+        LINE	=> __LINE__+4,
     );
     my $code = '
 #line LINE "FILE"
@@ -52,17 +56,65 @@ sub NAME {
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
         my $loop_level = loop_level();
-        $client_ref->NAME($client_ref->callback_blocking($loop_level), \%arguments);
+        $client_ref->NAME(\%arguments, $client_ref->callback_blocking($loop_level));
         return $client_ref->wait($loop_level);
     }
-    $client_ref->NAME(delete $arguments{callback} || $CALLBACK_DEFAULT, \%arguments);
+    $client_ref->NAME(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT);
     return;
 }
 1;
 ';
     $code =~ s/\b(NAME|LINE|FILE)\b/$replace{$1}/g;
+    # print STDERR $code;
     eval $code || die $@;
 }
+
+sub add_command {
+    my ($class, $command) = @_;
+
+    push @SIMPLE_COMMANDS, $command;
+    eval { _add_command($#SIMPLE_COMMANDS) };
+    if ($@) {
+        pop @SIMPLE_COMMANDS;
+        die $@;
+    }
+}
+
+sub _add_command {
+    my ($index) = @_;
+
+    my $command = @SIMPLE_COMMANDS[$index] ||
+        die "Assertion: No command at index '$index'";
+    my $name = $command->[COMMAND_NAME] || die "Assertion: No COMMAND_NAME";
+    my %replace = (
+        NAME	=> $name,
+        INDEX	=> $index,
+        FILE	=> __FILE__,
+        LINE	=> __LINE__+4,
+    );
+    my $code = '
+#line LINE "FILE"
+sub NAME {
+    @_ % 2 == 1 || croak "Odd number of arguments";
+    my $client_ref = $ {shift()};
+    my %arguments = @_;
+    if (delete $arguments{blocking} // $client_ref->{blocking}) {
+        # blocking
+        my $loop_level = loop_level();
+        $client_ref->command_simple(\%arguments, INDEX, $client_ref->callback_blocking($loop_level));
+        return $client_ref->wait($loop_level);
+    }
+    $client_ref->command_simple(\%arguments, INDEX, delete $arguments{callback} || $CALLBACK_DEFAULT);
+    return;
+}
+1;
+';
+    $code =~ s/\b(NAME|LINE|FILE|INDEX)\b/$replace{$1}/g;
+    # print STDERR $code;
+    eval $code || die $@;
+}
+
+_add_command($_) for 0..$#SIMPLE_COMMANDS;
 
 1;
 __END__

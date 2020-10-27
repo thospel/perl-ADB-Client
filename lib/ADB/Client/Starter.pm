@@ -25,7 +25,7 @@ our @CARP_NOT = qw(ADB::Client::ServerStart);
 
 our $BLOCK_SIZE = 65536;
 our $LISTEN	= 128;
-our $SPAWN_TIMEOUT = 2;
+our $SPAWN_TIMEOUT = 10;
 our $TERM_TIMEOUT = 2;
 our $KILL_TIMEOUT = 2;
 

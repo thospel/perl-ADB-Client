@@ -14,7 +14,7 @@ use ADB::Client::Events qw(mainloop unloop loop_level realtime clocktime
 use ADB::Client::ServerStart;
 use ADB::Client::Utils qw(addr_info info caller_info dumper adb_check_response
                           display_string
-                          FAILED BAD_ADB ASSERTION
+                          FAILED BAD_ADB ASSERTION INFINITY
                           $DEBUG $VERBOSE);
 
 use Exporter::Tidy
@@ -31,6 +31,7 @@ use constant {
     COMMAND	=> 1,
     NR_RESULTS	=> 2,
     EXPECT_EOF	=> 3,
+    PROCESS	=> 4,
 
     # Index in commands element
     COMMAND_REF	=> 0,
@@ -50,18 +51,20 @@ our $TRANSACTION_TIMEOUT = 10;
 our $CONNECT_TIMEOUT = 10;
 
 our @SIMPLE_COMMANDS = (
-    # command, number of results, expect close, callback
+    # command, number of results, expect close
     # See the index in command array constants
-    ["version"		=> "host:version", -1, 1],
+    ["version"		=> "host:version", -1, 1,   \&process_version],
     ["kill"		=> "host:kill", 0, 1],
-    ["features"		=> "host:features", -1, 1],
-    ["remount"		=> "remount:", 9**9**9, 1],
-    ["devices"		=> "host:devices", -1, 1],
-    ["devices_long"	=> "host:devices-l", -1, 1],
+    ["features"		=> "host:features", -1, 1,  \&process_features],
+    ["remount"		=> "remount:", INFINITY, 1,  \&process_remount],
+    ["devices"		=> "host:devices", -1, 1,   \&process_devices],
+    ["devices_long"	=> "host:devices-l", -1, 1, \&process_devices],
     ["transport_usb"	=> "host:transport-usb", 0, 0],
     ["transport_tcp"	=> "host:transport-local", 0, 0],
     ["transport_any"	=> "host:transport-any", 0, 0],
-    ["tport_any"	=> "host:tport:any", 8, 0],
+    ["tport_any"	=> "host:tport:any", 8, 0, \&process_tport],
+    ["tport_usb"	=> "host:tport:usb", 8, 0, \&process_tport],
+    ["tport_tcp"	=> "host:tport:tcp", 8, 0, \&process_tport],
 );
 
 # Notice that the client argument isn't yet blessed at this point
@@ -101,6 +104,8 @@ sub new {
         in		=> "",
         out		=> "",
         # Invariant: !@commands => !active (or active => @commands)
+        #            !active => !reading (or reading => active)
+        #            active && socket => reading
         active		=> undef,
         commands	=> [],
         children	=> {},
@@ -157,7 +162,8 @@ sub wait : method {
     mainloop();
     my $result = delete $client_ref->{result}[$loop_level] //
         die "Assertion: Exit mainloop without setting result";
-    croak $result->[0] if $result->[0];
+    # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
+    $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
     wantarray || return $result->[1];
     # remove the flag indicating success
     shift @$result;
@@ -182,7 +188,7 @@ sub command_simple {
 
     my $command = $SIMPLE_COMMANDS[$index] ||
         croak "No command at index '$index'";
-    $client_ref->activate if 1 == push @{$client_ref->{commands}}, [$command, $callback];
+    $client_ref->activate(1) if 1 == push @{$client_ref->{commands}}, [$command, $callback];
 }
 
 sub close : method {
@@ -190,9 +196,10 @@ sub close : method {
 
     if ($client_ref->{socket}) {
         $client_ref->{out} eq "" || $client_ref->{socket}->delete_write;
-        $client_ref->{socket}->delete_read;
+        $client_ref->{socket}->delete_read if $client_ref->{active};
         $client_ref->{socket} = undef;
     }
+    $client_ref->{active} = 0;
     $client_ref->{expect_eof} = undef;
 }
 
@@ -200,7 +207,6 @@ sub error {
     my $client_ref = shift;
 
     $client_ref->close();
-    $client_ref->{active} = 0;
     my $command = shift @{$client_ref->{commands}} //
         die "Assertion: error without command";
     $command->[CALLBACK]->($client_ref->{client}, @_);
@@ -212,17 +218,38 @@ sub success {
     my $command = shift @{$client_ref->{commands}};
     if (!$command) {
         $client_ref->close;
-        $client_ref->{active} = 0;
         confess("Assertion: success without command");
     }
-    $client_ref->{active} = 0 if !@{$client_ref->{commands}};
-    if (@{$client_ref->{commands}}) {
-        $client_ref->_next_command_start;
-    } else {
-        # No more work pending
+    if ($client_ref->{active}) {
+        $client_ref->{socket}->delete_read if $client_ref->{socket};
         $client_ref->{active} = 0;
     }
-    $command->[CALLBACK]->($client_ref->{client}, undef, $str);
+
+    my $command_ref = $command->[COMMAND_REF];
+    if ($command_ref->[PROCESS]) {
+        # $str as first arguments since the others will typically be ignored
+        eval { $str = $command_ref->[PROCESS]->($str, $command_ref->[COMMAND], $client_ref) };
+        if ($@) {
+            my $err = $@;
+            my $str = display_string($str);
+            # Cannot call error since we already shifted commands
+            $client_ref->close;
+            $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
+            return;
+        }
+        if (ref $str ne "ARRAY") {
+            # Cannot call error since we already shifted commands
+            $client_ref->close;
+            if (ref $str eq "") {
+                $command->[CALLBACK]->($client_ref->{client}, $str);
+            } else {
+                $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output: Not an ARRAY reference");
+            }
+            return;
+        }
+    }
+    $command->[CALLBACK]->($client_ref->{client}, undef, ref $str ? @$str : $str);
+    $client_ref->activate;
 }
 
 sub first_command {
@@ -231,23 +258,39 @@ sub first_command {
     my $command = $client_ref->{commands}[0];
     if (!$command) {
         $client_ref->close;
-        $client_ref->{active} = 0;
         die "Assertion: _write_command without commands";
     }
     return $command->[COMMAND_REF];
 }
 
-sub _next_command_start {
-    my ($client_ref) = @_;
+sub activate {
+    my ($client_ref, $die_ok) = @_;
+
+    return if $client_ref->{active} || !@{$client_ref->{commands}};
 
     my $command_ref = $client_ref->first_command;
     if ($client_ref->{out} ne "") {
         my $response = display_string($client_ref->{out});
-        $client_ref->error("Assertion: $response still pending when starting $command_ref->[COMMAND]");
+        my $msg = "Assertion: $response to ADB still pending when starting $command_ref->[COMMAND]";
+        die $msg if $die_ok;
+        $client_ref->error($msg);
         return;
     }
-    $client_ref->{out} = sprintf("%04X", length $command_ref->[COMMAND]) . $command_ref->[COMMAND];
-    $client_ref->{socket}->add_write(sub { $client_ref->_writer });
+    if ($client_ref->{in} ne "") {
+        my $response = display_string($client_ref->{in});
+        my $msg = "Assertion: $response from ADB still pending when starting $command_ref->[COMMAND]";
+        die $msg if $die_ok;
+        $client_ref->error($msg);
+        return;
+    }
+    if ($client_ref->{socket}) {
+        $client_ref->{out} = sprintf("%04X", length $command_ref->[COMMAND]) . $command_ref->[COMMAND];
+        $client_ref->{socket}->add_write(sub { $client_ref->_writer });
+        $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+    } else {
+        ADB::Client::ServerStart->new($client_ref, \&_connect_result);
+    }
+    $client_ref->{active} = 1;
 }
 
 sub _connect_result {
@@ -261,9 +304,11 @@ sub _connect_result {
     shift;
     $client_ref->{socket_info} = shift;
     $client_ref->{socket}      = shift;
-    $client_ref->_next_command_start;
     $client_ref->{in} = "";
-    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+    if ($client_ref->{active}) {
+        $client_ref->{active} = 0;
+        $client_ref->activate;
+    }
 }
 
 sub _writer {
@@ -306,7 +351,6 @@ sub _reader {
                 if (!$command) {
                     # Logic for expect_eof should imply this is never reached
                     $client_ref->close();
-                    $client_ref->{active} = 0;
                     die "Assertion: expect_eof without command";
                 }
                 if ($client_ref->{in} ne "") {
@@ -317,15 +361,7 @@ sub _reader {
                 }
                 my $str = $client_ref->{expect_eof};
                 $client_ref->close();
-                eval { $client_ref->success($$str) };
-                my $err = $@;
-                shift @{$client_ref->{commands}};
-                if (@{$client_ref->{commands}}) {
-                    ADB::Client::ServerStart->new($client_ref, \&_connect_result);
-                } else {
-                    $client_ref->{active} = 0;
-                }
-                die $err if $@;
+                $client_ref->success($$str);
             } elsif ($command) {
                 my $command_ref = $command->[COMMAND_REF];
                 my ($error, $str) = adb_check_response($client_ref, 0, $command_ref->[NR_RESULTS], 0);
@@ -387,16 +423,67 @@ sub _reader {
     $client_ref->success($str);
 }
 
-sub activate {
-    my ($client_ref) = @_;
+sub process_version {
+    my ($version) = @_;
 
-    croak "Already active" if $client_ref->{active};
-    if ($client_ref->{socket}) {
-        $client_ref->_next_command_start;
-    } else {
-        ADB::Client::ServerStart->new($client_ref, \&_connect_result);
+    $version =~ m{^[0-9a-fA-F]{4}\z} || die "Invalid version '$version'";
+    return [hex $version];
+}
+
+sub process_remount {
+    my ($str) = @_;
+
+    return [$str] if $str =~ s{\s*^remount succeeded\s*\z}{}m;
+    return $str if $str =~ s{\.?\s*^remount failed\s*\z}{}m;
+    die "Cannot decode remount result";
+}
+
+sub process_features {
+    my ($features) = @_;
+
+    my @features = split /,/, $features;
+    my %features;
+    s/\s+\z//, s/^\s+//, ++$features{$_} for @features;
+    return [\%features, \@features, $features];
+}
+
+sub process_devices {
+    my ($devices, $command) = @_;
+
+    my $long = $command eq "host:devices-l";
+    my (@devices, %devices);
+  DEVICE:
+    while ($devices =~ s{^(\S+)\s+(device| no device|offline)(?: (\S.*\S))?\n}{}) {
+        my ($serial, $state, $description) = ($1, $2, $3);
+        die "Multiple devices with serial number $serial" if $devices{$serial};
+        push @devices, $serial;
+        my %description = (state => $state);
+        if ($long) {
+            my @description = split(" ", $description);
+            for my $description (@description) {
+                my ($key, $value) = $description =~ m{^([^:]+):(.*)} or last DEVICE;
+                last if exists $description{$key};
+                $description{$key} = $value;
+            }
+        } elsif (defined $description) {
+            last;
+        }
+        $devices{$serial} = \%description;
     }
-    $client_ref->{active} = 1;
+    if ($devices ne "") {
+        # Get first line
+        $devices =~ s{\n.*}{}s;
+        $devices = display_string($devices);
+        die "Could not parse $devices";
+    }
+    return [\%devices, \@devices, shift];
+}
+
+sub process_tport {
+    my ($id) = @_;
+
+    # Just in case
+    return [unpack("q", $id)];
 }
 
 1;

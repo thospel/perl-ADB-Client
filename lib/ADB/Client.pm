@@ -83,7 +83,7 @@ sub add_command {
 sub _add_command {
     my ($index) = @_;
 
-    my $command = @SIMPLE_COMMANDS[$index] ||
+    my $command = $SIMPLE_COMMANDS[$index] ||
         die "Assertion: No command at index '$index'";
     my $name = $command->[COMMAND_NAME] || die "Assertion: No COMMAND_NAME";
     my %replace = (

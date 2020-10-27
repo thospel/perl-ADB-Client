@@ -184,17 +184,17 @@ sub adb_check_response {
     }
     # From here $len >= 4
 
-    my $response = substr($data->{in}, 0, 4);
+    my $status = substr($data->{in}, 0, 4);
     # Invariant: $response = OKAY or $response = FAIL
     # But only with correct use where you keep calling this function on the
     # growing string. You CAN call this function out of the blue and break this
-    if ($response ne "OKAY") {
+    if ($status ne OKAY) {
         $nr = -1;
         $expect_eof = 1;
     }
     if ($nr >= 0) {
         if ($len - $len_added >= 4+$nr) {
-            $response = display_string($data->{in});
+            my $response = display_string($data->{in});
             return ASSERTION, "Assertion: Should already have processed $response";
         }
         if ($len_added == 0) {
@@ -202,9 +202,10 @@ sub adb_check_response {
             if ($nr == INFINITY) {
                 substr($data->{in}, 0, 4, "");
                 my $response = substr($data->{in}, 0, $len-4, "");
+                utf8::decode($response);
                 return SUCCEEDED, $response;
             } else {
-                $response = display_string($data->{in});
+                my $response = display_string($data->{in});
                 return BAD_ADB, "Truncated response $response";
             }
         }
@@ -218,6 +219,7 @@ sub adb_check_response {
         }
         substr($data->{in}, 0, 4, "");
         my $response = substr($data->{in}, 0, $nr, "");
+        utf8::decode($response);
         return SUCCEEDED, $response;
     }
 
@@ -261,7 +263,6 @@ sub adb_check_response {
         return BAD_ADB, "Spurious bytes in response $response";
     }
 
-    my $status = substr($data->{in}, 0, 4);
     $status =
         $status eq OKAY ? SUCCEEDED :
         $status eq FAIL ? FAILED :
@@ -270,7 +271,9 @@ sub adb_check_response {
             return ASSERTION, "Assertion: adb response status is suddenly $status";
         };
     substr($data->{in}, 0, 8, "");
-    return $status, substr($data->{in}, 0, $more, "");
+    my $response = substr($data->{in}, 0, $more, "");
+    utf8::decode($response);
+    return $status, $response;
 }
 
 1;

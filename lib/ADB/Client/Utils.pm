@@ -15,13 +15,14 @@ use Exporter::Tidy
     other	=>[qw(addr_info info caller_info dumper string_from_value
                       display_string adb_check_response
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
+                      DISPLAY_MAX
                       $DEBUG $VERBOSE)];
 
 use constant {
     # Code assumes OKAY and FAIL both have length 4, so you can't change this
     OKAY		=> "OKAY",
     FAIL		=> "FAIL",
-    DISPLAY_MAX		=> 20,
+    DISPLAY_MAX		=> 60,
     SUCCEEDED		=> 0,	# This one must be the only false value
     FAILED		=> 1,
     BAD_ADB		=> 2,

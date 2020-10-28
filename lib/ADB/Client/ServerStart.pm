@@ -2,6 +2,9 @@ package ADB::Client::ServerStart;
 use strict;
 use warnings;
 
+# Note: kill and version have their own implementation but should really be
+# using the logic from ADB::Client::Ref
+
 our $VERSION = '1.000';
 
 use Carp;

@@ -9,7 +9,7 @@ use Scalar::Util qw(weaken refaddr);
 # use IO::Socket::IP;
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET);
 
-use ADB::Client::Events qw(mainloop unloop loop_level realtime clocktime
+use ADB::Client::Events qw(mainloop unloop loop_levels realtime clocktime
                            $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE);
 use ADB::Client::ServerStart;
 use ADB::Client::Utils qw(addr_info info caller_info dumper adb_check_response
@@ -18,9 +18,9 @@ use ADB::Client::Utils qw(addr_info info caller_info dumper adb_check_response
                           $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other	=>[qw(addr_info mainloop unloop loop_level dumper
+    other	=>[qw(addr_info mainloop unloop loop_levels dumper
                       info caller_info realtime clocktime
-                      COMMAND_NAME @SIMPLE_COMMANDS
+                      COMMAND_NAME COMMAND @SIMPLE_COMMANDS
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                       $CALLBACK_DEFAULT
                       $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
@@ -36,6 +36,9 @@ use constant {
     # Index in commands element
     COMMAND_REF	=> 0,
     CALLBACK	=> 1,
+    ARGUMENTS	=> 2,
+
+    MARKER	=> "",
 };
 
 our @CARP_NOT = qw(ADB::Client);
@@ -51,20 +54,19 @@ our $TRANSACTION_TIMEOUT = 10;
 our $CONNECT_TIMEOUT = 10;
 
 our @SIMPLE_COMMANDS = (
-    # command, number of results, expect close
+    # command, number of result bytes, expect close
     # See the index in command array constants
+    ["marker"		=> MARKER],
     ["version"		=> "host:version", -1, 1,   \&process_version],
     ["kill"		=> "host:kill", 0, 1],
     ["features"		=> "host:features", -1, 1,  \&process_features],
     ["remount"		=> "remount:", INFINITY, 1,  \&process_remount],
     ["devices"		=> "host:devices", -1, 1,   \&process_devices],
     ["devices_long"	=> "host:devices-l", -1, 1, \&process_devices],
-    ["transport_usb"	=> "host:transport-usb", 0, 0],
-    ["transport_tcp"	=> "host:transport-local", 0, 0],
-    ["transport_any"	=> "host:transport-any", 0, 0],
-    ["tport_any"	=> "host:tport:any", 8, 0, \&process_tport],
-    ["tport_usb"	=> "host:tport:usb", 8, 0, \&process_tport],
-    ["tport_tcp"	=> "host:tport:tcp", 8, 0, \&process_tport],
+    ["transport"	=> "host:transport-%s", 0, 0],
+    ["tport"		=> "host:tport:%s", 8, 0, \&process_tport],
+    ["unroot"		=> "unroot:", INFINITY, 1],
+    ["root"		=> "root:", INFINITY, 1],
 );
 
 # Notice that the client argument isn't yet blessed at this point
@@ -96,6 +98,7 @@ sub new {
         addr_info	=> undef,
         connect_timeout		=> $connect_timeout,
         transaction_timeout	=> $transaction_timeout,
+        timeout		=> undef,
         adb		=> $adb,
         adb_socket	=> $adb_socket,
         block_size	=> $block_size,
@@ -145,22 +148,26 @@ sub callback_default {
     die $_[1] if $_[1];
 }
 
-sub callback_blocking {
-    my ($client_ref, $loop_level) = @_;
+sub connected {
+    return shift->{socket} ? 1 : 0;
+}
 
-    $client_ref->{result}[$loop_level] = undef;
+sub callback_blocking {
+    my ($client_ref, $loop_levels) = @_;
+
+    $client_ref->{result}[$loop_levels] = undef;
     return sub {
         my $client_ref = $ {shift()};
-        $client_ref->{result}[$loop_level] = \@_;
-        unloop($loop_level);
+        $client_ref->{result}[$loop_levels] = \@_;
+        unloop($loop_levels);
     };
 }
 
 sub wait : method {
-    my ($client_ref, $loop_level) = @_;
+    my ($client_ref, $loop_levels) = @_;
 
     mainloop();
-    my $result = delete $client_ref->{result}[$loop_level] //
+    my $result = delete $client_ref->{result}[$loop_levels] //
         die "Assertion: Exit mainloop without setting result";
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
@@ -182,25 +189,30 @@ sub server_start {
 }
 
 sub command_simple {
-    my ($client_ref, $arguments, $index, $callback) = @_;
+    my ($client_ref, $arguments, $index, $callback, $args) = @_;
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
     my $command = $SIMPLE_COMMANDS[$index] ||
         croak "No command at index '$index'";
-    $client_ref->activate(1) if 1 == push @{$client_ref->{commands}}, [$command, $callback];
+    $client_ref->activate(1) if 1 == push @{$client_ref->{commands}}, [$command, $callback, $args];
 }
 
 sub close : method {
     my ($client_ref) = @_;
 
     if ($client_ref->{socket}) {
-        $client_ref->{out} eq "" || $client_ref->{socket}->delete_write;
+        if ($client_ref->{out} ne "") {
+            $client_ref->{socket}->delete_write;
+            $client_ref->{out} = "";
+        }
         $client_ref->{socket}->delete_read if $client_ref->{active};
+        $client_ref->{in} = "";
         $client_ref->{socket} = undef;
     }
     $client_ref->{active} = 0;
     $client_ref->{expect_eof} = undef;
+    $client_ref->{timeout} = undef;
 }
 
 sub error {
@@ -213,8 +225,9 @@ sub error {
 }
 
 sub success {
-    my ($client_ref, $str) = @_;
+    my $client_ref = shift;
 
+    my $result = \@_;
     my $command = shift @{$client_ref->{commands}};
     if (!$command) {
         $client_ref->close;
@@ -222,33 +235,35 @@ sub success {
     }
     if ($client_ref->{active}) {
         $client_ref->{socket}->delete_read if $client_ref->{socket};
+        $client_ref->{timeout} = undef;
         $client_ref->{active} = 0;
     }
 
     my $command_ref = $command->[COMMAND_REF];
     if ($command_ref->[PROCESS]) {
-        # $str as first arguments since the others will typically be ignored
-        eval { $str = $command_ref->[PROCESS]->($str, $command_ref->[COMMAND], $client_ref) };
+        # $_[0] as first arguments since the others will typically be ignored
+        $result = eval { $command_ref->[PROCESS]->($_[0], $command_ref->[COMMAND], $client_ref, $result) };
         if ($@) {
             my $err = $@;
-            my $str = display_string($str);
+            my $str = display_string($_[0]);
             # Cannot call error since we already shifted commands
             $client_ref->close;
             $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
             return;
         }
-        if (ref $str ne "ARRAY") {
+        if (ref $result ne "ARRAY") {
             # Cannot call error since we already shifted commands
             $client_ref->close;
-            if (ref $str eq "") {
-                $command->[CALLBACK]->($client_ref->{client}, $str);
+            if (ref $result eq "") {
+                $command->[CALLBACK]->($client_ref->{client}, $result);
             } else {
-                $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output: Not an ARRAY reference");
+                $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
             }
             return;
         }
+        @_ = @$result;
     }
-    $command->[CALLBACK]->($client_ref->{client}, undef, ref $str ? @$str : $str);
+    $command->[CALLBACK]->($client_ref->{client}, undef, @$result);
     $client_ref->activate;
 }
 
@@ -264,7 +279,7 @@ sub first_command {
 }
 
 sub activate {
-    my ($client_ref, $die_ok) = @_;
+    my ($client_ref, $top_level) = @_;
 
     return if $client_ref->{active} || !@{$client_ref->{commands}};
 
@@ -272,25 +287,56 @@ sub activate {
     if ($client_ref->{out} ne "") {
         my $response = display_string($client_ref->{out});
         my $msg = "Assertion: $response to ADB still pending when starting $command_ref->[COMMAND]";
-        die $msg if $die_ok;
+        die $msg if $top_level;
         $client_ref->error($msg);
         return;
     }
     if ($client_ref->{in} ne "") {
         my $response = display_string($client_ref->{in});
         my $msg = "Assertion: $response from ADB still pending when starting $command_ref->[COMMAND]";
-        die $msg if $die_ok;
+        die $msg if $top_level;
         $client_ref->error($msg);
         return;
     }
-    if ($client_ref->{socket}) {
-        $client_ref->{out} = sprintf("%04X", length $command_ref->[COMMAND]) . $command_ref->[COMMAND];
+    if ($command_ref->[COMMAND] eq MARKER) {
+        # Marker
+        info("Sending MARKER (not)") if $DEBUG;
+        if (!$top_level) {
+            if (my $code = $client_ref->can("success")) {
+                # This does not change caller @_
+                @_ = ($client_ref, undef);
+                info("GOTO");
+                goto &$code;
+            }
+        }
+        $client_ref->{timeout} = ADB::Client::Timer->new(0, sub { $client_ref->success(undef) });
+        # We don't expect any read here, but it's needed to maintain our
+        # invariant active & socket => reader (otherwise any ->close will fail)
+        $client_ref->{socket}->add_read(sub { $client_ref->_reader }) if $client_ref->{socket};
+    } elsif ($client_ref->{socket}) {
+        my $command = sprintf($command_ref->[COMMAND],
+                              @{$client_ref->{commands}[0][ARGUMENTS]});
+        if (length $command >= 2**16) {
+            my $msg = sprintf("Assertion: Command %s is too long", display_string($command));
+            die $msg if $top_level;
+            $client_ref->error($msg);
+            return;
+        }
+        info("Sending to ADB: %s", display_string($command)) if $DEBUG;
+        $client_ref->{out} = sprintf("%04X", length $command) . $command;
         $client_ref->{socket}->add_write(sub { $client_ref->_writer });
         $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+        $client_ref->{timeout} = ADB::Client::Timer->new($client_ref->{transaction_timeout}, sub { $client_ref->_timed_out });
     } else {
         ADB::Client::ServerStart->new($client_ref, \&_connect_result);
     }
     $client_ref->{active} = 1;
+}
+
+sub _timed_out {
+    my ($client_ref) = @_;
+
+    $client_ref->error("Operation timed out");
 }
 
 sub _connect_result {
@@ -426,15 +472,19 @@ sub _reader {
 sub process_version {
     my ($version) = @_;
 
-    $version =~ m{^[0-9a-fA-F]{4}\z} || die "Invalid version '$version'";
+    # Caller will already construct an error message using the input string
+    $version =~ m{^[0-9a-fA-F]{4}\z} || die "Not a 4 digit hex number";
     return [hex $version];
 }
 
 sub process_remount {
     my ($str) = @_;
 
+    $str =~ s/\.?\s*\z//;
     return [$str] if $str =~ s{\s*^remount succeeded\s*\z}{}m;
     return $str if $str =~ s{\.?\s*^remount failed\s*\z}{}m;
+    return $str if $str =~ /Not running as root/i;
+    # Caller will already construct an error message using the input string
     die "Cannot decode remount result";
 }
 
@@ -457,18 +507,19 @@ sub process_devices {
         my ($serial, $state, $description) = ($1, $2, $3);
         die "Multiple devices with serial number $serial" if $devices{$serial};
         push @devices, $serial;
-        my %description = (state => $state);
         if ($long) {
+            my %description = (state => $state);
             my @description = split(" ", $description);
             for my $description (@description) {
                 my ($key, $value) = $description =~ m{^([^:]+):(.*)} or last DEVICE;
                 last if exists $description{$key};
                 $description{$key} = $value;
             }
-        } elsif (defined $description) {
-            last;
+            $devices{$serial} = \%description;
+        } else {
+            last if defined $description;
+            $devices{$serial} = $state;
         }
-        $devices{$serial} = \%description;
     }
     if ($devices ne "") {
         # Get first line

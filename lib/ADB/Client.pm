@@ -6,16 +6,16 @@ our $VERSION = '1.000';
 
 use Carp;
 
-use ADB::Client::Ref qw(addr_info mainloop unloop loop_level
+use ADB::Client::Ref qw(addr_info mainloop unloop loop_levels
                         info caller_info dumper realtime clocktime
-                        COMMAND_NAME @SIMPLE_COMMANDS
+                        COMMAND_NAME COMMAND @SIMPLE_COMMANDS
                         $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                         $CALLBACK_DEFAULT
                         $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE);
 use ADB::Client::Utils qw(string_from_value);
 
 use Exporter::Tidy
-    other	=>[qw(addr_info mainloop unloop loop_level
+    other	=>[qw(addr_info mainloop unloop loop_levels
                       realtime clocktime string_from_value
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                       $CALLBACK_DEFAULT
@@ -40,6 +40,33 @@ sub DESTROY {
     ${shift()}->delete;
 }
 
+sub client_ref {
+    return ${shift()};
+}
+
+sub activate {
+    shift->client_ref->activate(1);
+}
+
+# Simply forward command
+for my $name (qw(connected)) {
+    my %replace = (
+        NAME	=> $name,
+        FILE	=> __FILE__,
+        LINE	=> __LINE__+4,
+    );
+    my $code = '
+#line LINE "FILE"
+sub NAME {
+    my $client_ref = $ {shift()};
+    return $client_ref->NAME(@_);
+}
+1;
+';
+    $code =~ s/\b(NAME|LINE|FILE)\b/$replace{$1}/g;
+    # print STDERR $code;
+    eval $code || die $@;
+}
 
 for my $name (qw(server_start)) {
     my %replace = (
@@ -55,9 +82,9 @@ sub NAME {
     my %arguments = @_;
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
-        my $loop_level = loop_level();
-        $client_ref->NAME(\%arguments, $client_ref->callback_blocking($loop_level));
-        return $client_ref->wait($loop_level);
+        my $loop_levels = loop_levels();
+        $client_ref->NAME(\%arguments, $client_ref->callback_blocking($loop_levels));
+        return $client_ref->wait($loop_levels);
     }
     $client_ref->NAME(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT);
     return;
@@ -86,35 +113,80 @@ sub _add_command {
     my $command = $SIMPLE_COMMANDS[$index] ||
         die "Assertion: No command at index '$index'";
     my $name = $command->[COMMAND_NAME] || die "Assertion: No COMMAND_NAME";
+    my $nr_vars = $command->[COMMAND] =~ tr/%//;
     my %replace = (
         NAME	=> $name,
         INDEX	=> $index,
+        NR_VARS	=> $nr_vars,
         FILE	=> __FILE__,
         LINE	=> __LINE__+4,
     );
     my $code = '
 #line LINE "FILE"
 sub NAME {
-    @_ % 2 == 1 || croak "Odd number of arguments";
+    @_ > NR_VARS || croak "Too few arguments";
+    @_ % 2 != NR_VARS % 2 || croak "Odd number of arguments";
     my $client_ref = $ {shift()};
+    my @vars = NR_VARS ? splice(@_, 0, NR_VARS) : ();
     my %arguments = @_;
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
-        my $loop_level = loop_level();
-        $client_ref->command_simple(\%arguments, INDEX, $client_ref->callback_blocking($loop_level));
-        return $client_ref->wait($loop_level);
+        my $loop_levels = loop_levels();
+        $client_ref->command_simple(\%arguments, INDEX, $client_ref->callback_blocking($loop_levels), \@vars);
+        return $client_ref->wait($loop_levels);
     }
-    $client_ref->command_simple(\%arguments, INDEX, delete $arguments{callback} || $CALLBACK_DEFAULT);
+    $client_ref->command_simple(\%arguments, INDEX, delete $arguments{callback} || $CALLBACK_DEFAULT, \@vars);
     return;
 }
 1;
 ';
-    $code =~ s/\b(NAME|LINE|FILE|INDEX)\b/$replace{$1}/g;
+    $code =~ s/\b(NAME|LINE|NR_VARS|FILE|INDEX)\b/$replace{$1}/g;
     # print STDERR $code;
     eval $code || die $@;
 }
 
 _add_command($_) for 0..$#SIMPLE_COMMANDS;
+
+# Convenience functions
+sub transport_usb {
+    my $client = shift;
+    return $client->transport("usb", @_);
+}
+
+sub transport_tcp {
+    my $client = shift;
+    return $client->transport("tcp", @_);
+}
+
+sub transport_any {
+    my $client = shift;
+    return $client->transport("any", @_);
+}
+
+sub transport_local {
+    my $client = shift;
+    return $client->transport("local", @_);
+}
+
+sub tport_usb {
+    my $client = shift;
+    return $client->tport("usb", @_);
+}
+
+sub tport_tcp {
+    my $client = shift;
+    return $client->tport("tcp", @_);
+}
+
+sub tport_any {
+    my $client = shift;
+    return $client->tport("any", @_);
+}
+
+sub tport_local {
+    my $client = shift;
+    return $client->tport("local", @_);
+}
 
 1;
 __END__

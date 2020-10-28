@@ -16,12 +16,12 @@ use Test::More tests => 432;
 
 BEGIN {
     use_ok("ADB::Client::Utils",
-           qw(adb_check_response display_string
+           qw(adb_check_response display_string DISPLAY_MAX
               SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY OKAY FAIL)) ||
         BAIL_OUT("Cannot even import adb_check_response from ADB::Client::Utils");
 }
 
-my $long_string = "ABC\nde\"zz\0fg\th\x{c1}zwarf\tha";
+my $long_string = "ABC\nde\"zz\0fg\th\x{c1}zwarf\tha" . "-" x DISPLAY_MAX;
 my $args;
 
 # Also implicitely checks display_string
@@ -348,13 +348,13 @@ for my $add (1..5) {
 # Check a spurious long string
 $args = [{ in => "OKAY" . $long_string}, 1+length $long_string, 0, 1];
 is_deeply([adb_check_response(@$args)],
-          [BAD_ADB, 'Spurious bytes in response "OKAYABC\nde\"zz\0fg\th\301z"...']);
+          [BAD_ADB, 'Spurious bytes in response "OKAYABC\nde\"zz\0fg\th\301zwarf\tha' . "-" x (2*DISPLAY_MAX()-length($args->[0]{in})) . '"...']);
 is($args->[0]{in}, "OKAY" . $long_string);
 
 # Check a spurious long string
 $args = [{ in => "OKAY0001" . $long_string}, 1+length $long_string, -1, 1];
 is_deeply([adb_check_response(@$args)],
-          [BAD_ADB, 'Spurious bytes in response "OKAY0001ABC\nde\"zz\0fg"...']);
+          [BAD_ADB, 'Spurious bytes in response "OKAY0001ABC\nde\"zz\0fg\th\301zwarf\tha' . "-" x (2*DISPLAY_MAX()-length($args->[0]{in})) . '"...']);
 is($args->[0]{in}, "OKAY0001" . $long_string);
 
 # Check a spurious long string

@@ -10,7 +10,7 @@ use ADB::Client::Timer qw(run_now realtime clocktime
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_level event_init realtime clocktime
+    other => [qw(mainloop unloop loop_levels event_init realtime clocktime
                  $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $IGNORE_PIPE_LOCAL
                  $EVENT_INITER)];
 
@@ -102,19 +102,19 @@ sub delete_error(*) {
 }
 
 sub unloop {
-    my $loop_level = shift;
-    $unlooping[$loop_level] = shift || 1;
+    my $loop_levels = shift;
+    $unlooping[$loop_levels] = shift || 1;
 }
 
-sub loop_level {
+sub loop_levels {
     return scalar @unlooping;
 }
 
 sub mainloop {
     $EVENT_INITER->() if $EVENT_INITER;
-    push @unlooping, undef;
+    my $level = push(@unlooping, undef)-1;
     eval {
-        info("Entering mainloop") if $VERBOSE;
+        info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
         until ($unlooping[-1]) {
             my $timeout = run_now();
@@ -131,7 +131,7 @@ sub mainloop {
                 die "Select failed: $^E";
             }
         }
-        info("Exiting mainloop") if $VERBOSE;
+        info("Exiting mainloop (level $level)") if $VERBOSE || $DEBUG;
     };
     my $tmp = pop @unlooping;
     die $@ if $@;

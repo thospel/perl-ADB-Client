@@ -9,8 +9,11 @@ use warnings;
 
 our $VERSION = "1.000";
 
-use Test::More tests => 9;
-for my $module (qw(ADB::Client::Package)) {
+use Test::More tests => 12;
+for my $module (qw(ADB::Client::Package
+                   ADB::Client
+                   ADB::Client::Utils
+                   ADB::Client::Events)) {
     use_ok($module) || BAIL_OUT("Cannot even use $module");
 }
 my $released = ADB::Client::Package->release_time;

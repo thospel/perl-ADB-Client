@@ -15,6 +15,7 @@ use IO::Socket qw();
 use Exporter::Tidy
     other	=>[qw(addr_info info caller_info dumper string_from_value
                       display_string adb_check_response realtime clocktime
+                      realtime_running clocktime_running
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $DEBUG $VERBOSE
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
                       DISPLAY_MAX)];
@@ -39,16 +40,28 @@ our $CLOCK_TYPE_NAME =
     eval { $CLOCK_TYPE = CLOCK_REALTIME;  "REAL" } ||
     die "Time::HiRes doesn't even have CLOCK_REALTIME";
 
+# This can skip
 sub realtime {
     return clock_gettime(CLOCK_REALTIME);
 }
 
+# This cannot skip (if we have CLOCK_MONOTONIC)
 sub clocktime {
     return clock_gettime($CLOCK_TYPE);
 }
 
+# Moment the program started (or at least the module was loaded)
 our $BASE_REALTIME  = realtime();
 our $BASE_CLOCKTIME = clocktime();
+
+# time relative to program start (or module load)
+sub realtime_running {
+    return clock_gettime(CLOCK_REALTIME) - $BASE_REALTIME;
+}
+
+sub clocktime_running {
+    return clock_gettime($CLOCK_TYPE) - $BASE_CLOCKTIME;
+}
 
 sub addr_info {
     my ($host, $port, $no_die) = @_;
@@ -151,7 +164,7 @@ sub caller_info {
     my (@lines, $file, $line, $i);
     $file =~ s{.*/}{}s, push @lines, "$file:$line" while (undef, $file, $line) = caller($i++);
     if (@_) {
-        info("$format [line %s]", "@lines");
+        info("$format [line %s]", @_, "@lines");
     } else {
         info("$format [line @lines]");
     }
@@ -202,14 +215,15 @@ sub adb_check_response {
                 $prefix ne substr(FAIL, 0, $plen)) {
             # Answer will be neither OKAY nor FAIL
             $prefix = display_string($prefix);
-            return BAD_ADB, "Bad prefix $prefix";
+            return BAD_ADB, "Bad ADB status $prefix";
         }
     }
 
     if ($len < 4) {
         return if $len_added;
+        return BAD_ADB, "Unexpected EOF" if $len == 0;
         my $prefix = display_string($data->{in});
-        return BAD_ADB, "Truncated prefix $prefix";
+        return BAD_ADB, "Truncated ADB status $prefix";
     }
     # From here $len >= 4
 
@@ -235,7 +249,7 @@ sub adb_check_response {
                 return SUCCEEDED, $response;
             } else {
                 my $response = display_string($data->{in});
-                return BAD_ADB, "Truncated response $response";
+                return BAD_ADB, "Truncated ADB response $response";
             }
         }
 
@@ -244,7 +258,7 @@ sub adb_check_response {
 
         if ($len > 4+$nr && $expect_eof) {
             my $response = display_string($data->{in});
-            return BAD_ADB, "Spurious bytes in response $response";
+            return BAD_ADB, "Spurious bytes in ADB response $response";
         }
         substr($data->{in}, 0, 4, "");
         my $response = substr($data->{in}, 0, $nr, "");
@@ -258,7 +272,7 @@ sub adb_check_response {
         my $code = substr($data->{in}, 4, $len < 8 ? $len-4 : 8-4);
         if ($code !~ /^[0-9a-fA-F]{1,4}\z/) {
             $code = display_string($code);
-            return BAD_ADB, "Bad hex length $code";
+            return BAD_ADB, "Bad ADB hex length $code";
         }
         return BAD_ADB, qq{Truncated hex length "$code"} if $len_added == 0;
     }
@@ -266,7 +280,7 @@ sub adb_check_response {
     if ($len < 8) {
         return if $len_added;
         my $prefix = display_string($data->{in});
-        return BAD_ADB, "Truncated prefix $prefix";
+        return BAD_ADB, "Truncated ADB response $prefix";
     }
     # from here $len >= 8
 
@@ -283,13 +297,13 @@ sub adb_check_response {
     if ($len < 8 + $more) {
         return if $len_added;
         $len -= 8;
-        return BAD_ADB, "Truncated answer (expected $more, got $len bytes)";
+        return BAD_ADB, "Truncated ADB response (expected $more, got $len bytes)";
     }
     # from here $len >= 8 + $more
 
     if ($len > 8 + $more && $expect_eof) {
         my $response = display_string($data->{in});
-        return BAD_ADB, "Spurious bytes in response $response";
+        return BAD_ADB, "Spurious bytes in ADB response $response";
     }
 
     $status =

@@ -1,0 +1,362 @@
+#!/usr/bin/perl -w
+use strict;
+use warnings;
+
+our $VERSION = "1.000";
+
+use FindBin qw($Script);
+our $Bin;
+
+# If the program runs as /foobar/bin/program, find libraries in /foobar/lib
+BEGIN {
+    # Even on windows FindBin uses / in the reported path
+    $Bin = $FindBin::Bin;
+    $Bin =~ s{/+\z}{};
+    $Bin =~
+        ($^O eq "MSWin32" ?
+         qr{^((?:[A-Z]:)?(?:/[a-zA-Z0-9_:.~ -]+)*)/[a-zA-Z0-9_.-]+/*\z} :
+         qr{^((?:/[a-zA-Z0-9_:.-]+)*)/[a-zA-Z0-9_.-]+/*\z}) ||
+         die "Could not parse bin directory '$Bin'";
+    # Use untainted version of lib
+    require lib;
+    # Support a simple --blib option for pre-install testing
+    "lib"->import(@ARGV && $ARGV[0] eq "--blib" ? shift && "$1/blib/lib" : "$1/lib");
+}
+
+use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
+use IO::Socket::INET;
+use ADB::Client::Events qw(mainloop timer event_init);
+use ADB::Client::Utils qw(display_string);
+use Scalar::Util qw(weaken refaddr);
+use Data::Dumper;
+
+use constant {
+    OKAY	=> 1,
+    FAIL	=> 0,
+};
+
+event_init();
+
+# Make sure we will quit by ourselves after inactivity so testing won't get
+# stuck in case of errors in adb_fake
+my $IDLE_TIMEOUT = 10;
+my $accepted = my $listening = 0;
+my (%unacceptable, $idle_timeout);
+
+my @devices = (
+    "10.253.0.13:5555\tdevice",
+    "52000c4748d6a283\tdevice",
+);
+
+my @devices_long = (
+    "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:3",
+    "52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2"
+);
+
+our $BLOCK_SIZE = 65536;
+our $ADB_VERSION = 39;
+our $TIMEOUT	= 2;
+
+sub dumper {
+    local $Data::Dumper::Indent	  = 1;
+    local $Data::Dumper::Sortkeys = 1;
+    local $Data::Dumper::Useqq	  = 1;
+    local $Data::Dumper::Terse    = 1;
+
+    print STDERR shift . Dumper(@_);
+}
+
+sub reader {
+    my ($state) = @_;
+
+    my $rc = sysread($state->{socket_in}, my $buffer, $BLOCK_SIZE);
+    if ($rc) {
+        unidle();
+        $state->{in} .= $buffer;
+        eval {
+            $state->{on_read}->($state, $rc);
+        };
+        $state->{on_error}->($state, $@) if $@;
+        return $rc;
+    }
+    if (defined $rc || $! == ECONNRESET) {
+        unidle();
+        # EOF
+        $state->{on_close}->($state, defined $rc ? 0 : $!);
+        return;
+    }
+    return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
+    unidle();
+    die "Read error: $^E";
+}
+
+sub writer {
+    my ($state) = @_;
+
+    my $rc = syswrite($state->{socket_out}, $state->{out}, $BLOCK_SIZE);
+    if ($rc) {
+        unidle();
+        substr($state->{out}, 0, $rc, "");
+        if ($state->{out} eq "") {
+            $state->{socket_out}->delete_write();
+            $state->{timeout} = undef;
+        }
+        if ($state->{closing}) {
+            weaken($state);
+            $state->{closing}->($state);
+        }
+        return;
+    }
+    # Dunno how to handle this.
+    # Is it even possible ? Never found an answer
+    die "Assertion: Length 0 write" if defined $rc;
+    return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
+    unidle();
+    die "Write error: $^E";
+}
+
+my $state_std = {
+    socket_in	=> \*STDIN,
+    socket_out	=> \*STDOUT,
+    in		=> "",
+    out 	=> "",
+    on_read	=> \&stdread,
+    on_close	=> undef,
+    wait_max	=> $TIMEOUT,
+    on_error	=> sub { die $_[1] },
+};
+
+sub reader_stdin {
+    reader($state_std);
+}
+
+sub stdread {
+    my ($state) = @_;
+
+    while ($state->{in} =~ s/^[^\S\n]*(\S.*\S)[^\S\n]*\n//) {
+        my $command = $1;
+        if ($command eq "Listener") {
+            add_listener($state->{listeners});
+        } elsif ($command eq "Unacceptable") {
+            add_listener($state->{listeners}, 1);
+        } elsif ($command eq "Unreachable") {
+            add_listener($state->{listeners}, 2);
+        } else {
+            output($state, "Unknown: $command\n");
+        }
+    }
+}
+
+sub output {
+    my $state = shift;
+
+    return if $state->{closing};
+
+    my $str = join("", @_);
+    return if $str eq "";
+    # Should always be downgraded, but let's be paranoid
+    die "Unexpected upgrade string" if utf8::is_utf8($str);
+
+    weaken(my $s = $state);
+    $state->{socket_out}->add_write(sub { writer($s) });
+    $state->{timeout} = timer($state->{wait_max}, sub { $s->{on_error}->($s, "Write timed out") });
+    $state->{out} .= $str;
+}
+
+sub acceptable {
+    my ($listener) = @_;
+
+    my $addr = accept(my $socket, $listener->{socket});
+    if (!$addr) {
+        return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
+        die "Accept error: $^E";
+    }
+    unidle();
+    $socket->blocking(0);
+    my $key = refaddr($socket);
+    my $state = bless {
+        key		=> $key,
+        listener	=> $listener,
+        socket_in	=> $socket,
+        socket_out	=> $socket,
+        in		=> "",
+        out 		=> "",
+        on_read		=> \&adb_read,
+        on_error	=> \&adb_error,
+        on_close	=> \&adb_close,
+        wait_max	=> $TIMEOUT,
+    }, "Accepted";
+    ++$accepted;
+    weaken($state->{listener});
+    $listener->{$key} = $state;
+    weaken(my $s = $state);
+    $socket->add_read(sub { reader($s) });
+}
+
+sub adb_error {
+    my ($state, $err) = @_;
+
+    warn($err);
+    adb_close($state);
+}
+
+sub adb_close {
+    my ($state) = @_;
+
+    delete $state->{listener}{$state->{key}};
+}
+
+sub adb_read {
+    my ($state, $rc) = @_;
+
+    while ($state->{in} ne "") {
+        # For convenient debugging with telnet...
+        next if $state->{in} =~ s/^[\r\n]+//;
+        length $state->{in} >= 4 || return;
+        my $code = substr($state->{in}, 0, 4);
+        $code =~ /^[0-9a-fA-F]{4}\z/ ||
+            die "Invalid length code: ", display_string($code);
+        my $len = hex $code;
+        length $state->{in} >= 4 + $len || return;
+        my $command = substr($state->{in}, 0, 4 + $len, "");
+        substr($command, 0, 4, "");
+        adb_command($state, $command);
+    }
+}
+
+sub adb_output {
+    my ($state, $status, $response, $keep_open) = @_;
+
+    return if $state->{closing};
+    if (defined $status) {
+        output($state,
+               ($status ? "OKAY" : "FAIL"),
+               sprintf("%04X", length $response),
+               $response);
+        $state->{closing} = $keep_open ? undef : \&adb_close;
+    } else {
+        output($state, "OKAY");
+        weaken(my $listener = $state->{listener});
+        $state->{closing} = sub { $listener->close if $listener};
+    }
+}
+
+sub adb_command {
+    my ($state, $command) = @_;
+
+    if ($command eq "host:version") {
+        adb_output($state, OKAY, sprintf("%04X", $ADB_VERSION));
+    } elsif ($command eq "host:devices") {
+        adb_output($state, OKAY, join "" => map "$_\n" => @devices);
+    } elsif ($command eq "host:devices-l") {
+        adb_output($state, OKAY, join "" => map "$_\n" => @devices_long);
+    } elsif ($command eq "host:kill") {
+        adb_output($state);
+    } elsif ($command =~ m{^host:echo:(.*)\z}s) {
+        # Fake command for response testing
+        adb_output($state, OKAY, $1);
+    } else {
+        adb_output($state, FAIL, "unknown host service");
+        # adb_output($state, FAIL, "unknown host service:" . display_string($command));
+    }
+}
+
+sub add_listener {
+    my ($listeners, $unacceptable) = @_;
+
+    my $socket = IO::Socket::INET->new(
+        $unacceptable && $unacceptable == 2 ? () : (Listen		=> 5),
+        Blocking	=> 0,
+        LocalHost	=> "127.0.0.1",
+        LocalPort	=> 0) || die "Could not create listening socket: $^E";
+    my $key = refaddr($socket);
+    my $listener = bless {
+        key		=> $key,
+        socket		=> $socket,
+        port		=> $socket->sockport,
+        listeners	=> $listeners,
+        accepted	=> {},
+        unacceptable	=> $unacceptable,
+    }, "Listener";
+    ++$listening;
+    weaken($listener->{listeners});
+    if ($unacceptable) {
+        $unacceptable{$key} = $listener;
+    } else {
+        $listeners->{$key} = $listener;
+        weaken(my $l = $listener);
+        $socket->add_read(sub { acceptable($l) });
+    }
+
+    output($state_std, "Port: $listener->{port}\n");
+}
+
+sub finish {
+    $state_std->{socket_in} || return;
+    $idle_timeout = undef;
+    %unacceptable = ();
+    output($state_std, "Close: $listening $accepted\n");
+    $state_std->{socket_in}->delete_read;
+    close($state_std->{socket_in});
+    $state_std->{socket_in} = undef;
+    # $state_std->{closing} = sub { exit };
+}
+
+sub abort {
+    my $listeners = $state_std->{listeners} || return;
+
+    %$listeners = ();
+    finish();
+}
+
+sub unidle {
+    $state_std->{socket_in} || return;
+    $idle_timeout = timer($IDLE_TIMEOUT, \&abort);
+}
+
+sub main {
+    STDIN->blocking(0);
+    STDOUT->blocking(0);
+    STDIN->add_read(\&reader_stdin);
+
+    my $listeners = {};
+    weaken($state_std->{listeners} = $listeners);
+    add_listener($listeners);
+    $state_std->{on_close} = \&abort;
+    $idle_timeout = unidle();
+    mainloop();
+}
+
+main();
+
+package Accepted;
+sub DESTROY {
+    # print STDERR "DESTROY(@_)\n";
+    my ($state) = @_;
+
+    $state->{socket_out}->delete_write if $state->{out} ne "";
+    $state->{socket_in}->delete_read;
+    $state->{timeout} = undef;
+
+    --$accepted;
+}
+
+package Listener;
+sub DESTROY {
+    # print STDERR "DESTROY(@_)\n";
+    my ($listener) = @_;
+
+    $listener->{unacceptable} || $listener->{socket}->delete_read;
+
+    --$listening;
+}
+
+sub close {
+    my $listener = shift // return;
+    my $listeners = $listener->{listeners} // return;
+    delete $listeners->{$listener->{key}};
+    $listener = undef;
+    ::finish() if !%$listeners;
+}
+
+package main;

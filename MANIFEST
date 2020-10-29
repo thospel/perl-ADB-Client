@@ -3,7 +3,9 @@ MANIFEST
 MANIFEST.SKIP
 Makefile.PL
 README
+bin/adb_fake
 lib/ADB/Client.pm
+lib/ADB/Client/Command.pm
 lib/ADB/Client/Events.pm
 lib/ADB/Client/Package.pm
 lib/ADB/Client/Ref.pm
@@ -14,4 +16,12 @@ lib/ADB/Client/Utils.pm
 md5-versions
 t/00_load.t
 t/01_adb_check_response.t
+t/02_adb_client.t
+t/03_adb_fake.t
+t/04_kill.t
+t/05_marker.t
+t/06_commands.t
+t/07_connect.t
+t/08_spawn.t
+t/TestDrive.pm
 version_check

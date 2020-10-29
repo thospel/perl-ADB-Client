@@ -15,6 +15,7 @@ use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
 use Errno qw(EWOULDBLOCK EINPROGRESS ECONNREFUSED EACCES EPERM ENETUNREACH
              ETIMEDOUT EAGAIN EINTR ECONNRESET);
 
+use ADB::Client::Events qw(timer immediate);
 use ADB::Client::Starter;
 use ADB::Client::Utils qw(dumper addr_info info adb_check_response
                           string_from_value $DEBUG
@@ -66,7 +67,7 @@ sub new {
     my $context = bless \%context, $class;
     $client_ref->child_add($context);
 
-    $context{timeout} = ADB::Client::Timer->new(0, $connect ? sub { $context->_check } : sub { $context->_start });
+    $context{timeout} = immediate($connect ? sub { $context->_check } : sub { $context->_start });
 
     # $context->dump;
     return $context;
@@ -174,9 +175,9 @@ sub _check {
             my $callback = sub { $context->_connecting };
             $socket->add_write($callback);
             # $socket->add_error($callback);
-            $context->{timeout} = ADB::Client::Timer->new(
-                $context->{client_ref}{connect_timeout},
-                sub { $context->_connect_timeout }
+            $context->{timeout} = timer(
+                $context->{client_ref}{connection_timeout},
+                sub { $context->_connection_timeout }
             );
         } else {
             $context->_connected($!);
@@ -203,11 +204,11 @@ sub _check_result {
     $context->_check;
 }
 
-sub _connect_timeout {
+sub _connection_timeout {
     my ($context) = @_;
 
     my $addr = $context->{address}[$context->{address_i}];
-    $context->close("Connection to port $addr->{connect_port} on $addr->{connect_ip} timed out (timeout $context->{client_ref}{connect_timeout})");
+    $context->close("Connection to port $addr->{connect_port} on $addr->{connect_ip} timed out (timeout $context->{client_ref}{connection_timeout})");
 }
 
 sub _connecting {
@@ -253,7 +254,7 @@ sub _connected {
                                   length $addr->{command}, $addr->{command});
         $context->{socket}->add_read (sub { $context->_reader });
         $context->{in} = "";
-        $context->{timeout} = ADB::Client::Timer->new(
+        $context->{timeout} = timer(
             $context->{client_ref}{transaction_timeout},
             sub { $context->_timeout });
         $context->{connected} = 1;

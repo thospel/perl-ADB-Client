@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "011";
-$release_time = 1603845056;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "012";
+$release_time = 1604311885;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -26,7 +26,13 @@ $release_time = 1603845056;	## no critic (UselessNoCritic MagicNumbers)
   'README' => {
     '1.000' => '1.000'
   },
+  'bin/adb_fake' => {
+    '1.000' => '1.000'
+  },
   'lib/ADB/Client.pm' => {
+    '1.000' => '1.000'
+  },
+  'lib/ADB/Client/Command.pm' => {
     '1.000' => '1.000'
   },
   'lib/ADB/Client/Events.pm' => {
@@ -54,6 +60,30 @@ $release_time = 1603845056;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/01_adb_check_response.t' => {
+    '1.000' => '1.000'
+  },
+  't/02_adb_client.t' => {
+    '1.000' => '1.000'
+  },
+  't/03_adb_fake.t' => {
+    '1.000' => '1.000'
+  },
+  't/04_kill.t' => {
+    '1.000' => '1.000'
+  },
+  't/05_marker.t' => {
+    '1.000' => '1.000'
+  },
+  't/06_commands.t' => {
+    '1.000' => '1.000'
+  },
+  't/07_connect.t' => {
+    '1.000' => '1.000'
+  },
+  't/08_spawn.t' => {
+    '1.000' => '1.000'
+  },
+  't/TestDrive.pm' => {
     '1.000' => '1.000'
   },
   'version_check' => {

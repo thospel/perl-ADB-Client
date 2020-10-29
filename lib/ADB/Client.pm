@@ -7,7 +7,6 @@ our $VERSION = '1.000';
 use Carp;
 
 use ADB::Client::Ref qw(mainloop unloop loop_levels
-                        COMMAND_NAME COMMAND @SIMPLE_COMMANDS
                         $CALLBACK_DEFAULT
                         $ADB_HOST $ADB_PORT $ADB);
 use ADB::Client::Utils qw(info string_from_value $DEBUG $VERBOSE);
@@ -20,6 +19,12 @@ use Exporter::Tidy
 # Sanity check
 die "Bad file '", __FILE__, "'" if __FILE__ =~ /["\n\0]/;
 
+my $objects = 0;
+
+sub objects {
+    return $objects;
+}
+
 sub ref_class {
     return shift . "::Ref";
 }
@@ -28,24 +33,23 @@ sub new {
     my $class = shift;
     my $client = \my $client_ref;
     $client_ref = $class->ref_class->new($client, @_);
+    ++$objects;
     return bless $client, $class;
 }
 
 sub DESTROY {
+    --$objects;
     info("DESTROY @_") if $DEBUG;
-    ${shift()}->delete;
+    my $client_ref = ${shift()};
+    $client_ref->delete if $client_ref;
 }
 
 sub client_ref {
     return ${shift()};
 }
 
-sub activate {
-    shift->client_ref->activate(1);
-}
-
 # Simply forward command
-for my $name (qw(connected)) {
+for my $name (qw(connected close activate host port)) {
     my %replace = (
         NAME	=> $name,
         FILE	=> __FILE__,
@@ -53,7 +57,7 @@ for my $name (qw(connected)) {
     );
     my $code = '
 #line LINE "FILE"
-sub NAME {
+sub NAME : method {
     my $client_ref = $ {shift()};
     return $client_ref->NAME(@_);
 }
@@ -92,26 +96,25 @@ sub NAME {
     eval $code || die $@;
 }
 
-sub add_command {
-    my ($class, $command) = @_;
+sub add_commands {
+    my ($class) = @_;
 
-    push @SIMPLE_COMMANDS, $command;
-    eval { _add_command($#SIMPLE_COMMANDS) };
-    if ($@) {
-        pop @SIMPLE_COMMANDS;
-        die $@;
-    }
+    $class->ref_class->commands_add($class);
+}
+
+sub add_command {
+    my $class = shift;
+    $class->ref_class->command_add($class, @_);
 }
 
 sub _add_command {
-    my ($index) = @_;
+    my ($class, $index) = @_;
 
-    my $command = $SIMPLE_COMMANDS[$index] ||
-        die "Assertion: No command at index '$index'";
-    my $name = $command->[COMMAND_NAME] || die "Assertion: No COMMAND_NAME";
-    my $nr_vars = $command->[COMMAND] =~ tr/%//;
+    my ($command_name, $nr_vars, $special) =
+        $class->ref_class->command_get($index);
     my %replace = (
-        NAME	=> $name,
+        NAME	=> $command_name,
+        PROXY	=> $special ? $command_name : "command_simple",
         INDEX	=> $index,
         NR_VARS	=> $nr_vars,
         FILE	=> __FILE__,
@@ -119,7 +122,7 @@ sub _add_command {
     );
     my $code = '
 #line LINE "FILE"
-sub NAME {
+sub NAME : method {
     @_ > NR_VARS || croak "Too few arguments";
     @_ % 2 != NR_VARS % 2 || croak "Odd number of arguments";
     my $client_ref = $ {shift()};
@@ -128,20 +131,20 @@ sub NAME {
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
         my $loop_levels = loop_levels();
-        $client_ref->command_simple(\%arguments, INDEX, $client_ref->callback_blocking($loop_levels), \@vars);
+        $client_ref->PROXY(\%arguments, $client_ref->callback_blocking($loop_levels), INDEX, \@vars);
         return $client_ref->wait($loop_levels);
     }
-    $client_ref->command_simple(\%arguments, INDEX, delete $arguments{callback} || $CALLBACK_DEFAULT, \@vars);
+    $client_ref->PROXY(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT, INDEX, \@vars);
     return;
 }
 1;
 ';
-    $code =~ s/\b(NAME|LINE|NR_VARS|FILE|INDEX)\b/$replace{$1}/g;
+    $code =~ s/\b(NAME|LINE|NR_VARS|PROXY|FILE|INDEX)\b/$replace{$1}/g;
     # print STDERR $code;
     eval $code || die $@;
 }
 
-_add_command($_) for 0..$#SIMPLE_COMMANDS;
+__PACKAGE__->add_commands();
 
 # Convenience functions
 sub transport_usb {

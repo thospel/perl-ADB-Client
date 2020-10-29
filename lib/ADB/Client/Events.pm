@@ -5,12 +5,14 @@ use warnings;
 use Carp;
 use Errno qw(EINTR);
 
-use ADB::Client::Timer qw(timers_collect timers_run);
+use ADB::Client::Timer qw(timers_collect timers_run immediate timer);
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
+our $EVENT_INITER = \&event_init;
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_levels event_init
-                 $IGNORE_PIPE_LOCAL $EVENT_INITER)];
+    other => [qw(mainloop unloop loop_levels event_init timer immediate
+                 $IGNORE_PIPE_LOCAL $EVENT_INITER)],
+;
 
 # We want errors reported at the call site since they are bugs
 # our @CARP_NOT = qw(ADB::Client::Ref);
@@ -21,7 +23,6 @@ my $read_mask  = "";
 my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
-our $EVENT_INITER = \&event_init;
 
 package ADB::Client;
 our ($DEBUG, $VERBOSE);
@@ -55,7 +56,7 @@ sub delete_read(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
     caller_info("delete_read $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for read" unless $read_refs{$fd};
-    # This strange assign before delete is to poison the reference @work in
+    # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
     $read_refs{$fd} = undef;
     delete $read_refs{$fd};
@@ -71,7 +72,7 @@ sub delete_write(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
     caller_info("delete_write $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for write " unless $write_refs{$fd};
-    # This strange assign before delete is to poison the reference @work in
+    # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
     $write_refs{$fd} = undef;
     delete $write_refs{$fd};
@@ -87,7 +88,7 @@ sub delete_error(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
     caller_info("delete_error $fd") if $DEBUG;
     croak "Descriptor $fd wasn't selected for error " unless $error_refs{$fd};
-    # This strange assign before delete is to poison the reference @work in
+    # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
     $error_refs{$fd} = undef;
     delete $error_refs{$fd};
@@ -148,6 +149,9 @@ sub event_init {
     *IO::Handle::delete_read  = \&delete_read;
     *IO::Handle::delete_write = \&delete_write;
     *IO::Handle::delete_error = \&delete_error;
+    #*timer     = \&ADB::Client::Timer::timer;
+    #*immediate = \&ADB::Client::Timer::immediate;
+
     $EVENT_INITER = undef;
 }
 

@@ -18,7 +18,7 @@ use constant {
     INDEX_START	=> 1,
 };
 
-use ADB::Client::Timer;
+use ADB::Client::Events qw(timer immediate);
 use ADB::Client::Utils qw(info display_string $DEBUG);
 
 our @CARP_NOT = qw(ADB::Client::ServerStart);
@@ -97,8 +97,8 @@ sub close : method {
         # join() can call this method and when join returns the caller does not
         # yet expect the carpet to have been yanked out from under him
         for my $context (@contexts) {
-            $context->{timeout} = ADB::Client::Timer->new(
-                0, sub {
+            $context->{timeout} = immediate(
+                sub {
                     $context->{timeout} = undef;
                     $context->_spawn_result(@msg);
                 }
@@ -300,7 +300,7 @@ sub _reader_exec {
             return;
         }
 
-        $starter->{timeout} = ADB::Client::Timer->new($SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
+        $starter->{timeout} = timer($SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
 
         $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
@@ -334,11 +334,11 @@ sub _timeout {
     } else {
         $starter->{killed} = $signal;
         if ($signal ne "KILL") {
-            $starter->{timeout} = ADB::Client::Timer->new($TERM_TIMEOUT, sub {$starter->_timeout("KILL")});
+            $starter->{timeout} = timer($TERM_TIMEOUT, sub {$starter->_timeout("KILL")});
             return;
         }
     }
-    $starter->{timeout} = ADB::Client::Timer->new($KILL_TIMEOUT, sub {$starter->_timeout});
+    $starter->{timeout} = timer($KILL_TIMEOUT, sub {$starter->_timeout});
 }
 
 sub _reader_log {

@@ -9,19 +9,16 @@ use Scalar::Util qw(weaken refaddr);
 # use IO::Socket::IP;
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET);
 
-use ADB::Client::Events qw(mainloop unloop loop_levels realtime clocktime
-                           $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE);
+use ADB::Client::Events qw(mainloop unloop loop_levels);
 use ADB::Client::ServerStart;
-use ADB::Client::Utils qw(addr_info info caller_info dumper adb_check_response
-                          display_string
+use ADB::Client::Utils qw(info caller_info dumper adb_check_response
+                          display_string addr_info
                           FAILED BAD_ADB ASSERTION INFINITY
                           $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other	=>[qw(addr_info mainloop unloop loop_levels dumper
-                      info caller_info realtime clocktime
+    other	=>[qw(mainloop unloop loop_levels
                       COMMAND_NAME COMMAND @SIMPLE_COMMANDS
-                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                       $CALLBACK_DEFAULT
                       $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
 
@@ -32,13 +29,16 @@ use constant {
     NR_RESULTS	=> 2,
     EXPECT_EOF	=> 3,
     PROCESS	=> 4,
+    # Cannot reuse PROCESS for this since PROCESS will run at command retirement
+    # (and we want that since it could be useful)
+    CODE	=> 2,
 
     # Index in commands element
     COMMAND_REF	=> 0,
     CALLBACK	=> 1,
     ARGUMENTS	=> 2,
 
-    MARKER	=> "",
+    SPECIAL	=> "",
 };
 
 our @CARP_NOT = qw(ADB::Client);
@@ -56,7 +56,8 @@ our $CONNECT_TIMEOUT = 10;
 our @SIMPLE_COMMANDS = (
     # command, number of result bytes, expect close
     # See the index in command array constants
-    ["marker"		=> MARKER],
+    ["marker"		=> SPECIAL, \&_marker],
+    ["connect"		=> SPECIAL, \&_connect],
     ["version"		=> "host:version", -1, 1,   \&process_version],
     ["kill"		=> "host:kill", 0, 1],
     ["features"		=> "host:features", -1, 1,  \&process_features],
@@ -75,6 +76,13 @@ sub new {
 
     my ($class, $client, %arguments) = @_;
 
+    my $model = delete $arguments{model};
+    if (defined $model) {
+        $model = $model->client_ref || croak "Model without client_ref";
+        for my $name (qw(blocking adb adb_socket host port reresolve connect_timeout transaction_timeout block_size)) {
+            $arguments{$name} //= $model->{$name};
+        }
+    }
     my $blocking = delete $arguments{blocking} // 1;
     my $adb  = delete $arguments{adb} // $ADB;
     my $adb_socket = delete $arguments{adb_socket} // $ADB_SOCKET;
@@ -119,6 +127,10 @@ sub new {
     return $client_ref;
 }
 
+sub client {
+    return shift->{client};
+}
+
 sub delete {
     my ($client_ref) = @_;
 
@@ -126,7 +138,15 @@ sub delete {
     my $children = $client_ref->{children};
     $client_ref->{children} = {};
     $_->delete(1) for values %$children;
-    @{$client_ref->{result}} = ()
+    @{$client_ref->{result}} = ();
+    if (my $client = $client_ref->client) {
+        $$client = undef;
+    }
+}
+
+sub fatal {
+    shift->delete;
+    die shift;
 }
 
 sub child_add {
@@ -224,6 +244,8 @@ sub error {
     $command->[CALLBACK]->($client_ref->{client}, @_);
 }
 
+# If used inside a calback (toplevel false) nothing after this call should
+# change client_ref state, so typically this should be the last thing you do
 sub success {
     my $client_ref = shift;
 
@@ -278,42 +300,57 @@ sub first_command {
     return $command->[COMMAND_REF];
 }
 
+# If used inside a calback (toplevel false) nothing after this call should
+# change client_ref state, so typically this should be the last thing you do
 sub activate {
     my ($client_ref, $top_level) = @_;
 
     return if $client_ref->{active} || !@{$client_ref->{commands}};
 
-    my $command_ref = $client_ref->first_command;
-    if ($client_ref->{out} ne "") {
-        my $response = display_string($client_ref->{out});
-        my $msg = "Assertion: $response to ADB still pending when starting $command_ref->[COMMAND]";
-        die $msg if $top_level;
-        $client_ref->error($msg);
-        return;
-    }
-    if ($client_ref->{in} ne "") {
-        my $response = display_string($client_ref->{in});
-        my $msg = "Assertion: $response from ADB still pending when starting $command_ref->[COMMAND]";
-        die $msg if $top_level;
-        $client_ref->error($msg);
-        return;
-    }
-    if ($command_ref->[COMMAND] eq MARKER) {
-        # Marker
-        info("Sending MARKER (not)") if $DEBUG;
-        if (!$top_level) {
-            if (my $code = $client_ref->can("success")) {
-                # This does not change caller @_
-                @_ = ($client_ref, undef);
-                info("GOTO");
-                goto &$code;
-            }
+    for (1) {
+        my $command_ref = $client_ref->first_command;
+        if ($client_ref->{out} ne "") {
+            my $response = display_string($client_ref->{out});
+            my $msg = "Assertion: $response to ADB still pending when starting $command_ref->[COMMAND]";
+            die $msg if $top_level;
+            $client_ref->error($msg);
+            return;
         }
-        $client_ref->{timeout} = ADB::Client::Timer->new(0, sub { $client_ref->success(undef) });
-        # We don't expect any read here, but it's needed to maintain our
-        # invariant active & socket => reader (otherwise any ->close will fail)
-        $client_ref->{socket}->add_read(sub { $client_ref->_reader }) if $client_ref->{socket};
-    } elsif ($client_ref->{socket}) {
+        if ($client_ref->{in} ne "") {
+            my $response = display_string($client_ref->{in});
+            my $msg = "Assertion: $response from ADB still pending when starting $command_ref->[COMMAND]";
+            die $msg if $top_level;
+            $client_ref->error($msg);
+            return;
+        }
+        if ($command_ref->[COMMAND] eq SPECIAL) {
+            # Special
+            my $code = $command_ref->[CODE] ||
+                $client_ref->fatal("Assertion: No CODE in special command '$command_ref->[COMMAND_NAME]'");
+            # Return true for the normal case: we activated something
+            # but possibly did not set the active flag (which gets set below)
+            # Return false if you twiddled things yourself
+            # e.g. you called success which calls activate and you do now want
+            # to change whatever value {active} got into
+            last if $code->($client_ref, $command_ref, $top_level);
+            return;
+        }
+        if (!$client_ref->{socket}) {
+            if (0) {
+                if ($client_ref->{reresolve}) {
+                    my $addr_info = addr_info($client_ref->{host}, $client_ref->{port});
+                    if (ref $addr_info ne "ARRAY") {
+                        # Report it on the pending command
+                        $client_ref->error($addr_info);
+                        return;
+                    }
+                    $client_ref->{addr_info} = $addr_info;
+                }
+                $client_ref->error("Wee");
+            }
+            ADB::Client::ServerStart->new($client_ref, \&_connect_result);
+            last;
+        }
         my $command = sprintf($command_ref->[COMMAND],
                               @{$client_ref->{commands}[0][ARGUMENTS]});
         if (length $command >= 2**16) {
@@ -327,10 +364,26 @@ sub activate {
         $client_ref->{socket}->add_write(sub { $client_ref->_writer });
         $client_ref->{socket}->add_read(sub { $client_ref->_reader });
         $client_ref->{timeout} = ADB::Client::Timer->new($client_ref->{transaction_timeout}, sub { $client_ref->_timed_out });
-    } else {
-        ADB::Client::ServerStart->new($client_ref, \&_connect_result);
     }
     $client_ref->{active} = 1;
+}
+
+sub _marker {
+    my ($client_ref, $command_ref, $top_level) = @_;
+
+    info("Sending (not) MARKER") if $DEBUG;
+    if (!$top_level) {
+        # This can potentially lead to endless recursion through
+        # activate -> success -> activate -> success ...
+        # if the callback just keeps on pushing markers
+        $client_ref->success($client_ref, undef);
+        return 0;
+    }
+    $client_ref->{timeout} = ADB::Client::Timer->new(0, sub { $client_ref->success(undef) });
+    # We don't expect any read here, but it's needed to maintain our
+    # invariant active & socket => reader (otherwise any ->close will fail)
+    $client_ref->{socket}->add_read(sub { $client_ref->_reader }) if $client_ref->{socket};
+    return 1;
 }
 
 sub _timed_out {

@@ -6,18 +6,14 @@ our $VERSION = '1.000';
 
 use Carp;
 
-use ADB::Client::Ref qw(addr_info mainloop unloop loop_levels
-                        info caller_info dumper realtime clocktime
+use ADB::Client::Ref qw(mainloop unloop loop_levels
                         COMMAND_NAME COMMAND @SIMPLE_COMMANDS
-                        $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
                         $CALLBACK_DEFAULT
-                        $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE);
-use ADB::Client::Utils qw(string_from_value);
+                        $ADB_HOST $ADB_PORT $ADB);
+use ADB::Client::Utils qw(info string_from_value $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other	=>[qw(addr_info mainloop unloop loop_levels
-                      realtime clocktime string_from_value
-                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
+    other	=>[qw(mainloop unloop loop_levels string_from_value
                       $CALLBACK_DEFAULT
                       $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE)];
 

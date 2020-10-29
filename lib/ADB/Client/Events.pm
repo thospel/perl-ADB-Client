@@ -5,14 +5,12 @@ use warnings;
 use Carp;
 use Errno qw(EINTR);
 
-use ADB::Client::Timer qw(run_now realtime clocktime
-                          $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE);
+use ADB::Client::Timer qw(timers_collect timers_run);
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_levels event_init realtime clocktime
-                 $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $IGNORE_PIPE_LOCAL
-                 $EVENT_INITER)];
+    other => [qw(mainloop unloop loop_levels event_init
+                 $IGNORE_PIPE_LOCAL $EVENT_INITER)];
 
 # We want errors reported at the call site since they are bugs
 # our @CARP_NOT = qw(ADB::Client::Ref);
@@ -117,16 +115,16 @@ sub mainloop {
         info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
         until ($unlooping[-1]) {
-            my $timeout = run_now();
-            $timeout = $timeout //
+            my $timeout = timers_collect() //
                 (%read_refs || %write_refs || %error_refs || last);
             if ((select(my $r = $read_mask,
                         my $w = $write_mask,
-                        my $e = $error_mask, $timeout) || next) > 0) {
+                        my $e = $error_mask, $timeout) || (timers_run(), next)) > 0) {
                 $$_ && $$_->() for
                     \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     \@write_refs{grep vec($w, $_, 1), keys %write_refs},
                     \@error_refs{grep vec($e, $_, 1), keys %error_refs};
+                timers_run();
             } elsif ($! != EINTR) {
                 die "Select failed: $^E";
             }

@@ -6,6 +6,7 @@ our $VERSION = '1.000';
 
 use Data::Dumper;
 use Time::Local qw(timegm);
+use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
 use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
               pack_sockaddr_in pack_sockaddr_in6
               SOCK_STREAM IPPROTO_TCP IPPROTO_UDP AF_INET AF_INET6 SOCK_DGRAM);
@@ -13,10 +14,10 @@ use IO::Socket qw();
 
 use Exporter::Tidy
     other	=>[qw(addr_info info caller_info dumper string_from_value
-                      display_string adb_check_response
+                      display_string adb_check_response realtime clocktime
+                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $DEBUG $VERBOSE
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
-                      DISPLAY_MAX
-                      $DEBUG $VERBOSE)];
+                      DISPLAY_MAX)];
 
 use constant {
     # Code assumes OKAY and FAIL both have length 4, so you can't change this
@@ -32,15 +33,36 @@ use constant {
 
 our ($DEBUG, $VERBOSE);
 
+our $CLOCK_TYPE;
+our $CLOCK_TYPE_NAME =
+    eval { $CLOCK_TYPE = CLOCK_MONOTONIC; "MONOTONIC" } ||
+    eval { $CLOCK_TYPE = CLOCK_REALTIME;  "REAL" } ||
+    die "Time::HiRes doesn't even have CLOCK_REALTIME";
+
+sub realtime {
+    return clock_gettime(CLOCK_REALTIME);
+}
+
+sub clocktime {
+    return clock_gettime($CLOCK_TYPE);
+}
+
+our $BASE_REALTIME  = realtime();
+our $BASE_CLOCKTIME = clocktime();
+
 sub addr_info {
-    my ($host, $port) = @_;
+    my ($host, $port, $no_die) = @_;
 
     my ($err, @ai) = getaddrinfo($host, $port, {
         socktype	=> SOCK_STREAM,
         protocol	=> IPPROTO_TCP,
         flags		=> AI_PASSIVE,
     });
-    die "Could not resolve($host, $port): $err" if $err;
+    if ($err) {
+        $err = "Could not resolve($host, $port): $err";
+        return $err if $no_die;
+        die $err;
+    }
     my ($first_err, @address);
     for my $ai (@ai) {
         eval {
@@ -82,7 +104,13 @@ sub addr_info {
         };
         $first_err ||= $@;
     }
-    @address || die $first_err || "No usable resolve for ($host, $port)";
+    if (!@address) {
+        $err = $first_err ? "Could not resolve($host, $port): $first_err" :
+            "No usable resolve for ($host, $port)";
+        return $err if $no_die;
+        die $err;
+    }
+
     # dumper(\@address);
     return \@address;
 }
@@ -99,7 +127,7 @@ sub info {
         @_ = ($format);
         $format = "%s";
     }
-    my $time = ADB::Client::Timer->realtime;
+    my $time = realtime;
     my $itime = int($time);
     my ($sec, $min, $hour, $day, $mon, $year) = localtime($itime);
     # This code didn't exist before 2000, so $year >= 100
@@ -120,8 +148,8 @@ sub info {
 
 sub caller_info {
     my $format = shift;
-    my (@lines, $line, $i);
-    push @lines, $line while $line = (caller($i++))[2];
+    my (@lines, $file, $line, $i);
+    $file =~ s{.*/}{}s, push @lines, "$file:$line" while (undef, $file, $line) = caller($i++);
     if (@_) {
         info("$format [line %s]", "@lines");
     } else {

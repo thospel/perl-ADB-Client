@@ -5,14 +5,33 @@ use warnings;
 use Carp;
 use Errno qw(EINTR);
 
-use ADB::Client::Timer qw(timers_collect timers_run immediate timer);
+use ADB::Client::Timer qw(timers_collect timers_run);
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 our $EVENT_INITER = \&event_init;
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_levels event_init timer immediate
+    other => [qw(mainloop unloop loop_levels event_init
                  $IGNORE_PIPE_LOCAL $EVENT_INITER)],
-;
+    _map => {
+        # Can't just export the placeholders since the replace will not
+        # impact the imported symbol
+        timer => sub {
+            $EVENT_INITER->() if $EVENT_INITER;
+            my $package = caller();
+            no strict "refs";
+            no warnings "redefine";
+            *{$package . "::timer"} = \&ADB::Client::Events::timer;
+            goto \&ADB::Client::Events::timer;
+        },
+        immediate => sub {
+            $EVENT_INITER->() if $EVENT_INITER;
+            my $package = caller();
+            no strict "refs";
+            no warnings "redefine";
+            *{$package . "::immediate"} = \&ADB::Client::Events::immediate;
+            goto \&ADB::Client::Events::immediate;
+        },
+    };
 
 # We want errors reported at the call site since they are bugs
 # our @CARP_NOT = qw(ADB::Client::Ref);
@@ -149,8 +168,8 @@ sub event_init {
     *IO::Handle::delete_read  = \&delete_read;
     *IO::Handle::delete_write = \&delete_write;
     *IO::Handle::delete_error = \&delete_error;
-    #*timer     = \&ADB::Client::Timer::timer;
-    #*immediate = \&ADB::Client::Timer::immediate;
+    *timer     = \&ADB::Client::Timer::timer;
+    *immediate = \&ADB::Client::Timer::immediate;
 
     $EVENT_INITER = undef;
 }

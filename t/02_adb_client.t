@@ -9,7 +9,7 @@ use warnings;
 
 our $VERSION = "1.000";
 
-use Test::More tests => 33;
+use Test::More tests => 36;
 
 use Scalar::Util qw(weaken);
 
@@ -79,6 +79,7 @@ $failed += !like($@, qr{^Unknown argument Zorro at },
                  "Proper error for bad argument");
 
 # Test object cleanup
+$failed += !is(ADB::Client::Command->objects, 0, "No command objects are left");
 $failed += !is(ADB::Client::Ref->objects, 2, "Both client objects are left");
 $failed += !is(ADB::Client->objects, 2, "Both client objects are left");
 $c = undef;
@@ -90,9 +91,11 @@ $failed += ok($client_ref, "There is a client ref even for a failed client");
 $client = undef;
 $failed += !is(ADB::Client::Ref->objects, 1, "Ref keeps ADB::Client::Ref alive");
 $failed += !is(ADB::Client->objects, 0, "No objects are left, ref does not keep ADB::Client alive");
+$failed += !is(ADB::Client::Command->objects, 0, "Still no command objects are left");
 $ref = undef;
 $failed += !is(ADB::Client::Ref->objects, 0, "No objects are left");
 $failed += !is(ADB::Client->objects, 0, "No objects are left, ref does not keep ADB::Client alive");
 $failed += is($client_ref, undef, "Weak ref is gone");
+$failed += !is(ADB::Client::Command->objects, 0, "Still no command objects are left");
 
 #BAIL_OUT("Basic tests already fail") if $failed;

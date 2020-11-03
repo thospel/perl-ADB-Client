@@ -33,6 +33,13 @@ use Data::Dumper;
 use constant {
     OKAY	=> 1,
     FAIL	=> 0,
+
+    LISTENER	=> 0,	# Normal fake adb server
+    UNACCEPTABLE=> 1,	# Doesnt' even accept connections (OS will accept)
+    UNREACHABLE	=> 2,	# Occupies a port but refuses connection (no listen)
+    BLACKHOLE	=> 3,	# Eats everything on the accepted connection. Can talk
+    CLOSER	=> 4,	# Closes the connection as soon as n bytes are sent
+    ECHO	=> 5,	# Echoes whatever you type
 };
 
 event_init();
@@ -41,7 +48,7 @@ event_init();
 # stuck in case of errors in adb_fake
 my $IDLE_TIMEOUT = 10;
 my $accepted = my $listening = 0;
-my (%unacceptable, $idle_timeout);
+my ($idle_timeout);
 
 my @devices = (
     "10.253.0.13:5555\tdevice",
@@ -58,6 +65,7 @@ our $ADB_VERSION = 39;
 our $TIMEOUT	= 2;
 
 sub dumper {
+    @_ >= 2 || die "Bad dumper call";
     local $Data::Dumper::Indent	  = 1;
     local $Data::Dumper::Sortkeys = 1;
     local $Data::Dumper::Useqq	  = 1;
@@ -124,6 +132,7 @@ my $state_std = {
     on_close	=> undef,
     wait_max	=> $TIMEOUT,
     on_error	=> sub { die $_[1] },
+    specials	=> {},
 };
 
 sub reader_stdin {
@@ -133,16 +142,26 @@ sub reader_stdin {
 sub stdread {
     my ($state) = @_;
 
-    while ($state->{in} =~ s/^[^\S\n]*(\S.*\S)[^\S\n]*\n//) {
-        my $command = $1;
-        if ($command eq "Listener") {
-            add_listener($state->{listeners});
-        } elsif ($command eq "Unacceptable") {
-            add_listener($state->{listeners}, 1);
-        } elsif ($command eq "Unreachable") {
-            add_listener($state->{listeners}, 2);
-        } else {
-            output($state, "Unknown: $command\n");
+    while ($state->{in} =~ s/^[^\S\n]*(.*?)[^\S\n]*\n//) {
+        my $command = lc($1);
+        if ($command =~ m{listener(?:\s+(\d+))?\z}) {
+            add_listener($state->{listeners}, LISTENER, $1 // $ADB_VERSION);
+        } elsif ($command eq "unacceptable") {
+            add_listener($state->{listeners}, UNACCEPTABLE);
+        } elsif ($command eq "unreachable") {
+            add_listener($state->{listeners}, UNREACHABLE);
+        } elsif ($command =~ m{^blackhole(?:\s(.*))?\z}) {
+            my $arg = $1 // "";
+            $arg =~ s/\\n/\n/g;
+            add_listener($state->{listeners}, BLACKHOLE, $arg);
+        } elsif ($command =~ m{closer(?:\s+(\d+))?\z}) {
+            add_listener($state->{listeners}, CLOSER, $1 // 0);
+        } elsif ($command eq "echo") {
+            add_listener($state->{listeners}, ECHO);
+        } elsif ($command eq "dump") {
+            dumper("State: ", $state);
+        } elsif ($command ne "") {
+            output($state, "Unknown command: <$command>\n");
         }
     }
 }
@@ -181,16 +200,23 @@ sub acceptable {
         socket_out	=> $socket,
         in		=> "",
         out 		=> "",
-        on_read		=> \&adb_read,
+        on_read		=>
+        $listener->{type} == LISTENER	? \&adb_read :
+        $listener->{type} == CLOSER	? \&adb_closer :
+        $listener->{type} == ECHO	? \&adb_echo :
+        \&adb_discard,
         on_error	=> \&adb_error,
         on_close	=> \&adb_close,
         wait_max	=> $TIMEOUT,
     }, "Accepted";
     ++$accepted;
     weaken($state->{listener});
-    $listener->{$key} = $state;
+    $listener->{accepted}{$key} = $state;
     weaken(my $s = $state);
     $socket->add_read(sub { reader($s) });
+    output($state, $listener->{arg}) if
+        $listener->{type} == BLACKHOLE && $listener->{arg} ne "";
+    adb_close($state) if $listener->{type} == CLOSER && $listener->{arg} <= 0;
 }
 
 sub adb_error {
@@ -203,7 +229,26 @@ sub adb_error {
 sub adb_close {
     my ($state) = @_;
 
-    delete $state->{listener}{$state->{key}};
+    delete $state->{listener}{accepted}{$state->{key}};
+}
+
+sub adb_discard {
+    my ($state, $rc) = @_;
+
+    $state->{in} = "";
+}
+
+sub adb_closer {
+    my ($state, $rc) = @_;
+
+    adb_close($state) if length($state->{in}) >= $state->{listener}{arg};
+}
+
+sub adb_echo {
+    my ($state, $rc) = @_;
+
+    output($state, $state->{in});
+    $state->{in} = "";
 }
 
 sub adb_read {
@@ -245,7 +290,7 @@ sub adb_command {
     my ($state, $command) = @_;
 
     if ($command eq "host:version") {
-        adb_output($state, OKAY, sprintf("%04X", $ADB_VERSION));
+        adb_output($state, OKAY, sprintf("%04X", $state->{listener}{version}));
     } elsif ($command eq "host:devices") {
         adb_output($state, OKAY, join "" => map "$_\n" => @devices);
     } elsif ($command eq "host:devices-l") {
@@ -262,10 +307,12 @@ sub adb_command {
 }
 
 sub add_listener {
-    my ($listeners, $unacceptable) = @_;
+    my $listeners = shift;
+    my $type = shift || LISTENER;
+    my $arg = shift;
 
     my $socket = IO::Socket::INET->new(
-        $unacceptable && $unacceptable == 2 ? () : (Listen		=> 5),
+        $type == UNREACHABLE ? () : (Listen		=> 5),
         Blocking	=> 0,
         LocalHost	=> "127.0.0.1",
         LocalPort	=> 0) || die "Could not create listening socket: $^E";
@@ -276,14 +323,18 @@ sub add_listener {
         port		=> $socket->sockport,
         listeners	=> $listeners,
         accepted	=> {},
-        unacceptable	=> $unacceptable,
+        type		=> $type,
+        arg		=> $arg,
+        $type == LISTENER ? (version => $arg // $ADB_VERSION) : (),
     }, "Listener";
     ++$listening;
     weaken($listener->{listeners});
-    if ($unacceptable) {
-        $unacceptable{$key} = $listener;
+    if ($type) {
+        $state_std->{specials}{$key} = $listener;
     } else {
         $listeners->{$key} = $listener;
+    }
+    if ($type != UNACCEPTABLE && $type != UNREACHABLE) {
         weaken(my $l = $listener);
         $socket->add_read(sub { acceptable($l) });
     }
@@ -294,7 +345,7 @@ sub add_listener {
 sub finish {
     $state_std->{socket_in} || return;
     $idle_timeout = undef;
-    %unacceptable = ();
+    %{$state_std->{specials}} = ();
     output($state_std, "Close: $listening $accepted\n");
     $state_std->{socket_in}->delete_read;
     close($state_std->{socket_in});
@@ -346,7 +397,9 @@ sub DESTROY {
     # print STDERR "DESTROY(@_)\n";
     my ($listener) = @_;
 
-    $listener->{unacceptable} || $listener->{socket}->delete_read;
+    $listener->{type} == ::UNACCEPTABLE ||
+        $listener->{type} == ::UNREACHABLE ||
+        $listener->{socket}->delete_read;
 
     --$listening;
 }

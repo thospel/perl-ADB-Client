@@ -9,6 +9,7 @@ our $VERSION = "1.000";
 use Carp;
 use FindBin qw($Bin);
 use IPC::Open2;
+use File::Temp qw(tempdir);
 use Data::Dumper;
 
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
@@ -26,8 +27,10 @@ BEGIN {
 
 use Exporter::Tidy
     other =>
-    [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr adb_start adb_stop
-        adb_unacceptable adb_unreachable
+    [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects
+        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
+        adb_start adb_stop adb_unacceptable adb_unreachable adb_closer
+        adb_version adb_blackhole
         collect_stderr collected_stderr uncollect_stderr dumper)];
 
 $SIG{INT} = sub {
@@ -44,9 +47,20 @@ $base_dir =~ s{/t\z}{} ||
 
 my ($from_adb, $to_adb, $pid);
 
+our $TRANSACTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_TRANSACTION_TIMEOUT} || 0.5;
+our $CONNECTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_CONNECTION_TIMEOUT}   // undef;
+# 192.0.2.0/24 is assigned to TEST-NET-1
+# Hopefully that gives us an unreachable IP address, but maybe firewall rules
+# will fake a connection refused
+our $UNREACHABLE = $ENV{ADB_CLIENT_TEST_UNREACHABLE} || "192.0.2.1";
 # State globals
-our $tmp_dir = ".";
+our $tmp_dir;
 our $old_stderr;
+our %expect_objects = (
+    "ADB::Client"	=> 0,
+    "ADB::Client::Ref"	=> 0,
+    "ADB::Client::Command"	=> 0,
+);
 
 my $warnings = 0;
 $SIG{__WARN__} = sub {
@@ -65,11 +79,12 @@ END {
     adb_stop();
     Test::More::is($warnings, 0, "No warnings");
     for my $class (qw(ADB::Client ADB::Client::Ref ADB::Client::Command)) {
-        Test::More::is($class->objects, 0, "Cleaned up all $class objects");
+        Test::More::is($class->objects, $expect_objects{$class}, "Cleaned up all $class objects");
     }
 }
 
 sub collect_stderr {
+    $tmp_dir ||= tempdir(CLEANUP => 1);
     croak "Already collecting STDERR" if $old_stderr;
     open($old_stderr, ">&", "STDERR") || die "Can't dup STDERR: $!";
     open(STDERR, ">", "$tmp_dir/stderr") ||
@@ -83,9 +98,8 @@ sub uncollect_stderr {
     croak "Not collecting STDERR" if !$old_stderr;
     my $collected_stderr = collected_stderr();
     open(STDERR, ">&", $old_stderr) || die "Can't dup \$old_stderr: $!";
-    $old_stderr = "";
-    @_ = ($collected_stderr eq "", "Stuff left on STDERR: '$collected_stderr'");
-    goto &Test::More::ok;
+    $old_stderr = undef;
+    return $collected_stderr;
 }
 
 sub collected_stderr {
@@ -135,11 +149,10 @@ sub adb_stop {
 }
 
 sub _adb_unacceptable {
-    my ($command) = @_;
-    print $to_adb "$command\n";
+    print $to_adb "@_\n";
     my $line = <$from_adb>;
     my $regex = qr{^Port: ([1-9][0-9]*)\n\z};
-    Test::More::like($line, $regex, "Could not start Unacctable port") ||
+    Test::More::like($line, $regex, "Could start @_") ||
                          die "Invalid Port answer";
     $line =~ $regex || die "Invalid Port answer";
     my $port = int($1);
@@ -156,12 +169,28 @@ sub adb_unreachable {
     return _adb_unacceptable("Unreachable");
 }
 
+sub adb_closer {
+    return _adb_unacceptable("Closer");
+}
+
+sub adb_version {
+    return _adb_unacceptable("Listener" . (@_ ? " @_" : ""));
+}
+
+sub adb_blackhole {
+    my $arg = $_[0] || "";
+    $arg =~s /\n/\\n/g;
+    return _adb_unacceptable("Blackhole" . (defined $_[0] ? " $arg" : ""));
+}
+
 sub dumper {
     local $Data::Dumper::Indent	  = 1;
     local $Data::Dumper::Sortkeys = 1;
     local $Data::Dumper::Useqq	  = 1;
+    local $Data::Dumper::Terse	  = 1;
 
-    Test::More::diag(Dumper(@_));
+    Test::More::diag("Dumped variable:");
+    print STDERR Dumper(@_);
 }
 
 1;

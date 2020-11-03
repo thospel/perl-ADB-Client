@@ -11,17 +11,21 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 85;
-use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable dumper);
+use Test::More tests => 97;
+use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable dumper
+            $UNREACHABLE);
 
 # We already checked loading in 02_adb_client.t
-use ADB::Client qw(mainloop);
+use ADB::Client qw(mainloop immediate);
 
-my $failed = 0;
+my $obj_failed = 0;
+my $failed;
 
 $SIG{__DIE__} = sub {
     BAIL_OUT("Unexpected exception: @_");
 };
+
+immediate(sub {});
 
 my $port = adb_start();
 # $port = 5037;
@@ -34,9 +38,15 @@ for (1..2) {
     my ($echo, $c);
     my $err = "No error";
     $client->echo("Foo", callback => sub {
-                      $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                      $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
                       ($c, $err, $echo) = @_;
                   });
+    isa_ok($client->addr_info, "ARRAY", "Can fetch addr_info clone");
+    isa_ok($client->_addr_info, "ARRAY", "Can fetch internal addr_info");
+    cmp_ok($client->addr_info, '!=', $client->_addr_info,
+           "Clone and internal addr_info are different");
+    is_deeply($client->addr_info, $client->_addr_info,
+              "Clone and internal addr_info are identical");
     mainloop();
     is($err, undef, "No error (loop $_)") ||
         BAIL_OUT("Error while getting echo from fake adb server: $err");
@@ -44,7 +54,7 @@ for (1..2) {
         BAIL_OUT("Bad echo from fake adb server");
     cmp_ok($c, "==", $client, "Expected client in callback") ||
         BAIL_OUT("Callback does not return original ADB::Client object");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
 # Next try a real (simulated) command
@@ -54,7 +64,7 @@ for (1..2) {
     my ($version, $c);
     my $err = "No error";
     $client->version(callback => sub {
-                         $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                         $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
                          ($c, $err, $version) = @_;
                      });
     mainloop();
@@ -64,14 +74,17 @@ for (1..2) {
         BAIL_OUT("Bad version from fake adb server");
     cmp_ok($c, "==", $client, "Expected client in callback") ||
         BAIL_OUT("Callback does not return original ADB::Client object");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 
     # Test the default callback
     $client->version();
     mainloop();
     # Well, the default callback doesn't do anything on success,
     # so there is no result to check...
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+
+    is(scalar $client->version(blocking => 1), 39, "Expected version") ||
+        BAIL_OUT("Cannot do a blocking command on a non-blocking ADB::Client");
 }
 
 # Next try a basic blocking call
@@ -83,7 +96,7 @@ for (1..2) {
         BAIL_OUT("Error while getting version from fake adb server");
     is($version, 39, "Correct version (loop $_)") ||
         BAIL_OUT("Bad version from fake adb server");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
 my $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port]);
@@ -110,7 +123,7 @@ for (1..2) {
     my ($dummy, $c);
     my $err = "No error";
     $client->failer(callback => sub {
-                        $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                        $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
                         ($c, $err, $dummy) = @_;
                     });
     mainloop();
@@ -120,7 +133,7 @@ for (1..2) {
         BAIL_OUT("Bad version from fake adb server");
     cmp_ok($c, "==", $client, "Expected client in callback") ||
         BAIL_OUT("Callback does not return original ADB::Client object");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 
     # Test the default callback
     $client->failer();
@@ -131,11 +144,23 @@ for (1..2) {
     $err = $@;
     like($err, qr{^unknown host service at }, "Error (loop $_)") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
-# $result = $client->connect;
-# dumper($result);
+$result = $client->connect;
+is_deeply($result, {
+  "bind_addr" => $result->{bind_addr},
+  "bind_addr0" => $result->{bind_addr0},
+  "bind_ip" => "127.0.0.1",
+  "bind_port" => $port,
+  "connect_addr" => $result->{connect_addr},
+  "connect_ip" => "127.0.0.1",
+  "connect_port" => $port,
+  "connected" => $result->{connected},
+  "family" => 2
+}, "Can still do a connect and get connection properties") ||
+    BAIL_OUT("Cannot do repeat connect on connected client");
+cmp_ok($result->{connected}, '>', 0, "Connection time is positive");
 
 # Before testing the blocking variant of the call, set up some other
 
@@ -189,7 +214,7 @@ for (1..2) {
     my $err = $@;
     like($err, qr{^unknown host service at }, "Expected error from unknown command") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server");
-    $failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+    $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
 adb_stop(0) eq "" ||
@@ -205,11 +230,11 @@ $err = $@;
 like($err, qr{^ADB server 127\.0\.0\.1 port $port: Connect error: },
      "Must have a connection error") ||
     BAIL_OUT("Stopped fake adb server does not lead to the proper error message");
-$failed += !is(ADB::Client::Ref->objects, 1, "Client object still exists");
-$failed += !is(ADB::Client->objects, 1, "Client objects still exists");
-$failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+$obj_failed += !is(ADB::Client::Ref->objects, 1, "Client object still exists");
+$obj_failed += !is(ADB::Client->objects, 1, "Client objects still exists");
+$obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 $client = undef;
-$failed += !is(ADB::Client::Ref->objects, 0, "Client object is gone");
-$failed += !is(ADB::Client->objects, 0, "Client objects is gone");
-$failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
-BAIL_OUT("Object management is broken") if $failed;
+$obj_failed += !is(ADB::Client::Ref->objects, 0, "Client object is gone");
+$obj_failed += !is(ADB::Client->objects, 0, "Client objects is gone");
+$obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+BAIL_OUT("Object management is broken") if $obj_failed;

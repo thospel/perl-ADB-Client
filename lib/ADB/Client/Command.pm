@@ -4,7 +4,7 @@ use warnings;
 
 our $VERSION = '1.000';
 
-use ADB::Client::Utils qw(info $DEBUG);
+use ADB::Client::Utils qw(info $DEBUG $QUIET);
 
 my $objects = 0;
 
@@ -23,7 +23,8 @@ sub objects {
 }
 
 END {
-    info("Still have $objects ADB::Client::Ref::Command objects at program end") if $objects;
+    # $QUIET first for easier code coverage
+    info("Still have %d %s objects at program end", $objects, __PACKAGE__) if !$QUIET && $objects;
 }
 
 1;

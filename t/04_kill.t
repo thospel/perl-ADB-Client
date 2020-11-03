@@ -15,11 +15,16 @@ use Test::More tests => 11;
 use TestDrive qw(adb_start adb_stop);
 
 # We already checked loading in 02_adb_client.t
-use ADB::Client qw(mainloop);
+use ADB::Client qw(mainloop timer);
+
+$ADB::Client::Events::IGNORE_PIPE_LOCAL = 1;
 
 $SIG{__DIE__} = sub {
     BAIL_OUT("Unexpected exception: @_");
 };
+
+timer(0, sub {});
+# To improve coverage
 
 my $port = adb_start();
 # $port = 5037;

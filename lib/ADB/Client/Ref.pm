@@ -13,17 +13,18 @@ use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
 
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
 use ADB::Client::ServerStart;
-use ADB::Client::Utils qw(info caller_info dumper adb_check_response
-                          display_string addr_info clocktime_running
-                          FAILED BAD_ADB ASSERTION INFINITY
-                          $DEBUG $VERBOSE);
+use ADB::Client::Utils
+    qw(info caller_info dumper adb_check_response display_string
+       clocktime_running
+       FAILED BAD_ADB ASSERTION INFINITY $DEBUG $VERBOSE $QUIET),
+    _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command;
+use Storable qw(dclone);
 
 use Exporter::Tidy
-    other	=>[qw(mainloop unloop loop_levels
-                      $CALLBACK_DEFAULT
+    other	=>[qw($CALLBACK_DEFAULT
                       $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
 
 use constant {
@@ -45,6 +46,7 @@ use constant {
     # Index in commands element
     COMMAND_REF	=> 0,
     CALLBACK	=> 1,
+    # possibly unify ARGUMENTS and STATE
     ARGUMENTS	=> 2,
     STATE	=> 3,
 
@@ -64,35 +66,44 @@ our $TRANSACTION_TIMEOUT = 10;
 our $CONNECTION_TIMEOUT = 10;
 
 use constant {
-    MARKER	=> ["marker"	=> SPECIAL, \&_marker],
-    CONNECT	=> ["connect"	=> SPECIAL, \&_connect_start],
-    SPAWN	=> ["spawn"	=> SPECIAL, \&_connect_start],
-    VERSION	=> ["version"	=> "host:version", -1, 1, \&process_version],
-    KILL	=> ["kill"	=> "host:kill", 0, 1],
+    FATAL	=> [_fatal	=> SPECIAL, \&_fatal_run],
+    MARKER	=> [marker	=> SPECIAL, \&_marker],
+    CONNECT	=> [connect	=> SPECIAL, \&_connect_start],
+    SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
+    VERSION	=> [version	=> "host:version", -1, 1, \&process_version],
+    KILL	=> [kill	=> "host:kill", 0, 1],
 };
 
 our @COMMANDS = (
     # command, number of result bytes, expect close
     # See the index in command array constants
+    FATAL,
     MARKER,
     CONNECT,
     SPAWN,
     VERSION,
     KILL,
-    ["features"		=> "host:features", -1, EXPECT_EOF,  \&process_features],
-    ["remount"		=> "remount:", INFINITY, EXPECT_EOF,  \&process_remount],
-    ["devices"		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
-    ["devices_long"	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
-    ["transport"	=> "host:transport-%s", 0, 0],
-    ["tport"		=> "host:tport:%s", 8, 0, \&process_tport],
-    ["unroot"		=> "unroot:", INFINITY, EXPECT_EOF],
-    ["root"		=> "root:", INFINITY, EXPECT_EOF],
+    [forget		=> SPECIAL, \&_forget],
+    [resolve		=> SPECIAL, \&_resolve],
+    [features		=> "host:features", -1, EXPECT_EOF,  \&process_features],
+    [remount		=> "remount:", INFINITY, EXPECT_EOF,  \&process_remount],
+    [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
+    [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
+    [transport		=> "host:transport-%s", 0, 0],
+    [tport		=> "host:tport:%s", 8, 0, \&process_tport],
+    [unroot		=> "unroot:", INFINITY, EXPECT_EOF],
+    [root		=> "root:", INFINITY, EXPECT_EOF],
 );
 
 my $objects = 0;
 
 sub objects {
     return $objects;
+}
+
+END {
+    # $QUIET first for easier code coverage
+    info("Still have %d %s objects at program end", $objects, __PACKAGE__) if !$QUIET && $objects;
 }
 
 # Notice that the client argument isn't yet blessed at this point
@@ -104,7 +115,9 @@ sub new {
     my $model = delete $arguments{model};
     if (defined $model) {
         $model = $model->client_ref || croak "Model without client_ref";
-        for my $name (qw(blocking adb adb_socket host port reresolve connection_timeout transaction_timeout block_size)) {
+        for my $name (qw(blocking adb adb_socket host port reresolve
+                         addr_info
+                         connection_timeout transaction_timeout block_size)) {
             $arguments{$name} //= $model->{$name};
         }
     }
@@ -119,6 +132,7 @@ sub new {
     my $transaction_timeout = delete $arguments{transaction_timeout} //
         $TRANSACTION_TIMEOUT;
     my $block_size = delete $arguments{block_size} || $BLOCK_SIZE;
+    my $addr_info = delete $arguments{addr_info};
 
     croak "Unknown argument " . join(", ", keys %arguments) if %arguments;
 
@@ -139,21 +153,32 @@ sub new {
         block_size	=> $block_size,
         socket		=> undef,
         expect_eof	=> undef,
-        sent		=> 9,
+        sent		=> 0,
         in		=> "",
         out		=> "",
         # Invariant: !@commands => !active (or active => @commands)
         #            !active => !reading (or reading => active)
-        #            active && socket <=> reading
+        #            active && socket <=> reading || !defined in
         #            !socket => out = ""
         active		=> undef,
         commands	=> [],
+        command_retired	=> undef,
+        post_activate	=> undef,
         children	=> {},
         result		=> [],
     }, $class;
     ++$objects;
     weaken($client_ref->{client});
-    $client_ref->resolve();
+    if ($addr_info) {
+        $addr_info = dclone($addr_info);
+        for my $ai (@$addr_info) {
+            delete $ai->{connected};
+        }
+    } else {
+        $addr_info = utils_addr_info($host, $port);
+    }
+    $client_ref->{addr_info} = $addr_info;
+    $client_ref->{resolve_last} = clocktime_running();
     return $client_ref;
 }
 
@@ -169,6 +194,23 @@ sub port {
     return shift->{port};
 }
 
+sub _addr_info {
+    return shift->{addr_info};
+}
+
+sub addr_info : method {
+    return dclone(shift->_addr_info);
+}
+
+sub _connection_data {
+    return shift->{addr_connected};
+}
+
+sub connection_data {
+    my $data = shift->_connection_data;
+    return ref $data eq "" ? $data : dclone($data);
+}
+
 sub delete {
     my ($client_ref) = @_;
 
@@ -177,14 +219,24 @@ sub delete {
     $client_ref->{children} = {};
     $_->delete(1) for values %$children;
     @{$client_ref->{result}} = ();
-    if (my $client = $client_ref->client) {
-        $$client = undef;
-    }
+    @{$client_ref->{commands}} = [FATAL];
+    #if (my $client = $client_ref->client) {
+    #    $$client = undef;
+    #}
 }
 
 sub fatal {
-    shift->delete;
-    confess "Fatal: " . shift;
+    my ($client_ref, $msg) = @_;
+    $client_ref->delete;
+    confess "Fatal: Assertion: $msg";
+}
+
+sub _fatal_run {
+    my ($client_ref) = @_;
+
+    # Can be non-deleted if we get here via the command queue
+    $client_ref->delete;
+    confess "Attempt to restart a dead ADB::Client";
 }
 
 sub child_add {
@@ -228,7 +280,6 @@ sub wait : method {
     mainloop();
     if (@{$client_ref->{commands}}) {
         # Remove the command we are waiting for since we sort of had an error
-        pop @{$client_ref->{commands}};
         croak "A previous command in the queue failed";
     }
     my $result = delete $client_ref->{result}[$loop_levels] //
@@ -239,13 +290,6 @@ sub wait : method {
     # remove the flag indicating success
     shift @$result;
     return @$result;
-}
-
-sub resolve {
-    my ($client_ref) = @_;
-
-    $client_ref->{addr_info} = addr_info($client_ref->{host}, $client_ref->{port});
-    $client_ref->{resolve_last} = clocktime_running();
 }
 
 sub server_start {
@@ -286,12 +330,85 @@ sub command_simple {
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
-    my $command = $COMMANDS[$index] ||
+    my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
-    $client_ref->activate(1) if
-        1 == push @{$client_ref->{commands}}, [$command, $callback, $args];
+
+    my $out = sprintf($command_ref->[COMMAND], @$args);
+    utf8::encode($out);
+    if (length $out >= 2**16) {
+        $out = display_string($out);
+        croak "Command too long: $out";
+    }
+    push @{$client_ref->{commands}}, [$command_ref, $callback, sprintf("%04X", length $out) . $out];
+    $client_ref->activate(1);
 }
-*marker = \&command_simple;
+
+sub special_simple {
+    my ($client_ref, $arguments, $callback, $index, $args) = @_;
+
+    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
+
+    my $command_ref = $COMMANDS[$index] ||
+        croak "No command at index '$index'";
+
+    push @{$client_ref->{commands}}, [$command_ref, $callback, $args];
+    $client_ref->activate(1);
+}
+*marker = \&special_simple;
+*forget = \&special_simple;
+
+sub _fatal {
+    my ($client_ref, $arguments, $callback, $index) = @_;
+    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
+
+    my $command_ref = $COMMANDS[$index] ||
+        croak "No command at index '$index'";
+    push @{$client_ref->{commands}}, [$command_ref];
+    $client_ref->activate(1);
+}
+
+sub resolve {
+    my ($client_ref, $arguments, $callback, $index) = @_;
+
+    my %args;
+
+    $args{addr_info} = delete $arguments->{addr_info} if
+        exists $arguments->{addr_info};
+    $args{host} = delete $arguments->{host} // $ADB_HOST if
+        exists $arguments->{host};
+    $args{port} = delete $arguments->{port} // $ADB_PORT if
+        exists $arguments->{port};
+    $client_ref->special_simple($arguments, $callback, $index, \%args);
+}
+
+sub _resolve {
+    my ($client_ref) = @_;
+
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command during connect");
+    my $args = $command->[ARGUMENTS];
+    $client_ref->{host} = $args->{host} if defined $args->{host};
+    $client_ref->{port} = $args->{port} if defined $args->{port};
+    my $addr_info = $args->{addr_info};
+    if (!$addr_info) {
+        $addr_info = utils_addr_info($client_ref->{host}, $client_ref->{port}, 1);
+        if (ref $addr_info ne "ARRAY") {
+            $client_ref->error($addr_info);
+            return;
+        }
+    }
+    $client_ref->{addr_info} = $addr_info;
+    $client_ref->{resolve_last} = clocktime_running();
+    $client_ref->success;
+}
+
+sub _forget {
+    my ($client_ref) = @_;
+
+    $client_ref->close();
+    $client_ref->{addr_connected} = undef;
+    $client_ref->success;
+}
 
 sub connect : method {
     my ($client_ref, $arguments, $callback, $index) = @_;
@@ -302,8 +419,8 @@ sub connect : method {
         croak "No command at index '$index'";
     my $connector = $client_ref->connector($command_ref, $callback);
 
-    $client_ref->activate(1) if
-        1 == push @{$client_ref->{commands}}, $connector;
+    push @{$client_ref->{commands}}, $connector;
+    $client_ref->activate(1);
 }
 
 sub spawn {
@@ -315,8 +432,8 @@ sub spawn {
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
-    $client_ref->activate(1) if
-        1 == push @{$client_ref->{commands}}, $connector;
+    push @{$client_ref->{commands}}, $connector;
+    $client_ref->activate(1);
 }
 
 sub close : method {
@@ -327,27 +444,42 @@ sub close : method {
             $client_ref->{socket}->delete_write;
             $client_ref->{out} = "";
         }
-        $client_ref->{socket}->delete_read if $client_ref->{active};
+        $client_ref->{socket}->delete_read if
+            $client_ref->{active} && defined $client_ref->{in};
         $client_ref->{in} = "";
         $client_ref->{sent} = 0;
         $client_ref->{expect_eof} = undef;
         $client_ref->{socket} = undef;
-        $client_ref->{addr_connected}{connected} = undef if
-            $client_ref->{addr_connected};
     }
     $client_ref->{active} = 0;
     $client_ref->{timeout} = undef;
+}
+
+sub command_retired {
+    return shift->{command_retired};
+}
+
+sub post_activate {
+    my ($client_ref, $activate) = @_;
+
+    defined $activate || croak "Missing post_activate argument";
+    my $old = $client_ref->{post_activate} //
+        croak "post_activate outside success or error callback";
+    $client_ref->{post_activate} = $activate ? 1 : 0;
+    return $old;
 }
 
 sub error {
     my $client_ref = shift;
 
     $client_ref->close();
-    my $command = shift @{$client_ref->{commands}} //
-        die "Assertion: error without command";
+    local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
+        $client_ref->fatal("error without command");
     # We may need $command to exist during the callback because sometimes
     # we still use it in a closure (see e.g. _connect_done)
-    $command->[CALLBACK]->($client_ref->{client}, @_);
+    local $client_ref->{post_activate} = 0;
+    $client_ref->{command_retired}->[CALLBACK]->($client_ref->{client}, @_);
+    $client_ref->activate if $client_ref->{post_activate};
 }
 
 # If used inside a calback (toplevel false) nothing after this call should
@@ -359,11 +491,13 @@ sub success {
     my $command = shift @{$client_ref->{commands}} ||
         $client_ref->fatal("success without command");
     if ($client_ref->{active}) {
-        $client_ref->{socket}->delete_read if $client_ref->{socket};
+        $client_ref->{socket}->delete_read if
+            $client_ref->{socket} && defined $client_ref->{in};
         $client_ref->{timeout} = undef;
         $client_ref->{active} = 0;
     }
 
+    local $client_ref->{command_retired} = $command;
     my $command_ref = $command->[COMMAND_REF];
     if ($command_ref->[PROCESS]) {
         # $_[0] as first arguments since the others will typically be ignored
@@ -371,26 +505,25 @@ sub success {
         if ($@) {
             my $err = $@;
             my $str = display_string($_[0]);
-            # Cannot call error since we already shifted commands
-            $client_ref->close;
-            $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
+            unshift @{$client_ref->{commands}}, $command;
+            $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
             return;
         }
         if (ref $result ne "ARRAY") {
-            # Cannot call error since we already shifted commands
-            $client_ref->close;
+            unshift @{$client_ref->{commands}}, $command;
             if (ref $result eq "") {
-                $command->[CALLBACK]->($client_ref->{client}, $result);
+                $client_ref->error($result);
             } else {
-                $command->[CALLBACK]->($client_ref->{client}, "Assertion: Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
+                $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
             }
             return;
         }
     }
     # We may need $command to exist during the callback because sometimes
     # we still use it in a closure (see e.g. _connect_done)
-    $command->[CALLBACK]->($client_ref->{client}, my $err = undef, @$result);
-    $client_ref->activate unless $err;
+    local $client_ref->{post_activate} = 1;
+    $command->[CALLBACK]->($client_ref->{client}, undef, @$result);
+    $client_ref->activate if $client_ref->{post_activate};
 }
 
 # If used inside a calback (toplevel false) nothing after this call should
@@ -409,7 +542,7 @@ sub activate {
             $client_ref->fatal("$response to ADB still pending when starting $command_ref->[COMMAND]");
             return;
         }
-        if ($client_ref->{in} ne "") {
+        if (!defined $client_ref->{in} || $client_ref->{in} ne "") {
             my $response = display_string($client_ref->{in});
             $client_ref->fatal("$response from ADB still pending when starting $command_ref->[COMMAND]");
         }
@@ -420,18 +553,15 @@ sub activate {
             # It's too annoying to always have to handle that as a special case
             if ($top_level) {
                 $client_ref->{timeout} = immediate(sub {
+                    $client_ref->{active} ||
+                        $client_ref->fatal("Something deactived but left timeout");
                     $client_ref->{timeout} = undef;
-                    $client_ref->{active} || return;
-                    $client_ref->{socket}->delete_read if $client_ref->{socket};
+                    $client_ref->{in} = "" if $client_ref->{socket};
                     $client_ref->{active} = 0;
                     $client_ref->activate });
                 # We don't expect any read here, but it's needed to maintain our
-                # invariant active & socket => reader
-                # (otherwise any ->close will fail)
-                # But that doesn't mean a read read event is impossible!
-                # In particular you will get an EOF if the adb server closes the
-                # connection (for example because something killed the server)
-                $client_ref->{socket}->add_read(sub { $client_ref->_reader }) if $client_ref->{socket};
+                # invariant active & socket => reader || !defined in
+                $client_ref->{in} = undef if $client_ref->{socket};
                 last;
             }
 
@@ -448,20 +578,15 @@ sub activate {
                     $client_ref->connector(CONNECT, undef, \&_connect_done));
             redo;
         }
-        my $out = sprintf($command_ref->[COMMAND],
-                              @{$client_ref->{commands}[0][ARGUMENTS]});
-        if (length $out >= 2**16) {
-            my $msg = sprintf("Assertion: Command %s is too long", display_string($out));
-            die $msg if $top_level;
-            $client_ref->error($msg);
-            return;
-        }
-        info("Sending to ADB: %s", display_string($out)) if $DEBUG;
-        utf8::encode($out);
-        $client_ref->{out} = sprintf("%04X", length $out) . $out;
+        $client_ref->{out} = $client_ref->{commands}[0][ARGUMENTS];
+        info("Sending to ADB: " . display_string($client_ref->{out})) if $DEBUG;
         $client_ref->{socket}->add_write(sub { $client_ref->_writer });
         $client_ref->{socket}->add_read(sub { $client_ref->_reader });
-        $client_ref->{timeout} = timer($client_ref->{transaction_timeout}, sub { $client_ref->_timed_out });
+        my $addr = $client_ref->{addr_connected} ||
+            $client_ref->fatal("Socket without addr_connected");
+        $client_ref->{timeout} = timer(
+            $addr->{transaction_timeout} // $client_ref->{transaction_timeout},
+            sub { $client_ref->_timed_out });
     }
     $client_ref->{active} = 1;
 }
@@ -501,15 +626,8 @@ sub connector {
     if ($step) {
         $state->{callback} = $callback;
         $state->{step} = $step;
-        # Make sure $command will die as soon as it isn't referred anymore
-        weaken(my $c = $command);
 
-        $command->[CALLBACK] = sub {
-            unshift @{$client_ref->{commands}}, $c;
-            $c->[STATE]{step}->($c, @_);
-            # Hack! This tells the success method not to set {active}
-            $_[1] ||= 1;
-        };
+        $command->[CALLBACK] = \&_connector;
     } else {
         $command->[CALLBACK] = $callback;
     }
@@ -517,11 +635,32 @@ sub connector {
     return $command;
 }
 
+sub _connector {
+    my $client_ref = shift->client_ref;
+
+    my $command = $client_ref->{command_retired};
+    unshift @{$client_ref->{commands}}, $command;
+    $command->[STATE]{step}->($client_ref, $command, @_);
+    # Hack! This tells the success method not to call activate
+    $client_ref->post_activate(0);
+}
+
 # Called with active = 0
 sub _connect_start {
     my ($client_ref) = @_;
 
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command during connect");
+    my $state = $command->[STATE];
+    $state->{address_i}	= -1;
+    $state->{address} = $client_ref->{addr_connected} ?
+        [$client_ref->{addr_connected}] : $client_ref->{addr_info};
+
     if ($client_ref->{socket}) {
+        $client_ref->{addr_connected} ||
+            $client_ref->fatal("socket without addr_connected");
+        $state->{address_i} = 0;
+
         # We have a socket, but maybe the ADB server already closed it and
         # we never noticed since we weren't paying attention
         # (This is called with active == 0, so not selecting for read)
@@ -536,12 +675,13 @@ sub _connect_start {
             }
             if (defined $rc || $! == ECONNRESET) {
                 # We had a socket but the ADB server had already closed it
+                # so back to connecting
+                $state->{address_i} = -1;
                 $client_ref->close;
             } elsif ($! == EAGAIN || $! == EWOULDBLOCK) {
                 # We have a socket and it's a good socket
                 # don't forget this serendipitous success in the state machine!
-                die "Implement proper state machine";
-                $client_ref->success($client_ref->{addr_connected});
+                $client_ref->success(dclone($client_ref->{addr_connected}));
                 return;
             } elsif ($! == EINTR) {
                 redo;
@@ -551,29 +691,6 @@ sub _connect_start {
             }
         }
     }
-
-    my $now = clocktime_running();
-    my $age = $now - $client_ref->{resolve_last};
-    if ($age < 0) {
-        $client_ref->{resolve_last} = $now;
-        $age = 0;
-    }
-    if ($age >= $client_ref->{reresolve}) {
-        my $addr_info = addr_info($client_ref->{host}, $client_ref->{port}, 1);
-        if (ref $addr_info ne "ARRAY") {
-            $client_ref->error($addr_info || "Assertion: addr_info: Neither an array nor an error");
-            return;
-        }
-        $client_ref->{addr_info} = $addr_info;
-        $client_ref->{resolve_last} = $now;
-    }
-
-    my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
-    my $state = $command->[STATE];
-    $client_ref->{addr_connected} = undef;
-    $state->{address_i}	= -1;
-    $state->{address} = $client_ref->{addr_info};
 
     $client_ref->_connect_next;
 }
@@ -586,14 +703,14 @@ sub _connect_next {
     my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("No command during connect");
     my $state = $command->[STATE];
-    while (my $addr = $client_ref->{addr_connected} = $state->{address}[++$state->{address_i}]) {
-        $client_ref->fatal("Already connected") if defined $addr->{connected};
+
+    while (my $addr = $state->{address}[++$state->{address_i}]) {
         my $socket = IO::Socket->new();
         do {
             # Make sure CLO_EXEC is set
             local $^F = -1;
             if (!$socket->socket($addr->{family}, SOCK_STREAM, IPPROTO_TCP)) {
-                $addr->{last_connect_error} = "socket: $^E";
+                $addr->{last_connect_error} = "Socket: $^E";
                 next;
             }
         };
@@ -613,9 +730,9 @@ sub _connect_next {
             my $callback = sub { $client_ref->_connect_writable };
             $socket->add_write($callback);
             # $socket->add_error($callback);
-            $socket->add_read(sub { $client_ref->_connect_readable });
+            $client_ref->{in} = undef;
             $client_ref->{timeout} = timer(
-                $client_ref->{connection_timeout},
+                $addr->{connection_timeout} // $client_ref->{connection_timeout},
                 sub { $client_ref->_connection_timeout }
             );
             $client_ref->{active} = 1;
@@ -624,7 +741,10 @@ sub _connect_next {
             $client_ref->_connected($!) || return;
         }
     }
-    $client_ref->error($state->{first_error} || "Assertion: No failure reason after connection attempts");
+
+    $client_ref->error(
+        $state->{first_error} ||
+        "Assertion: No failure reason after connection attempts");
 }
 
 sub _connect_writable {
@@ -635,7 +755,7 @@ sub _connect_writable {
         $client_ref->fatal("No command during connect");
     my $state = $command->[STATE];
 
-    my $addr = $client_ref->{addr_connected};
+    my $addr = $state->{address}[$state->{address_i}];
     $addr->{connected} = undef;
     my $err = $client_ref->{socket}->getsockopt(SOL_SOCKET, SO_ERROR);
     if (!defined $err) {
@@ -643,64 +763,25 @@ sub _connect_writable {
         $client_ref->error("Assertion: $addr->{last_connect_error}");
         return;
     }
+
     # We should get a final result
     if ($err == EINPROGRESS || $err == EWOULDBLOCK) {
         $addr->{last_connect_error} = "Socket writable while connection still in progress";
         $client_ref->error("Assertion: $addr->{last_connect_error}");
         return;
     }
+
     if ($err) {
         # Convert to dualvar
         $err = $! = $err;
-        # $client_ref->close;
-        $addr->{last_connect_error} = "Read didn't trigger during connection error: $err";
-        $client_ref->error("Assertion: $addr->{last_connect_error}");
-        return;
+        $client_ref->close;
     } else {
-        # Don't use $client_ref->close since we want to keep $client_ref->{socket}
-        $client_ref->{socket}->delete_read;
-        $client_ref->{out} = "";
-        $client_ref->{socket}->delete_write;
-        $client_ref->{active} = 0;
-        $client_ref->{timeout} = undef;
+        # Don't just use $client_ref->close since we want to keep $client_ref->{socket}
+        local $client_ref->{socket} = $client_ref->{socket};
+        $client_ref->close;
     }
     $client_ref->_connected($err) || return;
     $client_ref->_connect_next;
-}
-
-sub _connect_readable {
-    my ($client_ref) = @_;
-
-    # Called with active = 1
-    my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
-    my $state = $command->[STATE];
-    my $addr = $client_ref->{addr_connected};
-    $addr->{connected} = undef;
-
-    # It seems an actual read/close won't happen on succesfull connect
-    # Select seems to return a lone writable without readable event first
-    my $rc = sysread($client_ref->{socket}, my $buffer, $client_ref->{block_size});
-    if ($rc) {
-        # Nothing should be happening on the connection since we have no
-        # command pending
-        my $response = display_string($buffer);
-        $addr->{last_connect_error} = "Response without request: $response";
-        $client_ref->error("ADB server $addr->{connect_ip} port $addr->{connect_port}: $addr->{last_connect_error}");
-    } elsif (defined $rc) {
-        # For now we handle ECONNRESET as a normal connect error.
-        # This gives a chance to connect to alternative IPs
-        # Not sure if that is the right choice
-        $addr->{last_connect_error} = "Connected but immediately closed";
-        $client_ref->error("ADB server $addr->{connect_ip} port $addr->{connect_port}: $addr->{last_connect_error}");
-    } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
-        return;
-    } else {
-        my $err = $!;
-        $client_ref->close;
-        $client_ref->_connected($err) || return;
-        $client_ref->_connect_next;
-    }
 }
 
 sub _connection_timeout {
@@ -710,7 +791,7 @@ sub _connection_timeout {
     my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("No command during connect");
     my $state = $command->[STATE];
-    my $addr = $client_ref->{addr_connected};
+    my $addr = $state->{address}[$state->{address_i}];
     $addr->{connected} = undef;
 
     $! = ETIMEDOUT;
@@ -730,15 +811,15 @@ sub _connected {
     my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("No command during connect");
     my $state = $command->[STATE];
-    my $addr = $client_ref->{addr_connected} ||
-        $client_ref->fatal("Cannot have _connected without addr_connected");
+    my $addr = $state->{address}[$state->{address_i}];
 
     if ($err == 0) {
-        $addr->{connected} = clocktime_running() || 1e-9;
         # $client_ref->{in} = "";
         # $client_ref->{sent} = 0;
         # $client_ref->{expect_eof} = undef;
-        $client_ref->success($addr);
+        $addr->{connected} = clocktime_running() || 1e-9;
+        $client_ref->{addr_connected} = $addr;
+        $client_ref->success(dclone($addr));
         return 0;
     } else {
         $addr->{last_connect_error} = "Connect error: $err";
@@ -767,9 +848,8 @@ sub _connected {
 
 # Called with active = 0 and CONNECT command already removed from the queue
 sub _connect_done {
+    my $client_ref = shift;
     my $command = shift;
-    my $client = shift;
-    my $client_ref = $client->client_ref;
 
     my $c = shift @{$client_ref->{commands}} ||
         $client_ref->fatal("_connect_done without command");
@@ -825,7 +905,7 @@ sub _connect_spawn {
         $state->{step} = \&_connect_kill;
     } else {
         # Simply call the original callback
-        my $addr = $client_ref->{addr_connected};
+        my $addr = $state->{address}[$state->{address_i}];
         $client_ref->_connect_final($err, $addr);
         return;
     }
@@ -842,8 +922,8 @@ sub _connect_version {
     my $client_ref = $client->client_ref;
     # Version is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
-    my $addr = $client_ref->{addr_connected};
     my $state = $command->[STATE];
+    my $addr = $state->{address}[$state->{address_i}];
 
     if (!$err) {
         $addr->{version} = $version;
@@ -877,8 +957,8 @@ sub _connect_kill {
     my $client_ref = $client->client_ref;
     # Kill is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
-    my $addr = $client_ref->{addr_connected};
     my $state = $command->[STATE];
+    my $addr = $state->{address}[$state->{address_i}];
 
     if ($err) {
         $addr->{last_connect_error} = $err;
@@ -933,12 +1013,11 @@ sub _reader {
             }
             if ($client_ref->{expect_eof}) {
                 # Logic for expect_eof should imply this is never reached
-                $command ||
-                    $client_ref->fatal("expect_eof without command");
+                $command || $client_ref->fatal("expect_eof without command");
 
-                # Logic for expect_eof should imply this is never reached
+                # This shouldn't happen when talking to a proper ADB Nserver
                 $client_ref->{in} eq "" ||
-                    $client_ref->fatal("Spurious response bytes: " .
+                    $client_ref->error("Spurious response bytes: " .
                                        display_string($client_ref->{in}));
 
                 my $str = $client_ref->{expect_eof};

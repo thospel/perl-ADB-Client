@@ -14,8 +14,12 @@ use Test::More tests => 36;
 use Scalar::Util qw(weaken);
 
 BEGIN {
-    use_ok("ADB::Client", qw(mainloop)) ||
-        BAIL_OUT("Cannot even import mainloop from ADB::Client");
+    use_ok("ADB::Client",
+           qw(mainloop event_init unloop loop_levels timer immediate
+              string_from_value
+              $CALLBACK_DEFAULT $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
+              :events :other)) ||
+        BAIL_OUT("Cannot even use ADB::Client");
 }
 
 my $failed = 0;
@@ -99,3 +103,5 @@ $failed += is($client_ref, undef, "Weak ref is gone");
 $failed += !is(ADB::Client::Command->objects, 0, "Still no command objects are left");
 
 #BAIL_OUT("Basic tests already fail") if $failed;
+# We already got the object counts ourselves
+$QUIET = 1;

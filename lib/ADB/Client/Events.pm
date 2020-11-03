@@ -9,28 +9,39 @@ use ADB::Client::Timer qw(timers_collect timers_run);
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 our $EVENT_INITER = \&event_init;
+
+my ($timer, $immediate);
+BEGIN {
+    $timer = sub {
+        $EVENT_INITER->() if $EVENT_INITER;
+        my $package = caller();
+        if ($timer == ($package->can("timer") || 0)) {
+            no strict "refs";
+            no warnings "redefine";
+            *{$package . "::timer"} = \&ADB::Client::Events::timer;
+        }
+        goto \&ADB::Client::Events::timer;
+    };
+    $immediate = sub {
+        $EVENT_INITER->() if $EVENT_INITER;
+        my $package = caller();
+        if ($immediate == ($package->can("immediate") || 0)) {
+            no strict "refs";
+            no warnings "redefine";
+            *{$package . "::immediate"} = \&ADB::Client::Events::immediate;
+        }
+        goto \&ADB::Client::Events::immediate;
+    };
+}
+
 use Exporter::Tidy
     other => [qw(mainloop unloop loop_levels event_init
                  $IGNORE_PIPE_LOCAL $EVENT_INITER)],
     _map => {
         # Can't just export the placeholders since the replace will not
         # impact the imported symbol
-        timer => sub {
-            $EVENT_INITER->() if $EVENT_INITER;
-            my $package = caller();
-            no strict "refs";
-            no warnings "redefine";
-            *{$package . "::timer"} = \&ADB::Client::Events::timer;
-            goto \&ADB::Client::Events::timer;
-        },
-        immediate => sub {
-            $EVENT_INITER->() if $EVENT_INITER;
-            my $package = caller();
-            no strict "refs";
-            no warnings "redefine";
-            *{$package . "::immediate"} = \&ADB::Client::Events::immediate;
-            goto \&ADB::Client::Events::immediate;
-        },
+        timer => $timer,
+        immediate => $immediate,
     };
 
 # We want errors reported at the call site since they are bugs
@@ -90,7 +101,7 @@ sub delete_read(*) {
 sub delete_write(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
     caller_info("delete_write $fd") if $DEBUG;
-    croak "Descriptor $fd wasn't selected for write " unless $write_refs{$fd};
+    croak "Descriptor $fd wasn't selected for write" unless $write_refs{$fd};
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
     $write_refs{$fd} = undef;
@@ -106,7 +117,7 @@ sub delete_write(*) {
 sub delete_error(*) {
     my $fd = fileno(shift) // croak "Not a filehandle";
     caller_info("delete_error $fd") if $DEBUG;
-    croak "Descriptor $fd wasn't selected for error " unless $error_refs{$fd};
+    croak "Descriptor $fd wasn't selected for error" unless $error_refs{$fd};
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
     $error_refs{$fd} = undef;

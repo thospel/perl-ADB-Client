@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "013";
-$release_time = 1604313054;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "014";
+$release_time = 1604484700;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -81,6 +81,12 @@ $release_time = 1604313054;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/08_spawn.t' => {
+    '1.000' => '1.000'
+  },
+  't/98_fatal.t' => {
+    '1.000' => '1.000'
+  },
+  't/99_internals.t' => {
     '1.000' => '1.000'
   },
   't/TestDrive.pm' => {

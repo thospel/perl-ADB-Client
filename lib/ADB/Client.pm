@@ -6,15 +6,16 @@ our $VERSION = '1.000';
 
 use Carp;
 
-use ADB::Client::Ref qw(mainloop unloop loop_levels
-                        $CALLBACK_DEFAULT
-                        $ADB_HOST $ADB_PORT $ADB);
-use ADB::Client::Utils qw(info string_from_value $DEBUG $VERBOSE);
+use ADB::Client::Ref qw($CALLBACK_DEFAULT $ADB_HOST $ADB_PORT $ADB);
+use ADB::Client::Utils qw(info string_from_value $DEBUG $VERBOSE $QUIET);
+use ADB::Client::Events qw(mainloop event_init unloop loop_levels
+                           timer immediate);
 
 use Exporter::Tidy
-    other	=>[qw(mainloop unloop loop_levels string_from_value
+    events	=>[qw(mainloop event_init unloop loop_levels timer immediate)],
+    other	=>[qw(string_from_value
                       $CALLBACK_DEFAULT
-                      $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE)];
+                      $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET)];
 
 # Sanity check
 die "Bad file '", __FILE__, "'" if __FILE__ =~ /["\n\0]/;
@@ -23,6 +24,11 @@ my $objects = 0;
 
 sub objects {
     return $objects;
+}
+
+END {
+    # $QUIET first for easier code coverage
+    info("Still have %d %s objects at program end", $objects, __PACKAGE__) if !$QUIET && $objects;
 }
 
 sub ref_class {
@@ -41,7 +47,7 @@ sub DESTROY {
     --$objects;
     info("DESTROY @_") if $DEBUG;
     my $client_ref = ${shift()};
-    $client_ref->delete if $client_ref;
+    $client_ref->delete;
 }
 
 sub client_ref {
@@ -49,7 +55,9 @@ sub client_ref {
 }
 
 # Simply forward command
-for my $name (qw(connected close activate host port)) {
+for my $name (
+    qw(connected close activate host port fatal addr_info _addr_info
+       connection_data command_retired post_activate)) {
     my %replace = (
         NAME	=> $name,
         FILE	=> __FILE__,
@@ -141,7 +149,10 @@ sub NAME : method {
 ';
     $code =~ s/\b(NAME|LINE|NR_VARS|PROXY|FILE|INDEX)\b/$replace{$1}/g;
     # print STDERR $code;
-    eval $code || die $@;
+    if (!eval $code) {
+        $@ =~ s/\.?\n\z//;
+        croak $@;
+    }
 }
 
 __PACKAGE__->add_commands();

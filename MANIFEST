@@ -23,5 +23,7 @@ t/05_marker.t
 t/06_commands.t
 t/07_connect.t
 t/08_spawn.t
+t/98_fatal.t
+t/99_internals.t
 t/TestDrive.pm
 version_check

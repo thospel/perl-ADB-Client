@@ -13,10 +13,11 @@ use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
 use IO::Socket qw();
 
 use Exporter::Tidy
-    other	=>[qw(addr_info info caller_info dumper string_from_value
-                      display_string adb_check_response realtime clocktime
-                      realtime_running clocktime_running
-                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $DEBUG $VERBOSE
+    other	=>[qw(addr_info info caller_info callers dumper
+                      string_from_value display_string adb_check_response
+                      realtime clocktime realtime_running clocktime_running
+                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
+                      $DEBUG $VERBOSE $QUIET
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
                       DISPLAY_MAX)];
 
@@ -32,7 +33,7 @@ use constant {
     INFINITY		=> 9**9**9,
 };
 
-our ($DEBUG, $VERBOSE);
+our ($DEBUG, $VERBOSE, $QUIET);
 
 our $CLOCK_TYPE;
 our $CLOCK_TYPE_NAME =
@@ -131,7 +132,7 @@ sub addr_info {
 sub info {
     local ($!, $^E);
     if (!@_) {
-        my (undef, $filename, $line) = caller(1);
+        my (undef, $filename, $line) = caller(0);
         @_ = ("$filename $line");
     }
     my $format = shift;
@@ -159,14 +160,21 @@ sub info {
            @_);
 }
 
+sub callers {
+    my (@lines, $file, $line, $i);
+    # Skip the entry for callers itself, so start $i at 1
+    $file =~ s{.*/}{}s, push @lines, "$file:$line" while (undef, $file, $line) = caller(++$i);
+    return join(" ", @lines);
+}
+
 sub caller_info {
     my $format = shift;
-    my (@lines, $file, $line, $i);
-    $file =~ s{.*/}{}s, push @lines, "$file:$line" while (undef, $file, $line) = caller($i++);
     if (@_) {
-        info("$format [line %s]", @_, "@lines");
+        info("$format [%s]", @_, callers());
     } else {
-        info("$format [line @lines]");
+        my $callers = callers();
+        $callers =~ s{%}{%%}g;
+        info("$format [$callers]");
     }
 }
 
@@ -174,6 +182,7 @@ sub dumper {
     local $Data::Dumper::Indent	  = 1;
     local $Data::Dumper::Sortkeys = 1;
     local $Data::Dumper::Useqq	  = 1;
+    local $Data::Dumper::Terse    = 1;
     print STDERR Dumper(@_);
 }
 

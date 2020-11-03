@@ -9,7 +9,7 @@ use Carp;
 # Do everyything through ADB::Client::Events
 use Exporter::Tidy other => [qw(timers_collect timers_run timer immediate)];
 
-use ADB::Client::Utils qw(caller_info clocktime $DEBUG);
+use ADB::Client::Utils qw(caller_info info callers clocktime $DEBUG);
 
 my @timers = (undef);
 # @expired must be persistent so no timers get lost if a callback dies
@@ -22,6 +22,7 @@ my @immediate;
 sub TIME	() { 0 };
 sub INDEX	() { 1 };
 sub CODE	() { 2 };	# Must come after INDEX
+sub CALLERS	() { 3 };
 
 # Timers are kept in a simple binary heap @timers
 sub new {
@@ -35,7 +36,11 @@ sub new {
     }
     my $timer = bless [$time, $i, $fun], $class;
     weaken($timers[$i] = $timer);
-    caller_info("add Timer(%s) %08x", $_[1], refaddr($timer)) if $DEBUG;
+    if ($DEBUG) {
+        my $callers = callers();
+        $timer->[CALLERS] = $callers;
+        info("add Timer(%s) %08x [%s]", $_[1], refaddr($timer), $callers);
+    }
     return $timer;
 }
 
@@ -51,7 +56,11 @@ sub timer {
     }
     my $timer = bless [$time, $i, $fun];
     weaken($timers[$i] = $timer);
-    caller_info("add Timer(%s) %08x", $_[1], refaddr($timer)) if $DEBUG;
+    if ($DEBUG) {
+        my $callers = callers();
+        $timer->[CALLERS] = $callers;
+        info("add Timer(%s) %08x [%s]", $_[1], refaddr($timer), $callers);
+    }
     return $timer;
 }
 
@@ -61,7 +70,11 @@ sub immediate {
     # If we ever expose the TIME element we should put clocktime() there
     my $timer = bless [0, 0, $fun];
     weaken($immediate[@immediate] = $timer);
-    caller_info("add Immediate Timer %08x", refaddr($timer)) if $DEBUG;
+    if ($DEBUG) {
+        my $callers = callers();
+        $timer->[CALLERS] = $callers;
+        info("add Immediate Timer(0) %08x [%s]", refaddr($timer), $callers);
+    }
     return $timer;
 }
 
@@ -69,7 +82,14 @@ sub delete : method {
     my ($timer) = @_;
 
     my $i = $timer->[INDEX];
-    caller_info("delete Timer %08x", refaddr($timer)) if $DEBUG && defined $i;
+    if ($DEBUG && defined $i) {
+        if ($timer->[CALLERS]) {
+            my $callers = callers();
+            info("delete Timer %08x [%s], added add %s", refaddr($timer), $callers, $timer->[CALLERS]);
+        } else {
+            caller_info("delete Timer %08x", refaddr($timer));
+        }
+    }
     if (!$i) {
         croak "Not a timer reference" unless defined($i) && $i == 0;
         # Could be a timer sitting on the expired queue in run_now

@@ -31,7 +31,7 @@ our $KILL_TIMEOUT = 2;
 
 my (%starters, $ended);
 END {
-    info("END Starter") if $DEBUG;
+    # info("END Starter") if $DEBUG;
     $ended = 1;
     %starters = ();
 }

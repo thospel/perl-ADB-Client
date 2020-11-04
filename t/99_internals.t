@@ -17,7 +17,7 @@ my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 81;
+use Test::More tests => 83;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -279,6 +279,12 @@ is($client->connection_data, undef, "connection_data starts undef");
 eval { $client->version(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Expected error from version");
 eval { $client->client_ref->command_simple({}, undef, 1000000) };
+like($@, qr{^No command at index '1000000' at },
+     "Expected error from command_simple");
+
+eval { $client->marker(foo => 9) };
+like($@, qr{^Unknown argument foo at }, "Expected error from special_simple");
+eval { $client->client_ref->special_simple({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from command_simple");
 

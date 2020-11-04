@@ -20,7 +20,9 @@ use ADB::Client::Utils
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
-use ADB::Client::Command;
+use ADB::Client::Command qw(COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
+                            EXPECT_EOF
+                            COMMAND_REF CALLBACK ARGUMENTS STATE);
 use Storable qw(dclone);
 
 use Exporter::Tidy
@@ -28,28 +30,6 @@ use Exporter::Tidy
                       $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
 
 use constant {
-    # Index in @COMMANDS element
-    COMMAND_NAME	=> 0,
-    COMMAND	=> 1,
-    NR_RESULTS	=> 2,
-    FLAGS	=> 3,
-    PROCESS	=> 4,
-    # CODE is used for SPECIAL commands
-    # Cannot reuse PROCESS for this since PROCESS will run at command retirement
-    # (and we want that since it could be useful)
-    # It's up to the SPECIAL commands to give meaning to elements after this
-    CODE	=> 2,
-
-    # FLAGS values
-    EXPECT_EOF => 1,
-
-    # Index in commands element
-    COMMAND_REF	=> 0,
-    CALLBACK	=> 1,
-    # possibly unify ARGUMENTS and STATE
-    ARGUMENTS	=> 2,
-    STATE	=> 3,
-
     SPECIAL	=> "",
 };
 
@@ -85,8 +65,8 @@ our @COMMANDS = (
     KILL,
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
-    [features		=> "host:features", -1, EXPECT_EOF,  \&process_features],
-    [remount		=> "remount:", INFINITY, EXPECT_EOF,  \&process_remount],
+    [features		=> "host:features", -1, EXPECT_EOF, \&process_features],
+    [remount		=> "remount:", INFINITY, EXPECT_EOF, \&process_remount],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [transport		=> "host:transport-%s", 0, 0],
@@ -413,11 +393,11 @@ sub _forget {
 sub connect : method {
     my ($client_ref, $arguments, $callback, $index) = @_;
 
-    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
-
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
-    my $connector = $client_ref->connector($command_ref, $callback);
+    my $connector = $client_ref->connector($command_ref, $arguments, $callback);
+
+    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
     push @{$client_ref->{commands}}, $connector;
     $client_ref->activate(1);
@@ -428,7 +408,8 @@ sub spawn {
 
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
-    my $connector = $client_ref->connector($command_ref, $callback, \&_connect_spawn, $arguments);
+    my $connector =
+        $client_ref->connector($command_ref, $arguments, $callback, 1);
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
@@ -475,8 +456,6 @@ sub error {
     $client_ref->close();
     local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
         $client_ref->fatal("error without command");
-    # We may need $command to exist during the callback because sometimes
-    # we still use it in a closure (see e.g. _connect_done)
     local $client_ref->{post_activate} = 0;
     $client_ref->{command_retired}->[CALLBACK]->($client_ref->{client}, @_);
     $client_ref->activate if $client_ref->{post_activate};
@@ -519,8 +498,6 @@ sub success {
             return;
         }
     }
-    # We may need $command to exist during the callback because sometimes
-    # we still use it in a closure (see e.g. _connect_done)
     local $client_ref->{post_activate} = 1;
     $command->[CALLBACK]->($client_ref->{client}, undef, @$result);
     $client_ref->activate if $client_ref->{post_activate};
@@ -575,7 +552,7 @@ sub activate {
             $client_ref->fatal("Reconnect loop") if
                 $command->[STATE]{reconnects}++;
             unshift(@{$client_ref->{commands}},
-                    $client_ref->connector(CONNECT, undef, \&_connect_done));
+                    $client_ref->connector(CONNECT));
             redo;
         }
         $client_ref->{out} = $client_ref->{commands}[0][ARGUMENTS];
@@ -602,27 +579,43 @@ sub _marker {
 }
 
 sub connector {
-    my ($client_ref, $command_ref, $callback, $step, $arguments) = @_;
+    my ($client_ref, $command_ref, $arguments, $callback, $spawn) = @_;
 
     my $state = {
-        command_ref => $command_ref,
+        command_ref	=> $command_ref,
+        version_min	=> delete $arguments->{version_min},
+        version_max	=> delete $arguments->{version_max},
     };
-    if ($arguments) {
+    if ($spawn) {
         $state->{spawn}		= 1;
-        $state->{version_min}	= delete $arguments->{version_min} || 0;
         $state->{kill}		= delete $arguments->{kill};
         $state->{adb}		= delete $arguments->{adb} // $client_ref->{adb};
         $state->{adb_socket}	= delete $arguments->{adb_socket} // $client_ref->{adb_socket} // 0;
+    }
 
+    if (defined $state->{version_min}) {
         $state->{version_min} =~ /^[1-9][0-9]*\z|^0\z/ ||
-            croak "Version_min is not a positive integer";
-        $state->{version_min} <= 2**16 ||
+            croak "Version_min is not a natural number";
+        $state->{version_min} < 2**16 ||
             croak "Version_min '$state->{version_min}' out of range";
+    }
+
+    if (defined $state->{version_max}) {
+        $state->{version_max} =~ /^[1-9][0-9]*\z|^0\z/ ||
+            croak "Version_max is not a natural number";
+        #$state->{version_max} < 2**16 ||
+        #    croak "Version_max '$state->{version_max}' out of range";
     }
 
     my $command = ADB::Client::Command->new;
     $command->[STATE] = $state;
     $command->[COMMAND_REF] = $command_ref;
+    my $step =
+        !$callback ? \&_autoconnect_done :
+        $spawn     ? \&_connect_step :				# spawn()
+        defined $state->{version_min} || defined $state->{version_max} ? \&_connect_step :	# connect()
+        # No need for complexity if there is no version_min in connect()
+        undef;
     if ($step) {
         $state->{callback} = $callback;
         $state->{step} = $step;
@@ -638,11 +631,41 @@ sub connector {
 sub _connector {
     my $client_ref = shift->client_ref;
 
+    # Hack! This tells the success (and error) method not to call activate
+    $client_ref->post_activate(0);
+
     my $command = $client_ref->{command_retired};
     unshift @{$client_ref->{commands}}, $command;
-    $command->[STATE]{step}->($client_ref, $command, @_);
-    # Hack! This tells the success method not to call activate
-    $client_ref->post_activate(0);
+    my $state = $command->[STATE];
+    my $old_step = $state->{step};
+    $state->{step} = \&_connect_step;
+    $command->[COMMAND_REF] = $state->{command_ref};
+    $old_step->($client_ref, $command, @_);
+}
+
+# Restore the real callback and call the success or error method on it
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
+sub _connector_final {
+    my $client_ref = shift;
+
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command during _connector_final");
+    my $state = $command->[STATE];
+    # Restore reresolve
+    $client_ref->{reresolve} = $state->{reresolve};
+    # Restore original command_ref
+    $command->[COMMAND_REF] = $state->{command_ref};
+    # Restore original callback
+    $command->[CALLBACK] = $state->{callback};
+    if ($_[0]) {
+        $client_ref->{addr_connected} = $state->{addr_connected};
+        $client_ref->error(@_);
+    } else {
+        shift;
+        # this will also call activate
+        $client_ref->success(@_);
+    }
 }
 
 # Called with active = 0
@@ -652,9 +675,31 @@ sub _connect_start {
     my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("No command during connect");
     my $state = $command->[STATE];
+    if ($client_ref->{reresolve} && !$client_ref->{socket}) {
+        my $now = clocktime_running();
+        my $age = $now - $client_ref->{resolve_last};
+        if ($age >= $client_ref->{reresolve} || $age < 0) {
+            my $addr_info =
+                utils_addr_info($client_ref->{host}, $client_ref->{port}, 1);
+            if (ref $addr_info ne "ARRAY") {
+                $client_ref->error($addr_info);
+                return;
+            }
+            $client_ref->{resolve_last} = $now;
+            $client_ref->{addr_connected} = undef;
+        }
+    }
+
+    if ($state->{step}) {
+        # Don't store these for auto-reconnect
+        $state->{reresolve} = $client_ref->{reresolve};
+        $client_ref->{reresolve} = 0;
+        $state->{addr_connected} = $client_ref->{addr_connected};
+    }
     $state->{address_i}	= -1;
     $state->{address} = $client_ref->{addr_connected} ?
         [$client_ref->{addr_connected}] : $client_ref->{addr_info};
+    #Test::More::diag("_connect_start(@_) [@{$state->{address}}]");
 
     if ($client_ref->{socket}) {
         $client_ref->{addr_connected} ||
@@ -846,15 +891,16 @@ sub _connected {
     }
 }
 
-# Called with active = 0 and CONNECT command already removed from the queue
-sub _connect_done {
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
+sub _autoconnect_done {
     my $client_ref = shift;
     my $command = shift;
 
     my $c = shift @{$client_ref->{commands}} ||
-        $client_ref->fatal("_connect_done without command");
+        $client_ref->fatal("_autoconnect_done without command");
     $c == $command ||
-        $client_ref->fatal("Inconsistent _connect_done");
+        $client_ref->fatal("Inconsistent _autoconnect_done");
     if ($_[0]) {
         # this calls error on the NEXT command
         # (the one that triggered this reconnect)
@@ -864,97 +910,98 @@ sub _connect_done {
     }
 }
 
-# Restore the real callback and call the success or error method on it
-# Called with active = 0 and CONNECT command already removed from the queue
-sub _connect_final {
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
+# Error: All connects failed
+# Success: we have a connection
+sub _connect_step {
     my $client_ref = shift;
-    my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during activate");
-    my $state = $command->[STATE];
-    # Restore original command_ref
-    $command->[COMMAND_REF] = $state->{command_ref};
-    # Restore original callback
-    $command->[CALLBACK] = $state->{callback};
-    if ($_[0]) {
-        $client_ref->error(@_);
-    } else {
-        $client_ref->success(@_);
-    }
-}
-
-sub _connect_spawn {
     my $command = shift;
-    my $client = shift;
     my $err = shift;
 
     my $state = $command->[STATE];
 
-    # Error: All connects failed
-    # Success: we have a connection
-    die "Not implemented yet _connect_spawn($err)" if $err;
+    if ($err) {
+        # All connects failed
+        $client_ref->_connector_final($err, @_);
+        return;
+    }
 
-    my $client_ref = $client->client_ref;
-    $client_ref->{socket} ||
-        $client_ref->fatal("connection without socket");
+    $client_ref->{socket} || $client_ref->fatal("connection without socket");
 
-    if ($state->{version_min} || !$state->{kill}) {
-        $command->[COMMAND_REF] = VERSION;
-        $state->{step} = \&_connect_version;
-    } elsif (1) {
-        $command->[COMMAND_REF] = KILL;
+    if (defined $state->{version_min} ||
+        defined $state->{version_max} ||
+        !$state->{kill}) {
+        $command->ref(VERSION);
+        # For now do version even if no conditional kill
+        # Just to make sure it's really an ADB server
+        $state->{step} = \&_connect_step_version;
+    } elsif ($state->{kill}) {
+        $command->ref(KILL);
         $state->{step} = \&_connect_kill;
     } else {
         # Simply call the original callback
         my $addr = $state->{address}[$state->{address_i}];
-        $client_ref->_connect_final($err, $addr);
+        $client_ref->_connector_final($err, $addr);
         return;
     }
     # We are called with a just opened connection. Don't reconnect on close
+    # $client_ref->close;
     $state->{reconnects} = 1;
     $client_ref->activate;
 }
 
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
 # $err implies some form of bad response
 # typically this means you connected to a non-ADB server
-sub _connect_version {
-    my ($command, $client, $err, $version) = @_;
+sub _connect_step_version {
+    my ($client_ref, $command, $err, $version) = @_;
 
-    my $client_ref = $client->client_ref;
     # Version is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
+
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
 
-    if (!$err) {
-        $addr->{version} = $version;
-        if ($version >= $state->{version_min}) {
-            # Simply call the original callback
-            $client_ref->_connect_final($err, $addr);
-            return;
-        }
-        # Version is too low
-        if ($state->{kill}) {
-            # Kill server if so requested
-            $state->{step} = \&_connect_kill;
-            $state->{reconnects} = 0;
-            $command->[COMMAND_REF] = KILL;
-            $client_ref->activate;
-            return;
-        }
-        # Otherwise report the error
-        $err = "version '$version' is below '$state->{version_min}'";
+    if ($err) {
+        $addr->{last_connect_error} = $err;
+        $state->{first_error} ||= $err;
+        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
+        return;
     }
+    if (defined $state->{version_min} && $version < $state->{version_min}) {
+        $err = "version '$version' is below '$state->{version_min}'";
+    } elsif (defined $state->{version_max} && $version > $state->{version_max}) {
+        $err = "version '$version' is above '$state->{version_max}'";
+    } else {
+        # Version is in window
+        # Simply call the original callback
+        $client_ref->_connector_final(undef, $addr);
+        return;
+    }
+    # Version is too low or too high
     $addr->{last_connect_error} = $err;
     $state->{first_error} ||= $err;
-    $client_ref->_connect_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
+
+    if ($state->{kill}) {
+        # Kill server if so requested
+        $state->{step} = \&_connect_kill;
+        $state->{reconnects} = 0;
+        $command->ref(KILL);
+        $client_ref->activate;
+        return;
+    }
+    $client_ref->_connect_next;
 }
 
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
 sub _connect_kill {
+    my $client_ref = shift;
     my $command = shift;
-    my $client = shift;
     my $err = shift;
 
-    my $client_ref = $client->client_ref;
     # Kill is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
     my $state = $command->[STATE];
@@ -963,11 +1010,11 @@ sub _connect_kill {
     if ($err) {
         $addr->{last_connect_error} = $err;
         $state->{first_error} ||= $err;
-        $client_ref->_connect_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
+        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
         return;
     }
 
-    $state->{step} = \&_connect_spawn;
+    $state->{step} = \&_connect_step;
     $state->{reconnects} = 0;
     $command->[COMMAND_REF] = SPAWN;
     $client_ref->_connect_next;
@@ -1105,11 +1152,15 @@ sub _reader {
 }
 
 sub process_version {
-    my ($version) = @_;
+    my ($version, undef, $client_ref) = @_;
 
     # Caller will already construct an error message using the input string
     $version =~ m{^[0-9a-fA-F]{4}\z} || die "Not a 4 digit hex number";
-    return [hex $version];
+    $version = hex $version;
+    $client_ref->{addr_connected} ||
+        $client_ref->fatal("version without addr_connected");
+    $client_ref->{addr_connected}{version} = $version;
+    return [$version];
 }
 
 sub process_remount {

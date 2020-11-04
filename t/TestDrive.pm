@@ -29,7 +29,7 @@ use Exporter::Tidy
     other =>
     [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects
         $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
-        adb_start adb_stop adb_unacceptable adb_unreachable adb_closer
+        adb_start adb_stop adb_unacceptable adb_unreachable adb_closer adb_echo
         adb_version adb_blackhole
         collect_stderr collected_stderr uncollect_stderr dumper)];
 
@@ -178,6 +178,10 @@ sub adb_unreachable {
 
 sub adb_closer {
     return _adb_listener("Closer");
+}
+
+sub adb_echo {
+    return _adb_listener("Echo");
 }
 
 sub adb_version {

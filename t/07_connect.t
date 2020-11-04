@@ -13,9 +13,9 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 543;
+use Test::More tests => 628;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
-                 adb_blackhole adb_closer dumper
+                 adb_blackhole adb_closer adb_echo dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);
 
 # We already checked loading in 02_adb_client.t
@@ -27,6 +27,7 @@ my $port2 = adb_version(10);
 my $rport = adb_unreachable();
 my $port_ssh = adb_blackhole("SSH-2.0-OpenSSH_8.4p1 Debian-2\n");
 my $port_closer = adb_closer();
+my $port_echo = adb_echo();
 
 my (@results, $err, $result);
 my $callback = sub { push @results, [shift->connected, @{dclone(\@_)}] };
@@ -355,6 +356,7 @@ for my $i (0..2) {
                 $retry == 1 || $retry == 2 ? (last_connect_error => "Unprobed") :
                 $retry == 3 ? (last_connect_error => $result->{last_connect_error}) :
                 (),
+                $direct == 1 ? (version => 39) : (),
             }, "Got through set and connected [$i, $direct, $retry]");
             if ($retry == 3) {
                 like($result->{last_connect_error}, qr{^Connect error: },
@@ -454,3 +456,174 @@ for my $direct (0..1) {
         }
     }
 }
+
+# Check for minimum version
+$addr_info = [@{addr_info("127.0.0.1", $rport)},	# Refuse
+              @{addr_info("127.0.0.1", $port2)},	# OK v 10
+              @{addr_info($UNREACHABLE, 5037)},		# Timeout
+              @{addr_info("127.0.0.1", $port)},		# OK v 39
+              @{addr_info("127.0.0.1", $rport)},	# Refuse
+          ];
+for my $ai (@$addr_info) {
+    $ai->{connection_timeout} = -1 if $ai->{connect_ip} eq $UNREACHABLE;
+}
+$client = new_ok("ADB::Client" =>
+                 [host => "127.0.0.1", port => 1,
+                  addr_info => $addr_info,
+                  connection_timeout => $CONNECTION_TIMEOUT]);
+my $_addr_info = $client->_addr_info;
+$result = $client->connect(version_min => 11);
+is_deeply($result,
+          {%{$addr_info->[3]},
+           version => 39,
+           connected => $result->{connected}},
+          "We connected to server 3");;
+is_deeply($client->connection_data, $result,
+          "Result is also stored as connecton_data");
+is_deeply($_addr_info->[3], $result, "We connected to server 3");
+cmp_ok($result->{connected}, ">", 0, "Conecting took time");
+for my $i (0..2) {
+    ok(exists $_addr_info->[$i]{connected}, "Tried to connect to server[$i]");
+    if ($i == 1) {
+        cmp_ok($_addr_info->[$i]{connected}, ">", 0,
+               "Connection to server $i was made but then dropped");
+        is($_addr_info->[$i]{last_connect_error}, "version '10' is below '11'",
+             "version too low on server $i");
+        is($_addr_info->[$i]{version}, 10, "Known version on server $i");
+    } else {
+        is($_addr_info->[$i]{connected}, undef,
+           "Could not connect to connect to server[$i]");
+        like($_addr_info->[$i]{last_connect_error}, qr{^Connect error: },
+             "Reason we could not connect to server $i");
+    }
+}
+ok(!exists $_addr_info->[4]{connected},
+   "Did not try to connect to server[4]");
+ok(!exists $_addr_info->[4]{last_connect_error},
+   "Did not try to connect to server[4]");
+is($client->connected, 0, "Client is currently unconnected");
+# Just in case. Shouldn't be connected after "version"
+$client->close();
+
+# Prepare for retest. Put some markers so we can see changes
+for my $i (0..4) {
+    $_addr_info->[$i]{last_connect_error} = "Unprobed";
+    delete $_addr_info->[$i]{connected};
+    delete $_addr_info->[$i]{version};
+}
+# Do a request that would fit server 1 but we are sticky on server 3
+my $dummy = eval { $client->connect(version_max => 20) };
+like($@, qr{^version '39' is above '20' at }, "Keep looking at server 3");
+for my $i (0..4) {
+    if ($i == 3) {
+        cmp_ok($_addr_info->[$i]{connected}, ">", 0,
+               "Connection to server $i was made but then dropped");
+        is($_addr_info->[$i]{last_connect_error}, "version '39' is above '20'",
+             "Did not try to connect to server[$i]");
+        is($_addr_info->[$i]{version}, 39, "Known version on server $i");
+    } else {
+        ok(!exists $_addr_info->[$i]{connected},
+           "Did not try to connect to server[$i]");
+        is($_addr_info->[$i]{last_connect_error}, "Unprobed",
+             "Did not try to connect to server[$i]");
+        ok(!exists $_addr_info->[$i]{version},
+           "Did not try to connect to server[$i]");
+    }
+}
+is_deeply($client->connection_data, $_addr_info->[3],
+          "We stick to server 3");
+
+$client->forget;
+for my $i (0..4) {
+    $_addr_info->[$i]{last_connect_error} = "Unprobed";
+    delete $_addr_info->[$i]{connected};
+    delete $_addr_info->[$i]{version};
+}
+is($client->connection_data, undef, "Not sticking to server 3 anymore");
+# Make an impossible request
+$dummy = eval { $client->connect(version_min => 11, version_max => 12) };
+like($@, qr{^ADB server 127.0.0.1 port $rport: Connect error: },
+     "Return the error on the first server");
+# $_addr_info = $client->addr_info;
+for my $i (0..4) {
+    ok(exists $_addr_info->[$i]{last_connect_error},
+       "Each server has a reason to fail");
+    isnt($_addr_info->[$i]{last_connect_error}, "Unprobed",
+         "And the reason isn't our probe");
+    ok(exists $_addr_info->[$i]{connected},
+       "Each server has a connected state");
+}
+for my $i (0, 2, 4) {
+    like($_addr_info->[$i]{last_connect_error}, qr{^Connect error: },
+         "Server $i could not connect");
+    is($_addr_info->[$i]{connected}, undef,
+         "Server $i could not connect");
+}
+is($_addr_info->[1]{last_connect_error}, "version '10' is below '11'",
+         "Server 1 could not connect");
+cmp_ok($_addr_info->[1]{connected}, ">", 0, "Server 1 could connect");
+is($_addr_info->[3]{last_connect_error}, "version '39' is above '12'",
+         "Server 3 could not connect");
+cmp_ok($_addr_info->[3]{connected}, ">", 0, "Server 3 could connect");
+
+# Experiment with a server that immediately closes the connection
+$addr_info = [@{addr_info("127.0.0.1", $port_closer)},	# Closer
+              @{addr_info("127.0.0.1", $port2)},	# OK v 10
+          ];
+$client = new_ok("ADB::Client" =>
+                 [host => "127.0.0.1", port => 1,
+                  addr_info => $addr_info,
+                  connection_timeout => $CONNECTION_TIMEOUT]);
+is($client->connection_data, undef, "No connection_data yet");
+$_addr_info = $client->_addr_info;
+$dummy = eval { $client->connect(version_min => 0) };
+like($@,
+     qr{^ADB server 127\.0\.0\.1 port $port_closer: Unexpected EOF(?: while still writing "000Chost:version" to adb socket)? at },
+     "Error from Closer");
+cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to closer");
+like($_addr_info->[0]{last_connect_error},
+   qr{^Unexpected EOF(?: while still writing "000Chost:version" to adb socket)?\z},
+   "We didn't like closer");
+ok(!exists $_addr_info->[1]{connected}, "We never tried after closer");
+ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after closer");
+
+# Experiment with a server that sends a greeting
+$addr_info = [@{addr_info("127.0.0.1", $port_ssh)},	# Greeter
+              @{addr_info("127.0.0.1", $port2)},	# OK v 10
+          ];
+$client = new_ok("ADB::Client" =>
+                 [host => "127.0.0.1", port => 1,
+                  addr_info => $addr_info,
+                  connection_timeout => $CONNECTION_TIMEOUT]);
+is($client->connection_data, undef, "No connection_data yet");
+$_addr_info = $client->_addr_info;
+$dummy = eval { $client->connect(version_min => 0) };
+like($@,
+     qr{^ADB server 127\.0\.0\.1 port $port_ssh: (?:Bad ADB status "ssh-"|\QResponse while command has not yet completed: "ssh-2.0-openssh_8.4p1 debian-2\n"\E) at },
+     "Error from greeter");
+cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to greeter");
+like($_addr_info->[0]{last_connect_error},
+     qr{^(?:Bad ADB status "ssh-"|\QResponse while command has not yet completed: "ssh-2.0-openssh_8.4p1 debian-2\n"\E)\z},
+   "We didn't like greeter");
+ok(!exists $_addr_info->[1]{connected}, "We never tried after greeter");
+ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after greeter");
+
+# Experiment with a server that sends a bad reply after receiving som
+$addr_info = [@{addr_info("127.0.0.1", $port_echo)},	# Echo
+              @{addr_info("127.0.0.1", $port2)},	# OK v 10
+          ];
+$client = new_ok("ADB::Client" =>
+                 [host => "127.0.0.1", port => 1,
+                  addr_info => $addr_info,
+                  connection_timeout => $CONNECTION_TIMEOUT]);
+is($client->connection_data, undef, "No connection_data yet");
+$_addr_info = $client->_addr_info;
+$dummy = eval { $client->connect(version_min => 0) };
+like($@,
+     qr{^ADB server 127\.0\.0\.1 port $port_echo: Bad ADB status "000C" at },
+     "Error from echo");
+cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to echo");
+is($_addr_info->[0]{last_connect_error},
+   'Bad ADB status "000C"', "We didn't like echo");
+ok(!exists $_addr_info->[1]{connected}, "We never tried after echo");
+ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after echo");

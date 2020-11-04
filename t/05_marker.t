@@ -11,7 +11,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 17;
+use Test::More tests => 19;
 use TestDrive qw(adb_start);
 use Storable qw(dclone);
 

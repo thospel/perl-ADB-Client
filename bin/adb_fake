@@ -34,21 +34,23 @@ use constant {
     OKAY	=> 1,
     FAIL	=> 0,
 
-    LISTENER	=> 0,	# Normal fake adb server
-    UNACCEPTABLE=> 1,	# Doesnt' even accept connections (OS will accept)
-    UNREACHABLE	=> 2,	# Occupies a port but refuses connection (no listen)
-    BLACKHOLE	=> 3,	# Eats everything on the accepted connection. Can talk
-    CLOSER	=> 4,	# Closes the connection as soon as n bytes are sent
-    ECHO	=> 5,	# Echoes whatever you type
+    CONTROL	=> 0,	# Control port
+    LISTENER	=> 1,	# Normal fake adb server
+    UNACCEPTABLE=> 2,	# Doesnt' even accept connections (OS will accept)
+    UNREACHABLE	=> 3,	# Occupies a port but refuses connection (no listen)
+    BLACKHOLE	=> 4,	# Eats everything on the accepted connection. Can talk
+    CLOSER	=> 5,	# Closes the connection as soon as n bytes are sent
+    ECHO	=> 6,	# Echoes whatever you type
 };
 
+$| = 1;
 event_init();
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
 my $IDLE_TIMEOUT = 10;
 my $accepted = my $listening = 0;
-my ($idle_timeout);
+my ($idle_timeout, %listeners, %specials);
 
 my @devices = (
     "10.253.0.13:5555\tdevice",
@@ -77,7 +79,7 @@ sub dumper {
 sub reader {
     my ($state) = @_;
 
-    my $rc = sysread($state->{socket_in}, my $buffer, $BLOCK_SIZE);
+    my $rc = sysread($state->{socket}, my $buffer, $BLOCK_SIZE);
     if ($rc) {
         unidle();
         $state->{in} .= $buffer;
@@ -101,12 +103,12 @@ sub reader {
 sub writer {
     my ($state) = @_;
 
-    my $rc = syswrite($state->{socket_out}, $state->{out}, $BLOCK_SIZE);
+    my $rc = syswrite($state->{socket}, $state->{out}, $BLOCK_SIZE);
     if ($rc) {
         unidle();
         substr($state->{out}, 0, $rc, "");
         if ($state->{out} eq "") {
-            $state->{socket_out}->delete_write();
+            $state->{socket}->delete_write();
             $state->{timeout} = undef;
         }
         if ($state->{closing}) {
@@ -124,13 +126,12 @@ sub writer {
 }
 
 my $state_std = {
-    socket_in	=> \*STDIN,
-    socket_out	=> \*STDOUT,
+    socket	=> \*STDIN,
     in		=> "",
     out 	=> "",
     on_read	=> \&stdread,
     on_close	=> undef,
-    wait_max	=> $TIMEOUT,
+    write_timeout	=> $TIMEOUT,
     on_error	=> sub { die $_[1] },
     specials	=> {},
 };
@@ -144,25 +145,32 @@ sub stdread {
 
     while ($state->{in} =~ s/^[^\S\n]*(.*?)[^\S\n]*\n//) {
         my $command = lc($1);
+        my $port;
         if ($command =~ m{listener(?:\s+(\d+))?\z}) {
-            add_listener($state->{listeners}, LISTENER, $1 // $ADB_VERSION);
+            $port = add_listener(LISTENER, $1 // $ADB_VERSION);
         } elsif ($command eq "unacceptable") {
-            add_listener($state->{listeners}, UNACCEPTABLE);
+            $port = add_listener(UNACCEPTABLE);
         } elsif ($command eq "unreachable") {
-            add_listener($state->{listeners}, UNREACHABLE);
+            $port = add_listener(UNREACHABLE);
         } elsif ($command =~ m{^blackhole(?:\s(.*))?\z}) {
             my $arg = $1 // "";
             $arg =~ s/\\n/\n/g;
-            add_listener($state->{listeners}, BLACKHOLE, $arg);
+            $port = add_listener(BLACKHOLE, $arg);
         } elsif ($command =~ m{closer(?:\s+(\d+))?\z}) {
-            add_listener($state->{listeners}, CLOSER, $1 // 0);
+            $port = add_listener(CLOSER, $1 // 0);
         } elsif ($command eq "echo") {
-            add_listener($state->{listeners}, ECHO);
+            $port = add_listener(ECHO);
         } elsif ($command eq "dump") {
             dumper("State: ", $state);
+            return;
+        } elsif ($command eq "quit") {
+            finish();
+            return;
         } elsif ($command ne "") {
-            output($state, "Unknown command: <$command>\n");
+            output($state, "Unknown: <$command>\n");
+            return;
         }
+        output($state, "Port: $port\n");
     }
 }
 
@@ -177,8 +185,8 @@ sub output {
     die "Unexpected upgrade string" if utf8::is_utf8($str);
 
     weaken(my $s = $state);
-    $state->{socket_out}->add_write(sub { writer($s) });
-    $state->{timeout} = timer($state->{wait_max}, sub { $s->{on_error}->($s, "Write timed out") });
+    $state->{socket}->add_write(sub { writer($s) });
+    $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
     $state->{out} .= $str;
 }
 
@@ -196,18 +204,23 @@ sub acceptable {
     my $state = bless {
         key		=> $key,
         listener	=> $listener,
-        socket_in	=> $socket,
-        socket_out	=> $socket,
+        socket		=> $socket,
         in		=> "",
         out 		=> "",
-        on_read		=>
-        $listener->{type} == LISTENER	? \&adb_read :
-        $listener->{type} == CLOSER	? \&adb_closer :
-        $listener->{type} == ECHO	? \&adb_echo :
-        \&adb_discard,
-        on_error	=> \&adb_error,
-        on_close	=> \&adb_close,
-        wait_max	=> $TIMEOUT,
+        $listener->{type} == CONTROL ? (
+            on_read	=> \&stdread,
+            on_close	=> \&finish,
+            on_error	=> sub { die $_[1]},
+        ) : (
+            on_read		=>
+            $listener->{type} == LISTENER	? \&adb_read :
+            $listener->{type} == CLOSER	? \&adb_closer :
+            $listener->{type} == ECHO	? \&adb_echo :
+            \&adb_discard,
+            on_error	=> \&adb_error,
+            on_close	=> \&adb_close,
+        ),
+        write_timeout	=> $TIMEOUT,
     }, "Accepted";
     ++$accepted;
     weaken($state->{listener});
@@ -216,6 +229,7 @@ sub acceptable {
     $socket->add_read(sub { reader($s) });
     output($state, $listener->{arg}) if
         $listener->{type} == BLACKHOLE && $listener->{arg} ne "";
+    output($state, "adb_fake $VERSION\n") if $listener->{type} == CONTROL;
     adb_close($state) if $listener->{type} == CLOSER && $listener->{arg} <= 0;
 }
 
@@ -307,75 +321,56 @@ sub adb_command {
 }
 
 sub add_listener {
-    my $listeners = shift;
-    my $type = shift || LISTENER;
+    my $type = shift // LISTENER;
     my $arg = shift;
 
     my $socket = IO::Socket::INET->new(
         $type == UNREACHABLE ? () : (Listen		=> 5),
-        Blocking	=> 0,
         LocalHost	=> "127.0.0.1",
         LocalPort	=> 0) || die "Could not create listening socket: $^E";
+    # Workaroud for bind bug in IO::Socket::IP
+    # (failing bind does not lead to fatal error, seen in verson 0.39)
+    $socket->blocking(0);
     my $key = refaddr($socket);
     my $listener = bless {
         key		=> $key,
         socket		=> $socket,
         port		=> $socket->sockport,
-        listeners	=> $listeners,
         accepted	=> {},
         type		=> $type,
         arg		=> $arg,
         $type == LISTENER ? (version => $arg // $ADB_VERSION) : (),
     }, "Listener";
     ++$listening;
-    weaken($listener->{listeners});
-    if ($type) {
-        $state_std->{specials}{$key} = $listener;
+    if ($type == LISTENER) {
+        $listeners{$key} = $listener;
     } else {
-        $listeners->{$key} = $listener;
+        $specials{$key} = $listener;
     }
     if ($type != UNACCEPTABLE && $type != UNREACHABLE) {
         weaken(my $l = $listener);
         $socket->add_read(sub { acceptable($l) });
     }
-
-    output($state_std, "Port: $listener->{port}\n");
+    return $listener->{port};
 }
 
 sub finish {
-    $state_std->{socket_in} || return;
     $idle_timeout = undef;
-    %{$state_std->{specials}} = ();
-    output($state_std, "Close: $listening $accepted\n");
-    $state_std->{socket_in}->delete_read;
-    close($state_std->{socket_in});
-    $state_std->{socket_in} = undef;
-    # $state_std->{closing} = sub { exit };
-}
-
-sub abort {
-    my $listeners = $state_std->{listeners} || return;
-
-    %$listeners = ();
-    finish();
+    %specials = ();
+    %listeners = ();
 }
 
 sub unidle {
-    $state_std->{socket_in} || return;
-    $idle_timeout = timer($IDLE_TIMEOUT, \&abort);
+    $state_std->{socket} || return;
+    $idle_timeout = timer($IDLE_TIMEOUT, \&finish);
 }
 
 sub main {
-    STDIN->blocking(0);
-    STDOUT->blocking(0);
-    STDIN->add_read(\&reader_stdin);
-
-    my $listeners = {};
-    weaken($state_std->{listeners} = $listeners);
-    add_listener($listeners);
-    $state_std->{on_close} = \&abort;
     $idle_timeout = unidle();
+    my $port = add_listener(CONTROL);
+    print("Port: $port\n") || die "print: $^E";
     mainloop();
+    print("Close: $listening $accepted\n") || die "print: $^E";
 }
 
 main();
@@ -385,8 +380,8 @@ sub DESTROY {
     # print STDERR "DESTROY(@_)\n";
     my ($state) = @_;
 
-    $state->{socket_out}->delete_write if $state->{out} ne "";
-    $state->{socket_in}->delete_read;
+    $state->{socket}->delete_write if $state->{out} ne "";
+    $state->{socket}->delete_read;
     $state->{timeout} = undef;
 
     --$accepted;
@@ -406,10 +401,9 @@ sub DESTROY {
 
 sub close {
     my $listener = shift // return;
-    my $listeners = $listener->{listeners} // return;
-    delete $listeners->{$listener->{key}};
+    delete $listeners{$listener->{key}};
     $listener = undef;
-    ::finish() if !%$listeners;
+    ::finish() if !%listeners;
 }
 
 package main;

@@ -8,9 +8,9 @@ our $VERSION = "1.000";
 
 use Carp;
 use FindBin qw($Bin);
-use IPC::Open2;
 use File::Temp qw(tempdir);
 use Data::Dumper;
+use IO::Socket::INET;
 
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
 use ADB::Client::Utils qw(display_string);
@@ -45,10 +45,10 @@ our $base_dir = $t_dir;
 $base_dir =~ s{/t\z}{} ||
     croak "test directory $t_dir does not seem to end on /t";
 
-my ($from_adb, $to_adb, $pid);
+my ($adb_out, $adb_control, $pid);
 
 our $TRANSACTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_TRANSACTION_TIMEOUT} || 0.5;
-our $CONNECTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_CONNECTION_TIMEOUT}   // undef;
+our $CONNECTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_CONNECTION_TIMEOUT} // undef;
 # 192.0.2.0/24 is assigned to TEST-NET-1
 # Hopefully that gives us an unreachable IP address, but maybe firewall rules
 # will fake a connection refused
@@ -111,76 +111,83 @@ sub collected_stderr {
 }
 
 sub adb_start {
-    $pid = eval {
+    $pid = do {
         local $SIG{__WARN__} = sub {};
-        open2(my $adb_out, my $adb_in, "$base_dir/bin/adb_fake");
-        $from_adb = $adb_out;
-        $to_adb = $adb_in;
-        $to_adb->autoflush;
+        open($adb_out = undef, "-|", "$base_dir/bin/adb_fake") ||
+            Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");
     };
-    Test::More::BAIL_OUT("Cannot even start fake adb server: $@") if $@;
-    my $line = <$from_adb> //
-        Test::More::BAIL_OUT("Could seemingly start fake adb server, but got no ouptut");
+    my $line = <$adb_out> //
+        Test::More::BAIL_OUT("Unexpected EOF from fake adb server");
     my $regex = qr{^Port: ([1-9][0-9]*)\n\z};
-    Test::More::like($line, $regex, "Could not start Listening port fake adb server") ||
+    Test::More::like($line, $regex, "Control port on fake adb server") ||
           Test::More::BAIL_OUT("Could seemingly start fake adb server, but got unexpected ouptut: " .display_string($line));
-    $line =~ $regex || die "Could not start Listening port";
+    $line =~ $regex || die "Assertion: Inconsistent match";
     my $port = int($1);
     Test::More::ok(0 < $port && $port < 65536, "Proper port range") ||
-          Test::More::BAIL_OUT("Could seemingly start fake adb server, invalid port $port");
-    return $port;
+          Test::More::BAIL_OUT("Could seemingly start fake adb server, invalid control port $port");
+
+    $adb_control = IO::Socket::INET->new(
+        PeerHost => "127.0.0.1",
+        PeerPort => $port) ||
+            Test::More::BAIL_OUT("Could seemingly start fake adb server, but cannot connect to control 127.0.0.1:$port: $@");
+    $line = <$adb_control> //
+        Test::More::BAIL_OUT("Unexpected EOF from fake adb server control");
+    $line =~ /^adb_fake [1-9][0-9]*\.[0-9]{3}\n\z/ ||
+        Test::More::BAIL_OUT("Unexpected EOF from greeting fake adb server control: $line");
+    return adb_version();
 }
 
 sub adb_stop {
     if (!@_ || !$_[0]) {
-        $to_adb || return "Already stopped";
-        close($to_adb);
-        $to_adb = undef;
+        $adb_control || return "Already stopped";
+        close($adb_control);
+        $adb_control = undef;
         return "" if @_;
     }
 
     if (!@_ || $_[0]) {
-        $from_adb || return "Already stopped";
-        my $exit = do { local $/; <$from_adb> };
-        close($from_adb);
-        $from_adb = undef;
+        $adb_out || return "Already stopped";
+        my $exit = do { local $/; <$adb_out> };
+        close($adb_out);
+        $adb_out = undef;
         return Test::More::is($exit, "Close: 0 0\n", "Expect final status from fake adb");
     }
 }
 
-sub _adb_unacceptable {
-    print $to_adb "@_\n";
-    my $line = <$from_adb>;
+sub _adb_listener {
+    print $adb_control "@_\n";
+    my $line = <$adb_control> //
+        Test::More::BAIL_OUT("Unexpected EOF from fake server");
     my $regex = qr{^Port: ([1-9][0-9]*)\n\z};
     Test::More::like($line, $regex, "Could start @_") ||
-                         die "Invalid Port answer";
+          Test::More::BAIL_OUT("Improper reply from fake server: $line");
     $line =~ $regex || die "Invalid Port answer";
     my $port = int($1);
     Test::More::ok(0 < $port && $port < 65536, "Proper port range") ||
-          Test::More::BAIL_OUT("Could seemingly start fake adb server, invalid port $port");
+          Test::More::BAIL_OUT("Improper port from fake  adb server: $port");
     return $port;
 }
 
 sub adb_unacceptable {
-    return _adb_unacceptable("Unacceptable");
+    return _adb_listener("Unacceptable");
 }
 
 sub adb_unreachable {
-    return _adb_unacceptable("Unreachable");
+    return _adb_listener("Unreachable");
 }
 
 sub adb_closer {
-    return _adb_unacceptable("Closer");
+    return _adb_listener("Closer");
 }
 
 sub adb_version {
-    return _adb_unacceptable("Listener" . (@_ ? " @_" : ""));
+    return _adb_listener("Listener" . (@_ ? " @_" : ""));
 }
 
 sub adb_blackhole {
     my $arg = $_[0] || "";
     $arg =~s /\n/\\n/g;
-    return _adb_unacceptable("Blackhole" . (defined $_[0] ? " $arg" : ""));
+    return _adb_listener("Blackhole" . (defined $_[0] ? " $arg" : ""));
 }
 
 sub dumper {

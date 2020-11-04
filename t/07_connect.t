@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 541;
+use Test::More tests => 543;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);

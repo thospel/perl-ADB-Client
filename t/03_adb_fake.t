@@ -11,7 +11,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 97;
+use Test::More tests => 99;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable dumper
             $UNREACHABLE);
 

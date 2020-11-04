@@ -13,11 +13,11 @@ use warnings;
 our $VERSION = "1.000";
 
 my $client_name = my $ref_name = my $cmd_name = "dummy";
-my (@info_command, @info_client, @info_ref, @info_events);
+my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 79;
+use Test::More tests => 81;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -40,12 +40,12 @@ END {
     ], "Expected ADB::Client::Command object counter complaint");
     # dumper(\@info_events);
     is_deeply(\@info_events, [
-        [ "add_read 3" ],
-        [ "delete_read 3" ],
-        [ "add_write 3" ],
-        [ "delete_write 3" ],
-        [ "add_error 3" ],
-        [ "delete_error 3"],
+        [ "add_read $socket_fd" ],
+        [ "delete_read $socket_fd" ],
+        [ "add_write $socket_fd" ],
+        [ "delete_write $socket_fd" ],
+        [ "add_error $socket_fd" ],
+        [ "delete_error $socket_fd"],
         "Entering mainloop (level 0)",
         "Exiting mainloop (level 0)",
         "Entering mainloop (level 1)",
@@ -131,6 +131,7 @@ like($err, qr{^Could not resolve\(zzzz\.www\.examle\.com, 80\): },
 
 my $socket = IO::Socket::INET->new(LocalHost => "127.0.0.1") ||
     die "Could not create socket: $@";
+$socket_fd = fileno($socket);
 #fileno($socket) // die "Socket without filedescriptor";
 
 my $socket1 = IO::Socket::INET->new(LocalHost => "127.0.0.1") ||

@@ -30,7 +30,7 @@ $SIG{__DIE__} = sub {
 
 eval {
     ADB::Client->add_command(["failer" => "Wee", 0, 1]);
-    ADB::Client->add_command(["echo" => "host:echo:%s", -1, 1]);
+    ADB::Client->add_command(["echo" => "internal:echo:%s", -1, 1]);
 };
 $failed += !is($@, "", "We can add commands");
 

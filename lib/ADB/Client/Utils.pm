@@ -80,13 +80,15 @@ sub addr_info {
     my ($first_err, @address);
     for my $ai (@ai) {
         eval {
-            my $udp = IO::Socket->new();
-            $udp->socket($ai->{family}, SOCK_DGRAM, IPPROTO_UDP) || next;
+            socket(my $udp, $ai->{family}, SOCK_DGRAM, IPPROTO_UDP) || next;
             my ($bind_port, $b_addr, @rest) =
                 $ai->{family} == AF_INET  ? unpack_sockaddr_in ($ai->{addr}) :
                 $ai->{family} == AF_INET6 ? unpack_sockaddr_in6($ai->{addr}) :
                 die "Assertion: Unknown family '$ai->{family}'";
             $bind_port || die "Invalid zero port";
+            # Address with unspecified port
+            # Used to try a local UDP bind to see if this address is local
+            # (we don't want to clash with an existing port)
             my $bind_addr0 =
                 $ai->{family} == AF_INET  ? pack_sockaddr_in (0, $b_addr) :
                 $ai->{family} == AF_INET6 ? pack_sockaddr_in6(0, $b_addr, @rest) :
@@ -97,9 +99,9 @@ sub addr_info {
                 $ai->{family} == AF_INET  ? pack_sockaddr_in ($bind_port, $b_addr) :
                 $ai->{family} == AF_INET6 ? pack_sockaddr_in6($bind_port, $b_addr, @rest) :
                 die "Assertion: Unknown family '$ai->{family}'";
-            $udp->connect($ai->{addr}) ||
+            connect($udp, $ai->{addr}) ||
                 die "Assertion: Could not connect UDP probe socket: $^E";
-            my $connect_addr = $udp->peername //
+            my $connect_addr = getpeername($udp) //
                 die "Assertion: No getpeername on connected UDP socket: $^E";
             my ($connect_port, $c_addr) =
                 $ai->{family} == AF_INET  ? unpack_sockaddr_in ($connect_addr) :

@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 14;
+use Test::More tests => 24;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 02_adb_client.t
@@ -66,3 +66,30 @@ is_deeply(\@result, [
     ["10.253.0.13:5555", "52000c4748d6a283"],
     "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:3\n52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2\n"],
           "Expected devices long result");
+
+is($client->remount, qq(Not running as root. Try "adb root" first.\n),
+   "Cannot remount as non-root");
+is($client->root,   "restarting adbd as root\n", "Can set root");
+is($client->root,   "adbd is already running as root\n", "Can set root");
+is($client->unroot, "restarting adbd as non root\n", "Can set root");
+is($client->unroot, "adbd not running as root\n", "Can set root");
+is($client->root,   "restarting adbd as root\n", "Can set root");
+is($client->remount, qq(remount succeeded\n),
+   "Can remount as root");
+
+eval { $client->features };
+like($@, qr{^more than one device/emulator at }, "Cannot get features from more than 1 device");
+$client->device_drop("10.253.0.13:5555");
+@result = $client->features;
+is_deeply(\@result, [{
+    "cmd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1
+}, [
+    "shell_v2",
+    "cmd",
+    "stat_v2"
+], "shell_v2,cmd,stat_v2"], "Can get features from single device");
+$client->device_drop("52000c4748d6a283");
+eval { $client->features };
+like($@, qr{^no devices/emulators found at }, "Cannot get features without devices");

@@ -24,13 +24,14 @@ BEGIN {
 }
 
 use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
-use IO::Socket::INET;
+use IO::Socket::IP;
 use ADB::Client::Events qw(mainloop timer event_init);
 use ADB::Client::Utils qw(display_string);
 use Scalar::Util qw(weaken refaddr);
 use Data::Dumper;
 
 use constant {
+    UNCOUNTED	=> 2,
     OKAY	=> 1,
     FAIL	=> 0,
 
@@ -43,24 +44,25 @@ use constant {
     ECHO	=> 6,	# Echoes whatever you type
 };
 
+my @devices = (
+    ["10.253.0.13:5555",
+     "device",
+     "product:zerofltexx model:SM_G920F device:zeroflte transport_id:3",
+     [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec)]],
+    ["52000c4748d6a283",
+     "device",
+     "usb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2",
+     [qw(shell_v2 cmd stat_v2)]],
+);
+
 $| = 1;
 event_init();
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
 my $IDLE_TIMEOUT = 10;
-my $accepted = my $listening = 0;
+my $accepted = my $listening = my $devices = 0;
 my ($idle_timeout, %listeners, %specials);
-
-my @devices = (
-    "10.253.0.13:5555\tdevice",
-    "52000c4748d6a283\tdevice",
-);
-
-my @devices_long = (
-    "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:3",
-    "52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2"
-);
 
 our $BLOCK_SIZE = 65536;
 our $ADB_VERSION = 39;
@@ -111,9 +113,9 @@ sub writer {
             $state->{socket}->delete_write();
             $state->{timeout} = undef;
         }
-        if ($state->{closing}) {
+        if (my $written = delete $state->{written}) {
             weaken($state);
-            $state->{closing}->($state);
+            $written->($state);
         }
         return;
     }
@@ -177,7 +179,7 @@ sub stdread {
 sub output {
     my $state = shift;
 
-    return if $state->{closing};
+    return if $state->{written};
 
     my $str = join("", @_);
     return if $str eq "";
@@ -221,6 +223,9 @@ sub acceptable {
             on_close	=> \&adb_close,
         ),
         write_timeout	=> $TIMEOUT,
+
+        # LISTENER properties
+        transport	=> 1,
     }, "Accepted";
     ++$accepted;
     weaken($state->{listener});
@@ -286,37 +291,100 @@ sub adb_read {
 sub adb_output {
     my ($state, $status, $response, $keep_open) = @_;
 
-    return if $state->{closing};
+    return if $state->{written};
     if (defined $status) {
-        output($state,
-               ($status ? "OKAY" : "FAIL"),
-               sprintf("%04X", length $response),
-               $response);
-        $state->{closing} = $keep_open ? undef : \&adb_close;
+        if ($status == UNCOUNTED) {
+            output($state, "OKAY" . $response);
+        } else {
+            output($state,
+                   ($status ? "OKAY" : "FAIL"),
+                   sprintf("%04X", length $response),
+                   $response);
+            $state->{written} = \&adb_close;
+        }
+        $state->{written} = $keep_open && $status == OKAY ? undef : \&adb_close;
     } else {
         output($state, "OKAY");
         weaken(my $listener = $state->{listener});
-        $state->{closing} = sub { $listener->close if $listener};
+        $state->{written} = sub { $listener->close if $listener};
     }
 }
 
 sub adb_command {
     my ($state, $command) = @_;
 
+    my $listener = $state->{listener};
     if ($command eq "host:version") {
-        adb_output($state, OKAY, sprintf("%04X", $state->{listener}{version}));
+        adb_output($state, OKAY, sprintf("%04X", $listener->{version}));
     } elsif ($command eq "host:devices") {
-        adb_output($state, OKAY, join "" => map "$_\n" => @devices);
+        adb_output($state, OKAY, $listener->{devices}->string);
     } elsif ($command eq "host:devices-l") {
-        adb_output($state, OKAY, join "" => map "$_\n" => @devices_long);
+        adb_output($state, OKAY, $listener->{devices}->string_long);
+    } elsif ($command eq "host:features") {
+        # Check transport first
+        my $nr = $listener->{devices}->count;
+        if ($nr == 0) {
+            adb_output($state, FAIL, "no devices/emulators found");
+        } elsif ($nr == 1) {
+            my ($device) = $listener->{devices}->all;
+            adb_output($state, OKAY, $device->features_string);
+        } else {
+            adb_output($state, FAIL, "more than one device/emulator");
+        }
     } elsif ($command eq "host:kill") {
         adb_output($state);
-    } elsif ($command =~ m{^host:echo:(.*)\z}s) {
-        # Fake command for response testing
-        adb_output($state, OKAY, $1);
+   } elsif ($command eq "root:") {
+       if (!$state->{transport}) {
+           adb_output($state, FAIL, "no devices/emulators found");
+       } elsif ($listener->{root}) {
+           adb_output($state, UNCOUNTED, "adbd is already running as root\n");
+       } else {
+           adb_output($state, UNCOUNTED, "restarting adbd as root\n");
+           $listener->{root} = 1;
+       }
+   } elsif ($command eq "unroot:") {
+       if (!$state->{transport}) {
+           adb_output($state, FAIL, "no devices/emulators found");
+       } elsif ($listener->{root}) {
+           adb_output($state, UNCOUNTED, "restarting adbd as non root\n", 1);
+           $listener->{root} = 0;
+       } else {
+           adb_output($state, UNCOUNTED, "adbd not running as root\n", 1);
+       }
+   } elsif ($command eq "remount:") {
+       if (!$state->{transport}) {
+           adb_output($state, FAIL, "device offline (no transport)");
+       } elsif ($listener->{root}) {
+           adb_output($state, UNCOUNTED, "remount succeeded\n", 1);
+       } else {
+           adb_output($state, UNCOUNTED, "Not running as root. Try \"adb root\" first.\n", 1);
+       }
+    } elsif ($command =~ m{^internal:(.*)\z}s) {
+        # Non standard adb commands for testing
+        internal($state, $1);
     } else {
         adb_output($state, FAIL, "unknown host service");
         # adb_output($state, FAIL, "unknown host service:" . display_string($command));
+    }
+}
+
+# Non standard adb commands for testing
+sub internal {
+    my ($state, $command) = @_;
+
+    my $listener = $state->{listener};
+    if ($command =~ m{^echo:(.*)\z}s) {
+        # Fake command for response testing
+        adb_output($state, OKAY, $1);
+    } elsif (my ($serial) = $command =~ m{^device_drop:(.*)\z}s) {
+        # Fake command for response testing
+        if ($listener->{devices}->drop($1)) {
+            adb_output($state, OKAY, "Dropped");
+        } else {
+            adb_output($state, FAIL, "No such device");
+        }
+    } else {
+        adb_output($state, FAIL, "unknown internal");
     }
 }
 
@@ -324,8 +392,9 @@ sub add_listener {
     my $type = shift // LISTENER;
     my $arg = shift;
 
-    my $socket = IO::Socket::INET->new(
+    my $socket = IO::Socket::IP->new(
         $type == UNREACHABLE ? () : (Listen		=> 5),
+        ResuseAddr	=> 1,
         LocalHost	=> "127.0.0.1",
         LocalPort	=> 0) || die "Could not create listening socket: $^E";
     # Workaroud for bind bug in IO::Socket::IP
@@ -344,6 +413,8 @@ sub add_listener {
     ++$listening;
     if ($type == LISTENER) {
         $listeners{$key} = $listener;
+        $listener->{root} = 0;
+        $listener->{devices} = Devices->init;
     } else {
         $specials{$key} = $listener;
     }
@@ -370,10 +441,8 @@ sub main {
     my $port = add_listener(CONTROL);
     print("Port: $port\n") || die "print: $^E";
     mainloop();
-    print("Close: $listening $accepted\n") || die "print: $^E";
+    print("Close: $listening $accepted $devices\n") || die "print: $^E";
 }
-
-main();
 
 package Accepted;
 sub DESTROY {
@@ -385,6 +454,13 @@ sub DESTROY {
     $state->{timeout} = undef;
 
     --$accepted;
+}
+
+sub dumper {
+    my ($accepted, $msg) = @_;
+
+    local $accepted->{listener} = undef;
+    ::dumper($msg || "Accepted: ", $accepted);
 }
 
 package Listener;
@@ -406,4 +482,94 @@ sub close {
     ::finish() if !%listeners;
 }
 
+sub dumper {
+    my ($listener, $msg) = @_;
+
+    ::dumper($msg || "Listener: ", $listener);
+}
+
+package Device;
+sub new {
+    my ($class, $serial, $state, $description, $features) = @_;
+
+    ++$devices;
+    return bless {
+        serial		=> $serial,
+        state		=> $state,
+        description	=> $description,
+        features	=> $features,
+        root		=> 0,
+    }, $class;
+}
+
+sub serial {
+    return shift->{serial};
+}
+
+sub string {
+    my ($device) = @_;
+
+    return join "\t", @$device{qw(serial state)};
+}
+
+sub string_long {
+    my ($device) = @_;
+
+    return join "\t", @$device{qw(serial state description)};
+}
+
+sub features_string {
+    my ($device) = @_;
+
+    return join "," => @{$device->{features}};
+}
+
+sub list_init {
+    my ($class) = @_;
+    return [map $class->new(@$_), @devices];
+}
+
+sub DESTROY {
+    --$devices;
+}
+
+package Devices;
+
+sub init {
+    my $devices = bless {}, shift;
+    for my $d (@devices) {
+        my $device = Device->new(@$d);
+        my $serial = $device->serial;
+        die "Duplicate device $serial" if $devices->{$serial};
+        $devices->{$serial} = $device;
+    }
+    return $devices;
+}
+
+sub count {
+    return scalar keys %{shift()};
+}
+
+sub string {
+    my ($devices) = @_;
+    return join "" => map $_->string . "\n" => @$devices{sort keys %$devices};
+}
+
+sub string_long {
+    my ($devices) = @_;
+    return join "" => map $_->string_long . "\n" => @$devices{sort keys %$devices};
+}
+
+sub all {
+    my ($devices) = @_;
+    return @$devices{sort keys %$devices};
+}
+
+sub drop {
+    my ($devices, $serial) = @_;
+
+    return delete $devices->{$serial};
+}
+
 package main;
+main();

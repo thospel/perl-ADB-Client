@@ -11,10 +11,18 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 9;
+use Test::More tests => 13;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable dumper);
 
 # We already checked loading in 02_adb_client.t
 use ADB::Client qw(mainloop);
 
 my $port = adb_start();
+
+my $client = new_ok("ADB::Client" =>
+                    [host => "127.0.0.1", port => $port, blocking => 1]);
+is($client->version, 39, "Expected version");
+$client->forget;
+#eval { $client->spawn(version_min => 40, kill => 1) };
+is($@, "", "No error");
+is($client->version, 39, "Expected version");

@@ -49,7 +49,7 @@ sub new {
     return bless [$command_ref,
                   $callback,
                   $arguments || EMPTY_ARGUMENTS,
-                  $state], $class;
+                  $state // ()], $class;
 }
 
 sub DESTROY {
@@ -59,7 +59,7 @@ sub DESTROY {
 
 sub ref : method {
     my $command = shift;
-    my $command_ref = shift;
+    my $command_ref = shift // return $command->[COMMAND_REF];
 
     my $out = sprintf($command_ref->[COMMAND], @_);
     utf8::encode($out);
@@ -69,6 +69,14 @@ sub ref : method {
     }
     $command->[COMMAND_REF] = $command_ref;
     $command->[ARGUMENTS] = sprintf("%04X", length $out) . $out;
+}
+
+sub command_name {
+    return shift->[COMMAND_REF][COMMAND_NAME];
+}
+
+sub arguments {
+    return shift->[ARGUMENTS];
 }
 
 sub objects {

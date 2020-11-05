@@ -10,7 +10,7 @@ use Carp;
 use FindBin qw($Bin);
 use File::Temp qw(tempdir);
 use Data::Dumper;
-use IO::Socket::INET;
+use IO::Socket::IP;
 
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
 use ADB::Client::Utils qw(display_string);
@@ -19,7 +19,8 @@ use ADB::Client;
 
 # We tested in t/02_adb_client (with BAIL_OUT) that we can add these commands
 ADB::Client->add_command(["failer" => "Wee", 0, 1]);
-ADB::Client->add_command(["echo" => "host:echo:%s", -1, 1]);
+ADB::Client->add_command(["echo" => "internal:echo:%s", -1, 1]);
+ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 1]);
 
 BEGIN {
     $INC{"Test/More.pm"} || croak "Must use Test::More before using TestDrive";
@@ -126,7 +127,7 @@ sub adb_start {
     Test::More::ok(0 < $port && $port < 65536, "Proper port range") ||
           Test::More::BAIL_OUT("Could seemingly start fake adb server, invalid control port $port");
 
-    $adb_control = IO::Socket::INET->new(
+    $adb_control = IO::Socket::IP->new(
         PeerHost => "127.0.0.1",
         PeerPort => $port) ||
             Test::More::BAIL_OUT("Could seemingly start fake adb server, but cannot connect to control 127.0.0.1:$port: $@");
@@ -150,7 +151,7 @@ sub adb_stop {
         my $exit = do { local $/; <$adb_out> };
         close($adb_out);
         $adb_out = undef;
-        return Test::More::is($exit, "Close: 0 0\n", "Expect final status from fake adb");
+        return Test::More::is($exit, "Close: 0 0 0\n", "Expect final status from fake adb");
     }
 }
 

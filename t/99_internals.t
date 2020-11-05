@@ -17,7 +17,7 @@ my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 83;
+use Test::More tests => 100;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -60,7 +60,7 @@ use ADB::Client qw(mainloop event_init unloop timer immediate);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
                           realtime_running clocktime_running);
-use IO::Socket::INET;
+use IO::Socket::IP;
 
 my $port  = adb_start();
 my $rport = adb_unreachable();
@@ -121,20 +121,20 @@ like(sub { sub { callers() }->() }->(),
      "Can do callers");
 
 
-eval { addr_info("zzzz.www.examle.com", 80) };
-like($@, qr{^Could not resolve\(zzzz\.www\.examle\.com, 80\): },
+eval { addr_info("zzzz.www.example.com", 80) };
+like($@, qr{^Could not resolve\(zzzz\.www\.example\.com, 80\): },
      "Cannot resolve non-existing address");
 
-my $err = addr_info("zzzz.www.examle.com", 80, 1);
-like($err, qr{^Could not resolve\(zzzz\.www\.examle\.com, 80\): },
+my $err = addr_info("zzzz.www.example.com", 80, 1);
+like($err, qr{^Could not resolve\(zzzz\.www\.example\.com, 80\): },
      "Cannot resolve non-existing address");
 
-my $socket = IO::Socket::INET->new(LocalHost => "127.0.0.1") ||
+my $socket = IO::Socket::IP->new(LocalHost => "127.0.0.1") ||
     die "Could not create socket: $@";
 $socket_fd = fileno($socket);
 #fileno($socket) // die "Socket without filedescriptor";
 
-my $socket1 = IO::Socket::INET->new(LocalHost => "127.0.0.1") ||
+my $socket1 = IO::Socket::IP->new(LocalHost => "127.0.0.1") ||
     die "Could not create socket: $@";
 #fileno($socket1) // die "Socket without filedescriptor";
 
@@ -311,8 +311,56 @@ like($@, qr{^No command at index '1000000' at },
      "Expected error from version");
 
 eval { $client->echo("a" x 100000, blocking => 1) };
-like($@, qr{^Command too long: "host:echo:a+"\.\.\. at },
+like($@, qr{^Command too long: "internal:echo:a+"\.\.\. at },
      "Expected error from version");
+
+is($client->resolve(port => 1, host => "127.0.0.2", blocking => 1), undef,
+   "Can set to nonsense host/port");
+is($client->host, "127.0.0.2", "Host was set");
+is($client->port, 1, "Port was set");
+is($client->resolve(host => undef, port => undef, blocking => 1), undef,
+   "Can revert to default host/port");
+is($client->host, "127.0.0.1", "Host was set");
+is($client->port, 5037, "Port was set");
+{
+    local $ADB::Client::Ref::ADB_HOST = "";
+    local $ADB::Client::Ref::ADB_PORT = 0;
+
+    is($client->resolve(host => undef, port => undef,
+                        addr_info => addr_info("1.2.3.4", 2),
+                        blocking => 1), undef,
+       "Can revert to default host/port");
+    is($client->host, "", "Host was set");
+    is($client->port, 0, "Port was set");
+}
+eval { $client->client_ref->_resolve(blocking => 1) };
+like($@, qr{^Fatal: Assertion: No command at }, "Resolve without commands");
+# This broke $client. Create a new one
+$client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
+
+my $hash = {};
+my ($result, $retired);
+$client->resolve(
+    host => "Waffle",
+    callback => sub {
+        my ($client, $err) = @_;
+        $retired = $client->command_retired;
+        $result = $err;
+        $client->post_activate(1);
+    });
+{
+    no warnings "redefine";
+    local *ADB::Client::Ref::utils_addr_info = sub { return $hash};
+    is_deeply([$client->client_ref->_resolve], [],
+              "Bad _resolv returns nothing");
+};
+cmp_ok($result, "==", $hash, "Bad addr_info");
+isa_ok($retired, "ADB::Client::Command", "Can get command");
+is_deeply($retired->arguments, { host => "Waffle" },
+          "Arguments are in the old command");
+isa_ok($retired->ref, "ARRAY", "Commandref is an ARRAY reference");
+is($retired->command_name, "resolve", "Can get command name");
+$retired = undef;
 
 eval { $client->client_ref->error("Boem") };
 like($@, qr{^Fatal: Assertion: error without command at },

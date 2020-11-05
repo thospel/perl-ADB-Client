@@ -7,7 +7,6 @@ our $VERSION = '1.000';
 use Carp;
 use Scalar::Util qw(weaken refaddr);
 # use IO::Socket::IP;
-use IO::Socket qw();
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
              ECONNREFUSED EACCES EPERM ENETUNREACH EHOSTUNREACH);
 
@@ -66,7 +65,7 @@ our @COMMANDS = (
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
     [features		=> "host:features", -1, EXPECT_EOF, \&process_features],
-    [remount		=> "remount:", INFINITY, EXPECT_EOF, \&process_remount],
+    [remount		=> "remount:", INFINITY, EXPECT_EOF],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [transport		=> "host:transport-%s", 0, 0],
@@ -331,7 +330,8 @@ sub special_simple {
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
 
-    push @{$client_ref->{commands}}, [$command_ref, $callback, $args];
+    push(@{$client_ref->{commands}},
+         ADB::Client::Command->new($command_ref, $callback, undef, $args));
     $client_ref->activate(1);
 }
 *marker = \&special_simple;
@@ -365,7 +365,7 @@ sub _resolve {
     my ($client_ref) = @_;
 
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $args = $command->[ARGUMENTS];
     $client_ref->{host} = $args->{host} if defined $args->{host};
     $client_ref->{port} = $args->{port} if defined $args->{port};
@@ -512,7 +512,7 @@ sub activate {
 
     for (1) {
         my $command = $client_ref->{commands}[0] ||
-            $client_ref->fatal("No command during activate");
+            $client_ref->fatal("No command");
         my $command_ref = $command->[COMMAND_REF];
         if ($client_ref->{out} ne "") {
             my $response = display_string($client_ref->{out});
@@ -648,7 +648,7 @@ sub _connector_final {
     my $client_ref = shift;
 
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during _connector_final");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
     # Restore reresolve
     $client_ref->{reresolve} = $state->{reresolve};
@@ -671,7 +671,7 @@ sub _connect_start {
     my ($client_ref) = @_;
 
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
     if ($client_ref->{reresolve} && !$client_ref->{socket}) {
         my $now = clocktime_running();
@@ -683,6 +683,7 @@ sub _connect_start {
                 $client_ref->error($addr_info);
                 return;
             }
+            $client_ref->{addr_info} = $addr_info;
             $client_ref->{resolve_last} = $now;
             $client_ref->{addr_connected} = undef;
         }
@@ -744,15 +745,15 @@ sub _connect_next {
     my ($client_ref) = @_;
 
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
 
     while (my $addr = $state->{address}[++$state->{address_i}]) {
-        my $socket = IO::Socket->new();
+        my $socket;
         do {
             # Make sure CLO_EXEC is set
             local $^F = -1;
-            if (!$socket->socket($addr->{family}, SOCK_STREAM, IPPROTO_TCP)) {
+            if (!socket($socket, $addr->{family}, SOCK_STREAM, IPPROTO_TCP)) {
                 $addr->{last_connect_error} = "Socket: $^E";
                 next;
             }
@@ -765,7 +766,7 @@ sub _connect_next {
             $client_ref->{socket} = $socket;
             $client_ref->_connected(0) || return;
         } elsif ($! == EINPROGRESS || $! == EWOULDBLOCK) {
-            $socket->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1) //
+            setsockopt($socket, IPPROTO_TCP, TCP_NODELAY, 1) //
                 warn("Could not set TCP_NODELAY on connecting socket: $^E");
             $client_ref->{socket} = $socket;
             $addr->{connected} = 0;
@@ -795,17 +796,18 @@ sub _connect_writable {
 
     # Called with active = 1
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
 
     my $addr = $state->{address}[$state->{address_i}];
     $addr->{connected} = undef;
-    my $err = $client_ref->{socket}->getsockopt(SOL_SOCKET, SO_ERROR);
-    if (!defined $err) {
+    my $packed = getsockopt($client_ref->{socket}, SOL_SOCKET, SO_ERROR);
+    if (!$packed) {
         $addr->{last_connect_error} = "Could not getsockopt(SOL_SOCKET, SO_ERROR): $!";
         $client_ref->error("Assertion: $addr->{last_connect_error}");
         return;
     }
+    my $err =unpack("I", $packed);
 
     # We should get a final result
     if ($err == EINPROGRESS || $err == EWOULDBLOCK) {
@@ -832,7 +834,7 @@ sub _connection_timeout {
 
     # Called with active = 1
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
     $addr->{connected} = undef;
@@ -852,7 +854,7 @@ sub _connected {
 
     # Called with active = 0
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during connect");
+        $client_ref->fatal("No command");
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
 
@@ -994,9 +996,7 @@ sub _connect_step_version {
 # Called with active = 0 and CONNECT command still on the queue
 # The method is responsible for calling activate if needed
 sub _connect_kill {
-    my $client_ref = shift;
-    my $command = shift;
-    my $err = shift;
+    my ($client_ref, $command, $err) = @_;
 
     # Kill is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
@@ -1010,8 +1010,6 @@ sub _connect_kill {
         return;
     }
 
-    $state->{step} = \&_connect_step;
-    $command->[COMMAND_REF] = SPAWN;
     $client_ref->_connect_next;
 }
 
@@ -1096,7 +1094,7 @@ sub _reader {
     }
 
     my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command during activate");
+        $client_ref->fatal("No command");
     my $command_ref = $command->[COMMAND_REF];
     if ($client_ref->{out} ne "" || $client_ref->{sent} == 0) {
         $buffer = display_string($buffer);
@@ -1145,17 +1143,6 @@ sub process_version {
         $client_ref->fatal("version without addr_connected");
     $client_ref->{addr_connected}{version} = $version;
     return [$version];
-}
-
-sub process_remount {
-    my ($str) = @_;
-
-    $str =~ s/\.?\s*\z//;
-    return [$str] if $str =~ s{\s*^remount succeeded\s*\z}{}m;
-    return $str if $str =~ s{\.?\s*^remount failed\s*\z}{}m;
-    return $str if $str =~ /Not running as root/i;
-    # Caller will already construct an error message using the input string
-    die "Cannot decode remount result";
 }
 
 sub process_features {

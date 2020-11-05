@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 628;
+use Test::More tests => 630;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer adb_echo dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);
@@ -627,3 +627,12 @@ is($_addr_info->[0]{last_connect_error},
    'Bad ADB status "000C"', "We didn't like echo");
 ok(!exists $_addr_info->[1]{connected}, "We never tried after echo");
 ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after echo");
+
+# Trigger a reconnect
+$client = new_ok("ADB::Client" =>
+                 [host		=> "127.0.0.1",
+                  port		=> $port,
+                  reresolve	=> -1,
+                  addr_info	=> addr_info("127.0.0.1", $port2),
+                  connection_timeout => $CONNECTION_TIMEOUT]);
+is($client->version, 39, "Got version from the reconnected server [$port2 -> $port]");

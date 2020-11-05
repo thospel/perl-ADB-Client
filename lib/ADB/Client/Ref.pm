@@ -549,8 +549,6 @@ sub activate {
             return;
         }
         if (!$client_ref->{socket}) {
-            $client_ref->fatal("Reconnect loop") if
-                $command->[STATE]{reconnects}++;
             unshift(@{$client_ref->{commands}},
                     $client_ref->connector(CONNECT));
             redo;
@@ -947,7 +945,6 @@ sub _connect_step {
     }
     # We are called with a just opened connection. Don't reconnect on close
     # $client_ref->close;
-    $state->{reconnects} = 1;
     $client_ref->activate;
 }
 
@@ -987,7 +984,6 @@ sub _connect_step_version {
     if ($state->{kill}) {
         # Kill server if so requested
         $state->{step} = \&_connect_kill;
-        $state->{reconnects} = 0;
         $command->ref(KILL);
         $client_ref->activate;
         return;
@@ -1015,7 +1011,6 @@ sub _connect_kill {
     }
 
     $state->{step} = \&_connect_step;
-    $state->{reconnects} = 0;
     $command->[COMMAND_REF] = SPAWN;
     $client_ref->_connect_next;
 }
@@ -1072,18 +1067,7 @@ sub _reader {
                 $client_ref->success($$str);
             } elsif ($command) {
                 my $command_ref = $command->[COMMAND_REF];
-                # If we've not sent anything yet a close isn't so strange
-                if ($client_ref->{sent} == 0 &&
-                    # If we received stuff from the server go to normal
-                    # error processing
-                    $client_ref->{in} eq "" &&
-                    !$command->[STATE]{reconnects}++) {
-                    $client_ref->close;
-                    $client_ref->activate;
-                    return;
-                }
-
-                my ($error, $str) = adb_check_response($client_ref, 0, $command_ref->[NR_RESULTS], 0);
+                my ($error, $str) = adb_check_response($client_ref, 0, $command_ref->[NR_RESULTS],  $command_ref->[FLAGS] & EXPECT_EOF);
                 return $client_ref->error($str) if $error;
                 if ($client_ref->{in} ne "") {
                     $str = display_string($client_ref->{in});

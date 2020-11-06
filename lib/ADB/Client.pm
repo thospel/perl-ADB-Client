@@ -6,16 +6,17 @@ our $VERSION = '1.000';
 
 use Carp;
 
-use ADB::Client::Ref qw($CALLBACK_DEFAULT $ADB_HOST $ADB_PORT $ADB);
-use ADB::Client::Utils qw(info string_from_value $DEBUG $VERBOSE $QUIET);
+use ADB::Client::Ref qw($CALLBACK_DEFAULT $ADB $ADB_HOST $ADB_PORT);
+use ADB::Client::Utils qw(info string_from_value
+                          $DEBUG $VERBOSE $QUIET);
 use ADB::Client::Events qw(mainloop event_init unloop loop_levels
                            timer immediate);
 
 use Exporter::Tidy
     events	=>[qw(mainloop event_init unloop loop_levels timer immediate)],
     other	=>[qw(string_from_value
-                      $CALLBACK_DEFAULT
-                      $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET)];
+                      $CALLBACK_DEFAULT $ADB_HOST $ADB_PORT $ADB
+                      $DEBUG $VERBOSE $QUIET)];
 
 # Sanity check
 die "Bad file '", __FILE__, "'" if __FILE__ =~ /["\n\0]/;
@@ -56,8 +57,8 @@ sub client_ref {
 
 # Simply forward command
 for my $name (
-    qw(connected close activate host port fatal addr_info _addr_info
-       connection_data command_retired post_activate)) {
+    qw(connected activate host port fatal addr_info _addr_info
+       connection_data command_retired post_activate blocking)) {
     my %replace = (
         NAME	=> $name,
         FILE	=> __FILE__,
@@ -133,7 +134,9 @@ sub _add_command {
 sub NAME : method {
     @_ > NR_VARS || croak "Too few arguments";
     @_ % 2 != NR_VARS % 2 || croak "Odd number of arguments";
-    my $client_ref = $ {shift()};
+    my $client = shift;
+    $client = $client->new if ref $client eq "";
+    my $client_ref = $$client;
     my @vars = NR_VARS ? splice(@_, 0, NR_VARS) : ();
     my %arguments = @_;
     if (delete $arguments{blocking} // $client_ref->{blocking}) {

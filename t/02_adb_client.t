@@ -9,7 +9,7 @@ use warnings;
 
 our $VERSION = "1.000";
 
-use Test::More tests => 36;
+use Test::More tests => 37;
 
 use Scalar::Util qw(weaken);
 
@@ -20,6 +20,15 @@ BEGIN {
               $CALLBACK_DEFAULT $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
               :events :other)) ||
         BAIL_OUT("Cannot even use ADB::Client");
+    use_ok("ADB::Client::Utils",
+           qw(addr_info info caller_info callers dumper
+              string_from_value display_string adb_check_response
+              realtime clocktime realtime_running clocktime_running
+              $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
+              $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT
+              OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
+              DISPLAY_MAX)) ||
+                  BAIL_OUT("Cannot even use ADB::Client::Utils");
 }
 
 my $failed = 0;

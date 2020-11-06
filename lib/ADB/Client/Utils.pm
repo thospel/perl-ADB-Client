@@ -10,14 +10,13 @@ use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
 use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
               pack_sockaddr_in pack_sockaddr_in6
               SOCK_STREAM IPPROTO_TCP IPPROTO_UDP AF_INET AF_INET6 SOCK_DGRAM);
-use IO::Socket qw();
 
 use Exporter::Tidy
-    other	=>[qw(addr_info info caller_info callers dumper
+    other	=>[qw(addr_info adb_addr_info info caller_info callers dumper
                       string_from_value display_string adb_check_response
                       realtime clocktime realtime_running clocktime_running
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
-                      $DEBUG $VERBOSE $QUIET
+                      $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
                       DISPLAY_MAX)];
 
@@ -34,6 +33,10 @@ use constant {
 };
 
 our ($DEBUG, $VERBOSE, $QUIET);
+
+our $ADB_CLIENT_ENV = $ENV{ADB_CLIENT_ENV} // 1 || undef;
+our $ADB_HOST	= $ADB_CLIENT_ENV && $ENV{ANDROID_ADB_SERVER_ADDRESS} // "127.0.0.1";
+our $ADB_PORT	= $ADB_CLIENT_ENV && $ENV{ANDROID_ADB_SERVER_PORT} // 5037;
 
 our $CLOCK_TYPE;
 our $CLOCK_TYPE_NAME =
@@ -67,6 +70,8 @@ sub clocktime_running {
 sub addr_info {
     my ($host, $port, $no_die) = @_;
 
+    $host //= $ADB_HOST;
+    $port //= $ADB_PORT;
     my ($err, @ai) = getaddrinfo($host, $port, {
         socktype	=> SOCK_STREAM,
         protocol	=> IPPROTO_TCP,
@@ -77,36 +82,52 @@ sub addr_info {
         return $err if $no_die;
         die $err;
     }
+    my $result = adb_addr_info(\@ai);
+    if (ref $result eq "") {
+        my $err = $result ? "Could not resolve($host, $port): $result" :
+            "No usable resolve for ($host, $port)";
+        return $err if $no_die;
+        die $err;
+    }
+
+    # dumper($result);
+    return $result;
+
+}
+
+sub adb_addr_info {
+    my ($ais) = @_;
+
     my ($first_err, @address);
-    for my $ai (@ai) {
+    for my $ai (@$ais) {
         eval {
             socket(my $udp, $ai->{family}, SOCK_DGRAM, IPPROTO_UDP) || next;
             my ($bind_port, $b_addr, @rest) =
                 $ai->{family} == AF_INET  ? unpack_sockaddr_in ($ai->{addr}) :
                 $ai->{family} == AF_INET6 ? unpack_sockaddr_in6($ai->{addr}) :
-                die "Assertion: Unknown family '$ai->{family}'";
-            $bind_port || die "Invalid zero port";
+                die "Assertion: Unknown family '$ai->{family}'\n";
+            $bind_port || die "Invalid zero port\n";
             # Address with unspecified port
             # Used to try a local UDP bind to see if this address is local
             # (we don't want to clash with an existing port)
             my $bind_addr0 =
                 $ai->{family} == AF_INET  ? pack_sockaddr_in (0, $b_addr) :
                 $ai->{family} == AF_INET6 ? pack_sockaddr_in6(0, $b_addr, @rest) :
-                die "Assertion: Unknown family '$ai->{family}'";
+                die "Assertion: Unknown family '$ai->{family}'\n";
             # Make sure we have a canonical form without garbage
             # cpan/Socket/Socket.xs zeroes the structure before filling it in
             my $bind_addr =
                 $ai->{family} == AF_INET  ? pack_sockaddr_in ($bind_port, $b_addr) :
                 $ai->{family} == AF_INET6 ? pack_sockaddr_in6($bind_port, $b_addr, @rest) :
-                die "Assertion: Unknown family '$ai->{family}'";
+                die "Assertion: Unknown family '$ai->{family}'\n";
             connect($udp, $ai->{addr}) ||
-                die "Assertion: Could not connect UDP probe socket: $^E";
+                die "Assertion: Could not connect UDP probe socket: $^E\n";
             my $connect_addr = getpeername($udp) //
-                die "Assertion: No getpeername on connected UDP socket: $^E";
+                die "Assertion: No getpeername on connected UDP socket: $^E\n";
             my ($connect_port, $c_addr) =
                 $ai->{family} == AF_INET  ? unpack_sockaddr_in ($connect_addr) :
                 $ai->{family} == AF_INET6 ? unpack_sockaddr_in6($connect_addr) :
-                die "Assertion: Unknown family '$ai->{family}'";
+                die "Assertion: Unknown family '$ai->{family}'\n";
             push @address, {
                 family		=> $ai->{family},
                 bind_addr0	=> $bind_addr0,
@@ -121,13 +142,9 @@ sub addr_info {
         $first_err ||= $@;
     }
     if (!@address) {
-        $err = $first_err ? "Could not resolve($host, $port): $first_err" :
-            "No usable resolve for ($host, $port)";
-        return $err if $no_die;
-        die $err;
+        $first_err =~ s/\s+\z// if defined $first_err;
+        return $first_err;
     }
-
-    # dumper(\@address);
     return \@address;
 }
 

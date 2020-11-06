@@ -5,28 +5,29 @@ use warnings;
 our $VERSION = '1.000';
 
 use Carp;
-use Scalar::Util qw(weaken refaddr);
-# use IO::Socket::IP;
+use Scalar::Util qw(weaken refaddr blessed);
+use List::Util qw(first);
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
              ECONNREFUSED EACCES EPERM ENETUNREACH EHOSTUNREACH);
+use Storable qw(dclone);
 
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
-use ADB::Client::ServerStart;
+use ADB::Client::Starter qw($ADB);
 use ADB::Client::Utils
     qw(info caller_info dumper adb_check_response display_string
        clocktime_running
-       FAILED BAD_ADB ASSERTION INFINITY $DEBUG $VERBOSE $QUIET),
+       FAILED BAD_ADB ASSERTION INFINITY
+       $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
                             EXPECT_EOF
                             COMMAND_REF CALLBACK ARGUMENTS STATE);
-use Storable qw(dclone);
 
 use Exporter::Tidy
-    other	=>[qw($CALLBACK_DEFAULT
-                      $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
+    other	=> [qw($CALLBACK_DEFAULT
+                       $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
 
 use constant {
     SPECIAL	=> "",
@@ -37,12 +38,10 @@ our @CARP_NOT = qw(ADB::Client ADB::Client::Events);
 our $BLOCK_SIZE = 65536;
 
 our $CALLBACK_DEFAULT	= \&callback_default;
-our $ADB = "adb";
-our $ADB_HOST	= "127.0.0.1";
 our $ADB_SOCKET	= undef;
-our $ADB_PORT	= 5037;
 our $TRANSACTION_TIMEOUT = 10;
 our $CONNECTION_TIMEOUT = 10;
+our $SPAWN_TIMEOUT = 10;
 
 use constant {
     FATAL	=> [_fatal	=> SPECIAL, \&_fatal_run],
@@ -62,6 +61,13 @@ our @COMMANDS = (
     SPAWN,
     VERSION,
     KILL,
+    # _close is queued close. Used for make test
+    # Shouldn't be useful to a normal user since it does nothing for the
+    # commands that autoclose and loses state for the ones that leave the
+    # connection open for following commands
+    # close() itself is not exposed to the user since it messes up the state
+    # if the queue is active. Use post_activate if you want to stall the queue
+    [_close		=> SPECIAL, \&_closer],
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
     [features		=> "host:features", -1, EXPECT_EOF, \&process_features],
@@ -92,17 +98,20 @@ sub new {
     my ($class, $client, %arguments) = @_;
 
     my $model = delete $arguments{model};
+    ref $class eq "" ||
+        return ref($class)->new($client, model => $model // $class, %arguments);
     if (defined $model) {
         $model = $model->client_ref || croak "Model without client_ref";
-        for my $name (qw(blocking adb adb_socket host port reresolve
-                         addr_info
-                         connection_timeout transaction_timeout block_size)) {
+        for my $name (
+            qw(blocking adb adb_socket host port reresolve
+               addr_info block_size
+               connection_timeout transaction_timeout spawn_timeout)) {
             $arguments{$name} //= $model->{$name};
         }
     }
-    my $blocking = delete $arguments{blocking} // 1;
+    my $blocking = (delete $arguments{blocking} // 1) ? 1 : 0;
     my $adb  = delete $arguments{adb} // $ADB;
-    my $adb_socket = delete $arguments{adb_socket} // $ADB_SOCKET;
+    my $adb_socket = delete $arguments{adb_socket} // $ADB_SOCKET || 0;
     my $host = delete $arguments{host} // $ADB_HOST;
     my $port = delete $arguments{port} // $ADB_PORT;
     my $reresolve = delete $arguments{reresolve} // INFINITY;
@@ -110,6 +119,8 @@ sub new {
         $CONNECTION_TIMEOUT;
     my $transaction_timeout = delete $arguments{transaction_timeout} //
         $TRANSACTION_TIMEOUT;
+    my $spawn_timeout = delete $arguments{spawn_timeout} //
+        $SPAWN_TIMEOUT;
     my $block_size = delete $arguments{block_size} || $BLOCK_SIZE;
     my $addr_info = delete $arguments{addr_info};
 
@@ -126,6 +137,7 @@ sub new {
         addr_connected	=> undef,
         connection_timeout	=> $connection_timeout,
         transaction_timeout	=> $transaction_timeout,
+        spawn_timeout	=> $spawn_timeout,
         timeout		=> undef,
         adb		=> $adb,
         adb_socket	=> $adb_socket,
@@ -143,8 +155,8 @@ sub new {
         commands	=> [],
         command_retired	=> undef,
         post_activate	=> undef,
-        children	=> {},
         result		=> [],
+        starter		=> undef,
     }, $class;
     ++$objects;
     weaken($client_ref->{client});
@@ -190,13 +202,18 @@ sub connection_data {
     return ref $data eq "" ? $data : dclone($data);
 }
 
+sub blocking {
+    return shift->{blocking} if @_ <= 1;
+    my $client_ref = shift;
+    my $old = $client_ref->{blocking};
+    $client_ref->{blocking} = shift ? 1 : 0;
+    return $old;
+}
+
 sub delete {
     my ($client_ref) = @_;
 
     $client_ref->close;
-    my $children = $client_ref->{children};
-    $client_ref->{children} = {};
-    $_->delete(1) for values %$children;
     @{$client_ref->{result}} = ();
     @{$client_ref->{commands}} = [FATAL];
     #if (my $client = $client_ref->client) {
@@ -204,6 +221,7 @@ sub delete {
     #}
 }
 
+# This must NEVER return
 sub fatal {
     my ($client_ref, $msg) = @_;
     $client_ref->delete;
@@ -216,16 +234,6 @@ sub _fatal_run {
     # Can be non-deleted if we get here via the command queue
     $client_ref->delete;
     confess "Attempt to restart a dead ADB::Client";
-}
-
-sub child_add {
-    my ($client_ref, $child) = @_;
-    $client_ref->{children}{refaddr($child)} = $child;
-}
-
-sub child_delete {
-    my ($client_ref, $child) = @_;
-    delete $client_ref->{children}{refaddr($child)};
 }
 
 sub DESTROY {
@@ -336,6 +344,7 @@ sub special_simple {
 }
 *marker = \&special_simple;
 *forget = \&special_simple;
+*_close = \&special_simple;
 
 sub _fatal {
     my ($client_ref, $arguments, $callback, $index) = @_;
@@ -380,6 +389,14 @@ sub _resolve {
     $client_ref->{addr_info} = $addr_info;
     $client_ref->{resolve_last} = clocktime_running();
     $client_ref->success;
+}
+
+sub _closer {
+    my ($client_ref) = @_;
+
+    my $connected = $client_ref->connected;
+    $client_ref->close();
+    $client_ref->success($connected);
 }
 
 sub _forget {
@@ -431,9 +448,13 @@ sub close : method {
         $client_ref->{sent} = 0;
         $client_ref->{expect_eof} = undef;
         $client_ref->{socket} = undef;
+        # Don't update $client_ref->{addr_connected}{connected}
+        # We want that to represent the last connection attempt,
+        # NOT the current connection state. Check $client_ref->{socket} instead
     }
-    $client_ref->{active} = 0;
+    $client_ref->{active}  = 0;
     $client_ref->{timeout} = undef;
+    $client_ref->{starter} = undef;
 }
 
 sub command_retired {
@@ -459,6 +480,8 @@ sub error {
     local $client_ref->{post_activate} = 0;
     $client_ref->{command_retired}->[CALLBACK]->($client_ref->{client}, @_);
     $client_ref->activate if $client_ref->{post_activate};
+    # Make sure not to return anything
+    return;
 }
 
 # If used inside a calback (toplevel false) nothing after this call should
@@ -501,6 +524,8 @@ sub success {
     local $client_ref->{post_activate} = 1;
     $command->[CALLBACK]->($client_ref->{client}, undef, @$result);
     $client_ref->activate if $client_ref->{post_activate};
+    # Make sure not to return anything
+    return;
 }
 
 # If used inside a calback (toplevel false) nothing after this call should
@@ -517,7 +542,6 @@ sub activate {
         if ($client_ref->{out} ne "") {
             my $response = display_string($client_ref->{out});
             $client_ref->fatal("$response to ADB still pending when starting $command_ref->[COMMAND]");
-            return;
         }
         if (!defined $client_ref->{in} || $client_ref->{in} ne "") {
             my $response = display_string($client_ref->{in});
@@ -561,9 +585,15 @@ sub activate {
             $client_ref->fatal("Socket without addr_connected");
         $client_ref->{timeout} = timer(
             $addr->{transaction_timeout} // $client_ref->{transaction_timeout},
-            sub { $client_ref->_timed_out });
+            sub { $client_ref->_transaction_timed_out });
     }
     $client_ref->{active} = 1;
+}
+
+sub _transaction_timed_out {
+    my ($client_ref) = @_;
+
+    $client_ref->error("Operation timed out");
 }
 
 sub _marker {
@@ -583,6 +613,7 @@ sub connector {
         command_ref	=> $command_ref,
         version_min	=> delete $arguments->{version_min},
         version_max	=> delete $arguments->{version_max},
+        version_scan	=> 0,
     };
     if ($spawn) {
         $state->{spawn}		= 1;
@@ -596,6 +627,7 @@ sub connector {
             croak "Version_min is not a natural number";
         $state->{version_min} < 2**16 ||
             croak "Version_min '$state->{version_min}' out of range";
+        $state->{version_scan} ||= 1;
     }
 
     if (defined $state->{version_max}) {
@@ -603,15 +635,16 @@ sub connector {
             croak "Version_max is not a natural number";
         #$state->{version_max} < 2**16 ||
         #    croak "Version_max '$state->{version_max}' out of range";
+        $state->{version_scan} ||= 1;
     }
 
     my $command = ADB::Client::Command->new;
     $command->[STATE] = $state;
     $command->[COMMAND_REF] = $command_ref;
     my $step =
-        !$callback ? \&_autoconnect_done :
-        $spawn     ? \&_connect_step :				# spawn()
-        defined $state->{version_min} || defined $state->{version_max} ? \&_connect_step :	# connect()
+        !$callback ? \&_autoconnect_done :		# autoconnect
+        $spawn     ? \&_connect_step :			# spawn()
+        $state->{version_scan} ? \&_connect_step :	# connect()
         # No need for complexity if there is no version_min in connect()
         undef;
     if ($step) {
@@ -661,6 +694,7 @@ sub _connector_final {
         $client_ref->error(@_);
     } else {
         shift;
+        $client_ref->{addr_connected} = $_[0];
         # this will also call activate
         $client_ref->success(@_);
     }
@@ -701,8 +735,17 @@ sub _connect_start {
     #Test::More::diag("_connect_start(@_) [@{$state->{address}}]");
 
     if ($client_ref->{socket}) {
-        $client_ref->{addr_connected} ||
+        my $addr = $client_ref->{addr_connected} ||
             $client_ref->fatal("socket without addr_connected");
+
+        if ($state->{spawn}) {
+            # Maybe instead check getsockname...
+            socket(my $udp, $addr->{family}, SOCK_DGRAM, IPPROTO_UDP) ||
+                return $client_ref->error("Could not create UDP socket: $^E");
+            bind($udp, $addr->{bind_addr0}) ||
+                return $client_ref->error("Could not bind to $addr->{bind_ip} ($client_ref->{host}): $^E");
+        }
+
         $state->{address_i} = 0;
 
         # We have a socket, but maybe the ADB server already closed it and
@@ -739,6 +782,7 @@ sub _connect_start {
     $client_ref->_connect_next;
 }
 
+# Step through state->{address} one by one trying to make a connection
 # Called with active = 0
 # Make sure to manage {active} as needed
 sub _connect_next {
@@ -748,7 +792,43 @@ sub _connect_next {
         $client_ref->fatal("No command");
     my $state = $command->[STATE];
 
-    while (my $addr = $state->{address}[++$state->{address_i}]) {
+    while (1) {
+        my $addr = $state->{address}[++$state->{address_i}];
+        if (!$addr) {
+            # Did we just finish a version scan ?
+            if ($state->{spawn} && $state->{version_scan} > 0) {
+                # If all connections have a bad version and we are not going to
+                # kill then we are done
+                # And $addr->{connected} implies we have a bad version since:
+                #   * if version failed => we already returned an error
+                #   * if version was OK => we already returned success
+                last if !$state->{kill} && !first {!$_->{connected}} @{$state->{address}};
+                $state->{version_scan} = -1;
+                $state->{address_i} = -1;
+                redo;
+            }
+            last;
+        }
+
+        if ($state->{spawn}) {
+            if ($state->{version_scan} >= 0) {
+                socket(my $udp, $addr->{family}, SOCK_DGRAM, IPPROTO_UDP) ||
+                    return $client_ref->error("Could not create UDP socket: $^E");
+                bind($udp, $addr->{bind_addr0}) ||
+                    return $client_ref->error("Could not bind to $addr->{bind_ip} ($client_ref->{host}): $^E");
+            } else {
+                # Not the first loop.
+                # Don't try to connect to what wasn't connectable
+                # in the first loop (for kill)
+                if ($addr->{connected}) {
+                    $state->{kill} || last;
+                } else {
+                    $client_ref->_connect_step_spawn;
+                    return;
+                }
+            }
+        }
+
         my $socket;
         do {
             # Make sure CLO_EXEC is set
@@ -786,6 +866,7 @@ sub _connect_next {
         }
     }
 
+    # Final result
     $client_ref->error(
         $state->{first_error} ||
         "Assertion: No failure reason after connection attempts");
@@ -839,13 +920,13 @@ sub _connection_timeout {
     my $addr = $state->{address}[$state->{address_i}];
     $addr->{connected} = undef;
 
-    $! = ETIMEDOUT;
-    $addr->{last_connect_error} = "Connect error: $!";
-    $state->{first_error} ||= "ADB server $addr->{connect_ip} port $addr->{connect_port}: $addr->{last_connect_error}";
     $client_ref->close;
+    $! = ETIMEDOUT;
+    $client_ref->_connected($!) || return;
     $client_ref->_connect_next;
 }
 
+# Result of a connection attempt must allways go through here
 # Return 0: we are done
 # return 1: continue with _connect_next (try the next ip/port)
 # $err is expected to be a dualvar corresponding to $!
@@ -879,9 +960,13 @@ sub _connected {
             # "Normal" connection errors
             # Not sure about ECONNRESET, it's not documented in man 2 connect
             # but I *DO* get it from SOL_SOCKET SO_ERROR. Maybe the connection
-            # succeeded but immediately after that the connection got reset?
+            # succeeded but immediately after that the connection got reset ?
             # need to do a packet capture.
             # (Can be reproduced by kill -9 of adbd just before connect)
+            if ($state->{spawn} && $state->{version_scan} < 1) {
+                $client_ref->_connect_step_spawn;
+                return 0;
+            }
             $state->{first_error} ||= $msg;
             return 1;
         } else {
@@ -929,20 +1014,17 @@ sub _connect_step {
 
     $client_ref->{socket} || $client_ref->fatal("connection without socket");
 
-    if (defined $state->{version_min} ||
-        defined $state->{version_max} ||
-        !$state->{kill}) {
+    my $addr = $state->{address}[$state->{address_i}];
+    if ($state->{version_scan} > 0) {
+        delete $addr->{version};
         $command->ref(VERSION);
-        # For now do version even if no conditional kill
-        # Just to make sure it's really an ADB server
         $state->{step} = \&_connect_step_version;
     } elsif ($state->{kill}) {
         $command->ref(KILL);
-        $state->{step} = \&_connect_kill;
+        $state->{step} = \&_connect_step_kill;
     } else {
         # Simply call the original callback
-        my $addr = $state->{address}[$state->{address_i}];
-        $client_ref->_connector_final($err, $addr);
+        $client_ref->_connector_final(undef, $addr);
         return;
     }
     # We are called with a just opened connection. Don't reconnect on close
@@ -970,9 +1052,9 @@ sub _connect_step_version {
         return;
     }
     if (defined $state->{version_min} && $version < $state->{version_min}) {
-        $err = "version '$version' is below '$state->{version_min}'";
+        $err = "Version '$version' is below '$state->{version_min}'";
     } elsif (defined $state->{version_max} && $version > $state->{version_max}) {
-        $err = "version '$version' is above '$state->{version_max}'";
+        $err = "Version '$version' is above '$state->{version_max}'";
     } else {
         # Version is in window
         # Simply call the original callback
@@ -982,24 +1064,17 @@ sub _connect_step_version {
     # Version is too low or too high
     $addr->{last_connect_error} = $err;
     $state->{first_error} ||= $err;
-
-    if ($state->{kill}) {
-        # Kill server if so requested
-        $state->{step} = \&_connect_kill;
-        $command->ref(KILL);
-        $client_ref->activate;
-        return;
-    }
     $client_ref->_connect_next;
 }
 
 # Called with active = 0 and CONNECT command still on the queue
 # The method is responsible for calling activate if needed
-sub _connect_kill {
+sub _connect_step_kill {
     my ($client_ref, $command, $err) = @_;
 
     # Kill is autoclose
     $client_ref->fatal("Still have socket") if $client_ref->{socket};
+
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
 
@@ -1009,14 +1084,86 @@ sub _connect_kill {
         $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
         return;
     }
+    $client_ref->_connect_step_spawn;
+}
 
+# Called with active = 0 and CONNECT command still on the queue
+# The method is responsible for calling activate if needed
+sub _connect_step_spawn {
+    my ($client_ref) = @_;
+
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command");
+    my $state = $command->[STATE];
+    my $addr = $state->{address}[$state->{address_i}];
+    my $result = ADB::Client::Starter->join(
+        $client_ref, $addr->{bind_addr}, $state->{unlog}) ||
+            $client_ref->fatal("ADB::Client::StarterRef returns false");
+
+    if (!blessed($result) || !$result->isa("ADB::Client::StarterRef")) {
+        ref $result eq "" || $client_ref->fatal("ADB::Client::StarterRef returns invalid reference $result");
+        $addr->{last_connect_error} = $result;
+        $state->{first_error} ||= $result;
+        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: Spawn failed: $result");
+        return;
+    }
+    $client_ref->{starter} = $result;
+    $client_ref->{timeout} = timer(
+        $addr->{spawn_timeout} // $client_ref->{spawn_timeout},
+        sub { $client_ref->_spawn_timed_out });
+    $client_ref->{active} = 1;
+}
+
+sub _spawn_result {
+    my ($client_ref, $err, $more) = @_;
+
+    # Clears timeout and sets active = 0
+    $client_ref->close;
+
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command");
+    my $state = $command->[STATE];
+    my $addr = $state->{address}[$state->{address_i}];
+
+    if ($err) {
+        if (!$state->{unlog}  && $^O eq "linux" && -d "/proc/$$/fd/" && -x _) {
+            # Alternatively: adb -a [-P <PORT_NUMBER>|-L <spec]  nodaemon server
+            # and get error from STDERR
+            $state->{unlog} = 1;
+            # Retry start (which failed without response)
+            $client_ref->_connect_step_spawn;
+            return;
+        }
+        $addr->{last_connect_error} = $err;
+        $state->{first_error} ||= $err;
+        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: Spawn failed: $err");
+        return;
+    }
+    $addr->{pid} = $more;
+    # We have no idea what version the new server is
+    delete $addr->{version};
+    # As a sanity check we now will check the new server
+    # $client_ref->_connector_final(undef, $addr);
+
+    delete $state->{spawn};
+    delete $state->{kill};
+    $state->{address} = [$addr];
+    $state->{address_i} = -1;
+    $state->{version_scan} = 1 if $state->{version_scan};
+    # Whatever happens during this final check is what we will report as error
+    $state->{first_error} = undef;
     $client_ref->_connect_next;
 }
 
-sub _timed_out {
+sub _spawn_timed_out {
     my ($client_ref) = @_;
 
-    $client_ref->error("Operation timed out");
+    my $command = $client_ref->{commands}[0] ||
+        $client_ref->fatal("No command");
+    my $state = $command->[STATE];
+    my $addr = $state->{address}[$state->{address_i}];
+
+    die "Unimplemented";
 }
 
 sub _writer {

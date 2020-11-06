@@ -13,9 +13,9 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 630;
+use Test::More tests => 631;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
-                 adb_blackhole adb_closer adb_echo dumper
+                 adb_blackhole adb_closer adb_echo addr_filter dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);
 
 # We already checked loading in 02_adb_client.t
@@ -30,7 +30,10 @@ my $port_closer = adb_closer();
 my $port_echo = adb_echo();
 
 my (@results, $err, $result);
-my $callback = sub { push @results, [shift->connected, @{dclone(\@_)}] };
+my $callback = sub {
+    $_[2] = addr_filter($_[2]) if ref $_[2] eq "HASH";
+    push @results, [shift->connected, @{dclone(\@_)}];
+};
 
 # Connect to a server that sends a greeting. Keep open for later
 my $client_ssh = new_ok("ADB::Client" =>
@@ -70,21 +73,17 @@ $transaction_timeout = 0.1 if $transaction_timeout < 0.1;
 is_deeply(\@results, [
     [ 0, undef ],
     [ 1, undef, {
-        "bind_addr" => $results[1][2]{bind_addr},
-        "bind_addr0" => $results[1][2]{bind_addr0},
         "bind_ip" => "127.0.0.1",
         "bind_port" => $port,
-        "connect_addr" => $results[1][2]{connect_addr},
         "connect_ip" => "127.0.0.1",
         "connect_port" => $port,
-        "connected" => $results[1][2]{connected},
+        "connected" => 1,
         "family" => 2
     }],
     [ 1, undef ],
     [ 0, undef, 39 ],
     [ 0, undef ]
-], "Expected connection results");
-ok($results[1][2]{connected}, "Is connected after connect");
+], "Expected connection results") || dumper(\@results);
 
 # Check that we can re-resolve
 @results = ();
@@ -183,32 +182,25 @@ mainloop();
 is_deeply(\@results, [
     [ 0, undef ],
     [ 1, undef, {
-        "bind_addr" => $results[1][2]{bind_addr},
-        "bind_addr0" => $results[1][2]{bind_addr0},
         "bind_ip" => "127.0.0.1",
         "bind_port" => $aport,
-        "connect_addr" => $results[1][2]{connect_addr},
         "connect_ip" => "127.0.0.1",
         "connect_port" => $aport,
-        "connected" => $results[1][2]{connected},
+        "connected" => 1,
         "family" => 2
     }],
     [ 1, undef ],
     [ 1, undef, {
-        "bind_addr" => $results[1][2]{bind_addr},
-        "bind_addr0" => $results[1][2]{bind_addr0},
         "bind_ip" => "127.0.0.1",
         "bind_port" => $aport,
-        "connect_addr" => $results[1][2]{connect_addr},
         "connect_ip" => "127.0.0.1",
         "connect_port" => $aport,
-        "connected" => $results[1][2]{connected},
+        "connected" => 1,
         "family" => 2
     }],
     [ 1, undef ],
     [ 0, "Operation timed out" ],
-], "Expected connection results");
-ok($results[1][2]{connected}, "Is connected after connect");
+], "Expected connection results") || dumper(\@results);
 
 # Connect to something that listens but does not accept
 # (but the OS will still accept for you)
@@ -343,29 +335,22 @@ for my $i (0..2) {
                 }
             }
             $result ||= $client->connection_data;
-            is_deeply($result, {
-                "bind_addr" => $result->{bind_addr},
-                "bind_addr0" => $result->{bind_addr0},
+            is_deeply(addr_filter($result), {
                 "bind_ip" => "127.0.0.1",
                 "bind_port" => $old_port,
-                "connect_addr" => $result->{connect_addr},
                 "connect_ip" => "127.0.0.1",
                 "connect_port" => $old_port,
-                "connected" => $result->{connected},
+                "connected" => $retry == 3 ? undef : 1,
                 "family" => 2,
                 $retry == 1 || $retry == 2 ? (last_connect_error => "Unprobed") :
                 $retry == 3 ? (last_connect_error => $result->{last_connect_error}) :
                 (),
                 $direct == 1 ? (version => 39) : (),
-            }, "Got through set and connected [$i, $direct, $retry]");
+            }, "Got through set and connected [$i, $direct, $retry]") ||
+                dumper($result);
             if ($retry == 3) {
                 like($result->{last_connect_error}, qr{^Connect error: },
                    "Some sort of connect error [$i, $direct, $retry]");
-                is($result->{connected}, undef,
-                       "Connection state turned off [$i, $direct, $retry]");
-            } else {
-                cmp_ok($result->{connected}, '>', 0,
-                       "Proper connect time [$i, $direct, $retry]");
             }
             cmp_ok($_addr_info->[$i], "!=", $result,
                    "Identify accepted connection is a clone [$i, $direct, $retry]");
@@ -401,7 +386,7 @@ for my $i (0..2) {
             }
             is_deeply($_addr_info, $client->addr_info,
                       "_addr_info tracks addr_info [$i, $direct, $retry]");
-            $client->close;
+            is($client->_close, $direct || $retry == 3 ? 0 : 1, "connected [$i, $direct, $retry]");
             # dumper($_addr_info);
 
             # Make sure we notice connection attempts
@@ -487,7 +472,7 @@ for my $i (0..2) {
     if ($i == 1) {
         cmp_ok($_addr_info->[$i]{connected}, ">", 0,
                "Connection to server $i was made but then dropped");
-        is($_addr_info->[$i]{last_connect_error}, "version '10' is below '11'",
+        is($_addr_info->[$i]{last_connect_error}, "Version '10' is below '11'",
              "version too low on server $i");
         is($_addr_info->[$i]{version}, 10, "Known version on server $i");
     } else {
@@ -503,7 +488,7 @@ ok(!exists $_addr_info->[4]{last_connect_error},
    "Did not try to connect to server[4]");
 is($client->connected, 0, "Client is currently unconnected");
 # Just in case. Shouldn't be connected after "version"
-$client->close();
+is($client->_close(), 0, "Wasn't connected");
 
 # Prepare for retest. Put some markers so we can see changes
 for my $i (0..4) {
@@ -513,12 +498,12 @@ for my $i (0..4) {
 }
 # Do a request that would fit server 1 but we are sticky on server 3
 my $dummy = eval { $client->connect(version_max => 20) };
-like($@, qr{^version '39' is above '20' at }, "Keep looking at server 3");
+like($@, qr{^Version '39' is above '20' at }, "Keep looking at server 3");
 for my $i (0..4) {
     if ($i == 3) {
         cmp_ok($_addr_info->[$i]{connected}, ">", 0,
                "Connection to server $i was made but then dropped");
-        is($_addr_info->[$i]{last_connect_error}, "version '39' is above '20'",
+        is($_addr_info->[$i]{last_connect_error}, "Version '39' is above '20'",
              "Did not try to connect to server[$i]");
         is($_addr_info->[$i]{version}, 39, "Known version on server $i");
     } else {
@@ -559,10 +544,10 @@ for my $i (0, 2, 4) {
     is($_addr_info->[$i]{connected}, undef,
          "Server $i could not connect");
 }
-is($_addr_info->[1]{last_connect_error}, "version '10' is below '11'",
+is($_addr_info->[1]{last_connect_error}, "Version '10' is below '11'",
          "Server 1 could not connect");
 cmp_ok($_addr_info->[1]{connected}, ">", 0, "Server 1 could connect");
-is($_addr_info->[3]{last_connect_error}, "version '39' is above '12'",
+is($_addr_info->[3]{last_connect_error}, "Version '39' is above '12'",
          "Server 3 could not connect");
 cmp_ok($_addr_info->[3]{connected}, ">", 0, "Server 3 could connect");
 

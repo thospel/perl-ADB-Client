@@ -11,7 +11,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 99;
+use Test::More tests => 101;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable dumper
             $UNREACHABLE);
 
@@ -91,8 +91,7 @@ for (1..2) {
 for (1..2) {
     my $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port]);
     my $version = eval { $client->version };
-    my $err = $@;
-    is($err, "", "No version error (loop $_)") ||
+    is($@, "", "No version error (loop $_)") ||
         BAIL_OUT("Error while getting version from fake adb server");
     is($version, 39, "Correct version (loop $_)") ||
         BAIL_OUT("Bad version from fake adb server");
@@ -141,8 +140,7 @@ for (1..2) {
         local $SIG{__DIE__} = undef;
         mainloop();
     };
-    $err = $@;
-    like($err, qr{^unknown host service at }, "Error (loop $_)") ||
+    like($@, qr{^unknown host service at }, "Error (loop $_)") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server");
     $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
@@ -176,7 +174,7 @@ my $dummy = eval {
 };
 my $err = $@;
 ok($err) ||
-    BAIL_OUT("Could connect to non listening port");
+    BAIL_OUT("Could connect to non listening port: $err");
 like($err, qr{^ADB server 127.0.0.1 port $rport: Connect error: },
      "Expeced error on connection to non listening port") ||
     BAIL_OUT("Could connect to non listening port");
@@ -213,7 +211,7 @@ for (1..2) {
     };
     my $err = $@;
     like($err, qr{^unknown host service at }, "Expected error from unknown command") ||
-        BAIL_OUT("Bad error when sending an unknown command to fake adb server");
+        BAIL_OUT("Bad error when sending an unknown command to fake adb server: $err");
     $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
@@ -229,7 +227,7 @@ $dummy = eval {
 $err = $@;
 like($err, qr{^ADB server 127\.0\.0\.1 port $port: Connect error: },
      "Must have a connection error") ||
-    BAIL_OUT("Stopped fake adb server does not lead to the proper error message");
+    BAIL_OUT("Stopped fake adb server does not lead to the proper error message: $err");
 $obj_failed += !is(ADB::Client::Ref->objects, 1, "Client object still exists");
 $obj_failed += !is(ADB::Client->objects, 1, "Client objects still exists");
 $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");

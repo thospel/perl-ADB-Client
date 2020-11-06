@@ -24,10 +24,11 @@ BEGIN {
 }
 
 use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
-use IO::Socket::IP;
+use IO::Socket::IP qw();
 use ADB::Client::Events qw(mainloop timer event_init);
 use ADB::Client::Utils qw(display_string);
 use Scalar::Util qw(weaken refaddr);
+use Getopt::Long 2.24 qw(:config bundling);
 use Data::Dumper;
 
 use constant {
@@ -44,6 +45,15 @@ use constant {
     ECHO	=> 6,	# Echoes whatever you type
 };
 
+$| = 1;
+
+my $Listen = "tcp:localhost:5037";
+die "Could not parse your command line. Try $0 -h\n" unless
+    GetOptions("a!",		=> \my $all,
+               "L=s"		=> \$Listen,
+               "reply-fd=o"	=> \my $reply_fd,
+               "acceptfd=o"	=> \my $accept_fd);
+
 my @devices = (
     ["10.253.0.13:5555",
      "device",
@@ -55,9 +65,6 @@ my @devices = (
      [qw(shell_v2 cmd stat_v2)]],
 );
 
-$| = 1;
-event_init();
-
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
 my $IDLE_TIMEOUT = 10;
@@ -65,7 +72,10 @@ my $accepted = my $listening = my $devices = 0;
 my ($idle_timeout, %listeners, %specials);
 
 our $BLOCK_SIZE = 65536;
+# Default ADB version for plain adb_fake
 our $ADB_VERSION = 39;
+# Default ADB version for adb_fake with arguments (called like real adb)
+our $ADB_VERSION2 = 30;
 our $TIMEOUT	= 2;
 
 sub dumper {
@@ -127,22 +137,7 @@ sub writer {
     die "Write error: $^E";
 }
 
-my $state_std = {
-    socket	=> \*STDIN,
-    in		=> "",
-    out 	=> "",
-    on_read	=> \&stdread,
-    on_close	=> undef,
-    write_timeout	=> $TIMEOUT,
-    on_error	=> sub { die $_[1] },
-    specials	=> {},
-};
-
-sub reader_stdin {
-    reader($state_std);
-}
-
-sub stdread {
+sub control_read {
     my ($state) = @_;
 
     while ($state->{in} =~ s/^[^\S\n]*(.*?)[^\S\n]*\n//) {
@@ -168,7 +163,9 @@ sub stdread {
         } elsif ($command eq "quit") {
             finish();
             return;
-        } elsif ($command ne "") {
+        } elsif ($command eq "") {
+            return;
+        } else {
             output($state, "Unknown: <$command>\n");
             return;
         }
@@ -210,7 +207,7 @@ sub acceptable {
         in		=> "",
         out 		=> "",
         $listener->{type} == CONTROL ? (
-            on_read	=> \&stdread,
+            on_read	=> \&control_read,
             on_close	=> \&finish,
             on_error	=> sub { die $_[1]},
         ) : (
@@ -376,8 +373,11 @@ sub internal {
     if ($command =~ m{^echo:(.*)\z}s) {
         # Fake command for response testing
         adb_output($state, OKAY, $1);
+    } elsif ($command eq "pid") {
+        # Fake command: identify running process
+        adb_output($state, OKAY, $$);
     } elsif (my ($serial) = $command =~ m{^device_drop:(.*)\z}s) {
-        # Fake command for response testing
+        # Fake command: Drop device
         if ($listener->{devices}->drop($1)) {
             adb_output($state, OKAY, "Dropped");
         } else {
@@ -389,14 +389,17 @@ sub internal {
 }
 
 sub add_listener {
-    my $type = shift // LISTENER;
-    my $arg = shift;
+    my ($type, $arg, $host, $port) = @_;
+    $type = shift // LISTENER;
 
+    $host ||= "127.0.0.1";
+    $port ||= 0;
     my $socket = IO::Socket::IP->new(
-        $type == UNREACHABLE ? () : (Listen		=> 5),
-        ResuseAddr	=> 1,
-        LocalHost	=> "127.0.0.1",
-        LocalPort	=> 0) || die "Could not create listening socket: $^E";
+        $type == UNREACHABLE ? () : (Listen => 5),
+        ReuseAddr	=> 1,
+        LocalHost	=> $host,
+        LocalPort	=> $port) ||
+            die "Could not create listening socket $host:$port: $^E";
     # Workaroud for bind bug in IO::Socket::IP
     # (failing bind does not lead to fatal error, seen in verson 0.39)
     $socket->blocking(0);
@@ -432,16 +435,54 @@ sub finish {
 }
 
 sub unidle {
-    $state_std->{socket} || return;
     $idle_timeout = timer($IDLE_TIMEOUT, \&finish);
 }
 
-sub main {
-    $idle_timeout = unidle();
-    my $port = add_listener(CONTROL);
-    print("Port: $port\n") || die "print: $^E";
+my $sleeper;
+sub daemon {
+    $reply_fd //
+        die "reply fd for adb server to client communication not specified.\n";
+    $reply_fd =~ /^\d+\z/a ||
+        die "reply_fd '$reply_fd' is not a natural number\n";
+    open(my $reply, ">&=", $reply_fd) ||
+        die "Could not fdopen $reply_fd: $^E\n";
+    $reply->autoflush(1);
+
+    my $log_path = $ENV{ANDROID_ADB_LOG_PATH} // "/dev/null";
+    open(my $fh, ">", $log_path) || die "open($log_path): $^E\n";
+    open(STDERR, ">&", $fh) || die "Cannot dup to STDERR: $^E";
+    close($fh) || die "Could not close($log_path): $^E";
+    STDERR->autoflush(1);
+
+    # Simulate an error
+    my $err = $ENV{ADB_FAKE_ERROR};
+    die $err if $err;
+
+    my ($host, $port) = $Listen =~ m{^tcp:(?:(.*):)?(\d+)\z}a or
+        die "error: could not install *smartsocket* listener: unknown socket specification '$Listen'\n";
+    $host //= "localhost";
+    $host eq "localhost" ||
+        die "error: could not install *smartsocket* listener: listening on specified hostname currently unsupported\n";
+
+    my $sleep = $ENV{ADB_FAKE_SLEEP} || 0;
+
+    $sleeper = timer($sleep, sub {
+        add_listener(LISTENER, $ADB_VERSION2, "127.0.0.1", $port);
+        print($reply "OK\n") || die "Could not write to fd $reply_fd: $^E";
+        close($reply) || die "Could not close fd $reply_fd: $^E";
+    });
     mainloop();
-    print("Close: $listening $accepted $devices\n") || die "print: $^E";
+}
+
+sub main {
+    if (@ARGV) {
+        daemon();
+    } else {
+        my $port = add_listener(CONTROL);
+        print("Port: $port\n") || die "print: $^E";
+        mainloop();
+        print("Close: $listening $accepted $devices\n") || die "print: $^E";
+    }
 }
 
 package Accepted;
@@ -572,4 +613,6 @@ sub drop {
 }
 
 package main;
+event_init();
+$idle_timeout = unidle();
 main();

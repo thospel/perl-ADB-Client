@@ -9,8 +9,8 @@ lib/ADB/Client/Command.pm
 lib/ADB/Client/Events.pm
 lib/ADB/Client/Package.pm
 lib/ADB/Client/Ref.pm
-lib/ADB/Client/ServerStart.pm
 lib/ADB/Client/Starter.pm
+lib/ADB/Client/StarterRef.pm
 lib/ADB/Client/Timer.pm
 lib/ADB/Client/Utils.pm
 md5-versions

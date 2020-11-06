@@ -17,7 +17,7 @@ my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 100;
+use Test::More tests => 110;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -60,7 +60,7 @@ use ADB::Client qw(mainloop event_init unloop timer immediate);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
                           realtime_running clocktime_running);
-use IO::Socket::IP;
+use IO::Socket::IP qw();
 
 my $port  = adb_start();
 my $rport = adb_unreachable();
@@ -314,11 +314,20 @@ eval { $client->echo("a" x 100000, blocking => 1) };
 like($@, qr{^Command too long: "internal:echo:a+"\.\.\. at },
      "Expected error from version");
 
-is($client->resolve(port => 1, host => "127.0.0.2", blocking => 1), undef,
+is($client->blocking, 0, "Client is currently not blocking");
+is($client->blocking(5), 0, "Client was not blocking");
+is($client->blocking, 1, "Client is currently blocking");
+is($client->blocking(undef), 1, "Client was blocking");
+is($client->blocking, 0, "Client is currently not blocking");
+is($client->blocking(5), 0, "Client was not blocking");
+is($client->blocking(5), 1, "Client was (and still is) blocking");
+is($client->blocking, 1, "Client is currently blocking");
+
+is($client->resolve(port => 1, host => "127.0.0.2"), undef,
    "Can set to nonsense host/port");
 is($client->host, "127.0.0.2", "Host was set");
 is($client->port, 1, "Port was set");
-is($client->resolve(host => undef, port => undef, blocking => 1), undef,
+is($client->resolve(host => undef, port => undef), undef,
    "Can revert to default host/port");
 is($client->host, "127.0.0.1", "Host was set");
 is($client->port, 5037, "Port was set");
@@ -327,13 +336,12 @@ is($client->port, 5037, "Port was set");
     local $ADB::Client::Ref::ADB_PORT = 0;
 
     is($client->resolve(host => undef, port => undef,
-                        addr_info => addr_info("1.2.3.4", 2),
-                        blocking => 1), undef,
+                        addr_info => addr_info("1.2.3.4", 2)), undef,
        "Can revert to default host/port");
     is($client->host, "", "Host was set");
     is($client->port, 0, "Port was set");
 }
-eval { $client->client_ref->_resolve(blocking => 1) };
+eval { $client->client_ref->_resolve() };
 like($@, qr{^Fatal: Assertion: No command at }, "Resolve without commands");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);

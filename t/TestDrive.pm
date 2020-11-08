@@ -79,7 +79,7 @@ our $old_stderr;
 
 # Classes for which we count bless/destruct cycles
 my @object_classes = qw(ADB::Client ADB::Client::Ref ADB::Client::Command
-                        ADB::Client::Starter ADB::Client::StarterRef);
+                        ADB::Client::Spawn ADB::Client::SpawnRef);
 our %expect_objects;
 $expect_objects{$_} = 0 for @object_classes;
 

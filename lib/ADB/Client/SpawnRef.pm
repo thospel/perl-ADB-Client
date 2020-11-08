@@ -1,4 +1,4 @@
-package ADB::Client::StarterRef;
+package ADB::Client::SpawnRef;
 use strict;
 use warnings;
 

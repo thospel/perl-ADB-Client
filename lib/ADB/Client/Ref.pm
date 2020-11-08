@@ -12,7 +12,7 @@ use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
 use Storable qw(dclone);
 
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
-use ADB::Client::Starter qw($ADB);
+use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
     qw(info caller_info dumper adb_check_response display_string
        clocktime_running
@@ -1096,12 +1096,12 @@ sub _connect_step_spawn {
         $client_ref->fatal("No command");
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
-    my $result = ADB::Client::Starter->join(
+    my $result = ADB::Client::Spawn->join(
         $client_ref, $addr->{bind_addr}, $state->{unlog}) ||
-            $client_ref->fatal("ADB::Client::StarterRef returns false");
+            $client_ref->fatal("ADB::Client::SpawnRef returns false");
 
-    if (!blessed($result) || !$result->isa("ADB::Client::StarterRef")) {
-        ref $result eq "" || $client_ref->fatal("ADB::Client::StarterRef returns invalid reference $result");
+    if (!blessed($result) || !$result->isa("ADB::Client::SpawnRef")) {
+        ref $result eq "" || $client_ref->fatal("ADB::Client::SpawnRef returns invalid reference $result");
         $addr->{last_connect_error} = $result;
         $state->{first_error} ||= $result;
         $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: Spawn failed: $result");

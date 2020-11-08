@@ -16,7 +16,7 @@ use Errno qw(EWOULDBLOCK EINPROGRESS ECONNREFUSED EACCES EPERM ENETUNREACH
              ETIMEDOUT EAGAIN EINTR ECONNRESET);
 
 use ADB::Client::Events qw(timer immediate);
-use ADB::Client::Starter;
+use ADB::Client::Spawn;
 use ADB::Client::Utils qw(dumper addr_info info adb_check_response
                           string_from_value $DEBUG
                           OKAY FAIL FAILED BAD_ADB ASSERTION);
@@ -398,7 +398,7 @@ sub _spawn {
 
     my $addr = $context->{address}[++$context->{address_i}];
     if ($addr) {
-        ADB::Client::Starter->join($context,
+        ADB::Client::Spawn->join($context,
                                    $addr->{bind_addr},
                                    $addr->{unlog});
         return;

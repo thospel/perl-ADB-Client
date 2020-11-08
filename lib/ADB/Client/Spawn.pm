@@ -1,4 +1,4 @@
-package ADB::Client::Starter;
+package ADB::Client::Spawn;
 use strict;
 use warnings;
 
@@ -21,7 +21,7 @@ use constant {
 
 use ADB::Client::Events qw(timer immediate);
 use ADB::Client::Utils qw(info display_string $DEBUG $QUIET);
-use ADB::Client::StarterRef;
+use ADB::Client::SpawnRef;
 
 our @CARP_NOT = qw(ADB::Client::ServerStart);
 
@@ -117,7 +117,7 @@ sub join {
     # $unlog = $unlog ? 1 : 0;
     $unlog = $unlog ? 1 : -1;
 
-    # info("Starter::join($class, $client_ref, $ip, $port, $unlog)") if $DEBUG;
+    # info("Spawn::join($class, $client_ref, $ip, $port, $unlog)") if $DEBUG;
 
     $client_ref->fatal("Already spawning an ADB server") if
         $client_ref->{starter};
@@ -141,7 +141,7 @@ sub join {
             return "Attempt to start with unlog '$unlog' on $ip port $port while already busy starting with '$starter->{unlog}' there";
         $client_ref->{adb_socket} == $starter->{adb_socket} ||
             return "Attempt to start with adb_socket '$client_ref->{adb_socket}' on $ip port $port while already busy starting with '$starter->{adb_socket}' there";
-        return ADB::Client::StarterRef->new($starter, $client_ref);
+        return ADB::Client::SpawnRef->new($starter, $client_ref);
     }
 
     $starters{$key} = $starter = bless {
@@ -268,7 +268,7 @@ sub join {
         $starter->close($err);
         return $err;
     }
-    return ADB::Client::StarterRef->new($starter, $client_ref);
+    return ADB::Client::SpawnRef->new($starter, $client_ref);
 }
 
 sub _reader_exec {
@@ -413,7 +413,7 @@ sub objects {
 }
 
 END {
-    # info("END Starter") if $DEBUG;
+    # info("END Spawn") if $DEBUG;
     info("Still have %d %s objects at program end", $objects, __PACKAGE__) if !$QUIET && $objects;
     $ended = 1;
     %starters = ();

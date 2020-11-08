@@ -7,7 +7,7 @@ our $VERSION = '1.000';
 use Carp;
 
 use ADB::Client::Ref qw($CALLBACK_DEFAULT $ADB $ADB_HOST $ADB_PORT);
-use ADB::Client::Utils qw(info string_from_value
+use ADB::Client::Utils qw(info string_from_value ip_port_from_addr is_listening
                           $DEBUG $VERBOSE $QUIET);
 use ADB::Client::Events qw(mainloop event_init unloop loop_levels
                            timer immediate);
@@ -55,9 +55,42 @@ sub client_ref {
     return ${shift()};
 }
 
+my @keep_spawn_socket = qw(adb adb_socket spawn_timeout blocking);
+sub spawn_socket {
+    @_ % 2 == 0 || croak "Odd number of arguments";
+    my ($class, $socket, %arguments) = @_;
+    my %keep_args;
+    @keep_args{@keep_spawn_socket} = delete @arguments{@keep_spawn_socket};
+    my $callback = delete $arguments{callback} || $CALLBACK_DEFAULT;
+    croak "Unknown argument " . join(", ", keys %arguments) if %arguments;
+
+    fileno($socket) // croak "Socket is not an IO handle";
+    my $addr = getsockname($socket) || croak "Cannot getsockname: $^E";
+    @keep_args{qw(host port)} = ip_port_from_addr($addr);
+    is_listening($socket) || croak "Socket is not listening";
+
+    my $client = $class->new(%keep_args);
+    my $_addr_info = $client->_addr_info;
+    @$_addr_info == 1 || die "Assertion: Multiple addr_info";
+    $_addr_info->[0]{bind_addr} = $socket;
+
+    $client->spawn(blocking => 0, callback => sub {
+                       my $client = shift;
+                       # Shouldn already be closed, but just make sure
+                       $client->client_ref->close;
+                       # Stop the _fatal from running
+                       $client->post_activate(0);
+                       # Original callback
+                       $callback->($client, @_);
+                   });
+    # Don't use this client after spawn
+    $client->_fatal(blocking => 0);
+    return $client;
+}
+
 # Simply forward command
 for my $name (
-    qw(connected activate host port fatal addr_info _addr_info
+    qw(connected activate host port adb_socket fatal addr_info _addr_info
        connection_data command_retired post_activate blocking)) {
     my %replace = (
         NAME	=> $name,
@@ -69,34 +102,6 @@ for my $name (
 sub NAME : method {
     my $client_ref = $ {shift()};
     return $client_ref->NAME(@_);
-}
-1;
-';
-    $code =~ s/\b(NAME|LINE|FILE)\b/$replace{$1}/g;
-    # print STDERR $code;
-    eval $code || die $@;
-}
-
-for my $name (qw(server_start)) {
-    my %replace = (
-        NAME	=> $name,
-        FILE	=> __FILE__,
-        LINE	=> __LINE__+4,
-    );
-    my $code = '
-#line LINE "FILE"
-sub NAME {
-    @_ % 2 == 1 || croak "Odd number of arguments";
-    my $client_ref = $ {shift()};
-    my %arguments = @_;
-    if (delete $arguments{blocking} // $client_ref->{blocking}) {
-        # blocking
-        my $loop_levels = loop_levels();
-        $client_ref->NAME(\%arguments, $client_ref->callback_blocking($loop_levels));
-        return $client_ref->wait($loop_levels);
-    }
-    $client_ref->NAME(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT);
-    return;
 }
 1;
 ';

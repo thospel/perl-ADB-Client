@@ -12,7 +12,8 @@ use Socket qw(AF_INET AF_INET6 SOCK_STREAM IPPROTO_TCP SOL_SOCKET SO_REUSEADDR
               sockaddr_family inet_ntop unpack_sockaddr_in unpack_sockaddr_in6);
 
 use Exporter::Tidy
-    other	=> [qw($ADB)];
+    other	=> [qw(%IP_ANY $ADB
+                       $ADB_SPAWN_TIMEOUT $SIGTERM_TIMEOUT $SIGKILL_TIMEOUT)];
 
 use constant {
     OK => "OK\n",
@@ -20,25 +21,45 @@ use constant {
 };
 
 use ADB::Client::Events qw(timer immediate);
-use ADB::Client::Utils qw(info display_string $DEBUG $QUIET);
+use ADB::Client::Utils qw(info display_string  ip_port_from_addr is_listening
+                          $DEBUG $QUIET IPV6);
 use ADB::Client::SpawnRef;
 
 our @CARP_NOT = qw(ADB::Client::ServerStart);
 
 our $BLOCK_SIZE = 65536;
 our $LISTEN	= 128;
-our $SPAWN_TIMEOUT = 10;
-our $TERM_TIMEOUT = 2;
-our $KILL_TIMEOUT = 2;
+# How long a Spawn object waits for an adb server to start up
+our $ADB_SPAWN_TIMEOUT = 20;
+our $SIGTERM_TIMEOUT = 2;
+our $SIGKILL_TIMEOUT = 2;
 our $ADB = "adb";
+# Which binds will get the -a option
+our %IP_ANY = (
+    "::" => 1,
+    # Also add 0.0.0.0 though on IPv6 hosts this will also listen on ::
+    "0.0.0.0" => 1,
+);
 
 my $objects = 0;
+my $spawns = 0;
+my $kills = {
+    TERM	=> 0,
+    KILL	=> 0,
+};
 my (%starters, $ended);
 
 sub delete {
     my ($starter, $deleted) = @_;
 
-    $deleted || delete $starters{$starter->{key}};
+    if ($starter->{rd} && $starter->{pid_adb}) {
+        # Getting here should only be possible during global cleanup ($ended=1)
+        # with an adb server started but never received an answer (OK or close)
+        # In principle it could still be starting up, but likely it's hanging
+        warn("Trying to KILL $starter->{pid_adb}");
+        kill "KILL", $starter->{pid_adb};
+        $starter->{pid_adb} = undef;
+    }
     $starter->{timeout} = undef;
     if ($starter->{exec_rd}) {
         $starter->{exec_rd}->delete_read;
@@ -63,6 +84,10 @@ sub delete {
         warn("Assertion: Failed to wait for $pid") if $pid <= 0;
         $starter->{pid} = undef;
     }
+
+    return if $deleted;
+
+    delete $starters{$starter->{key}};
     if (%{$starter->{client_refs}}) {
         warn("Assertion: Still have client_refs during destruction of $starter") if $DEBUG || !$ended;
         my @client_refs = values %{$starter->{client_refs}};
@@ -89,35 +114,136 @@ sub close : method {
         }
     }
 
-    if (my @client_refs = @{$starter->{client_refs}}{sort { $a <=> $b } keys %{$starter->{client_refs}}}) {
-        $_->{starter} = undef for @client_refs;
+    $starter->{pid_adb} = undef;
+
+    for my $client_ref (@{$starter->{client_refs}}{sort { $a <=> $b } keys %{$starter->{client_refs}}}) {
         # The DESTROY should clean out $starter->{client_refs}
-        %{$starter->{client_refs}} = ();
-        $starter->delete;
+        $client_ref->{starter} = undef;
         # don't naively try to optimise this without timers
         # join() can call this method and when join returns the caller does not
         # yet expect the carpet to have been yanked out from under him
-        for my $client_ref (@client_refs) {
-            $client_ref->{timeout} = immediate(
-                sub {
-                    # It's up to _spawn_result to clear timeout
-                    # $client_ref->{timeout} = undef;
-                    $client_ref->_spawn_result(@msg);
-                }
-            );
-        }
-    } else {
-        $starter->delete;
+        $client_ref->{timeout} = immediate(
+            sub {
+                # It's up to _spawn_result to clear timeout
+                # $client_ref->{timeout} = undef;
+                $client_ref->_spawn_result(@msg);
+            }
+        );
     }
+    $starter->delete;
+}
+
+sub _spawn {
+    my ($starter) = @_;
+
+    ++$spawns;
+    # This forces CLO_EXEC off ($^F is 32 bit signed)
+    local $^F = 2**31-1;
+    pipe(my $rd, my $wr) || die "Could not create adb pipe: $^E\n";
+    my $fd = fileno($wr) // die "Assertion: No fd for adb pipe";
+    my ($log_rd, $log_wr, $log_fd, $accept_socket, $accept_fd);
+    if (1) {
+        pipe($log_rd, $log_wr) || die "Could not create log pipe: $^E\n";
+        $log_fd = fileno($log_wr) //
+            die "Assertion: No fd for log pipe";
+    }
+    if ($starter->{adb_socket}) {
+        $accept_fd = fileno($starter->{bind_addr});
+        if (defined $accept_fd) {
+            $accept_socket = $starter->{bind_addr};
+        } else {
+            socket($accept_socket ,$starter->{family}, SOCK_STREAM, IPPROTO_TCP) ||
+                die "Could not create listen socket: $^E\n";
+            $accept_fd = fileno($accept_socket) //
+                die "Assertion: No fd for accept socket";
+            # adb itself also sets socket to non blocking
+            # so this is not really needed
+            $accept_socket->blocking(0);
+            $starter->{family} != AF_INET6 ||
+                setsockopt($accept_socket, IPPROTO_IPV6, IPV6_V6ONLY, $starter->{adb_socket} > 0 ? 0 : 1) ||
+                die "Assertion: Could not setsockopt(IPPROTO_IPV6, IPV6_V6ONLY): $^E";
+            setsockopt($accept_socket, SOL_SOCKET, SO_REUSEADDR, 1) ||
+                die "Assertion: Could not setsockopt(SOL_SOCKET, SO_REUSEADDR): $^E";
+            bind($accept_socket, $starter->{bind_addr}) ||
+                die "Could not bind($starter->{ip}, $starter->{port}): $^E\n";
+            listen($accept_socket, $LISTEN) ||
+                die "Could not listen on port $starter->{port} at $starter->{ip}: $^E\n";
+            $starter->{bind_addr} = $accept_socket;
+        }
+    }
+
+    # This forces CLO_EXEC on ($^F is 32 bit signed)
+    $^F = -1;
+    pipe(my $exec_rd, my $exec_wr) ||
+        die "Could not create exec pipe: $^E";
+
+    my $opt_L =
+        $accept_socket ? "acceptfd:$accept_fd" :
+        $starter->{ip} eq "127.0.0.1" || $IP_ANY{$starter->{ip}} ?
+        "tcp:$starter->{port}" : "tcp:$starter->{ip}:$starter->{port}";
+    my @opt_a = !$accept_fd && $IP_ANY{$starter->{ip}} ? "-a" : ();
+
+    my $pid = fork() // die "Could not fork: $^E";
+    if (!$pid) {
+        # Child
+        eval {
+            select($exec_wr);
+            $| = 1;
+            close($exec_rd) ||
+                die "Assertion: Error closing exec reader: $^E";
+            if ($log_rd) {
+                close($log_rd) ||
+                    die "Assertion: Error closing log reader: $^E";
+            }
+            close($rd) ||
+                die "Assertion: Error closing adb reader: $^E";
+            # Use double fork trick to avoid zombies
+            my $pid = fork() // die "Could not fork: $^E";
+            # Parent
+            _exit(0) if $pid;
+            print $exec_wr "PID=$$\n";
+            my @adb = ($starter->{adb}, @opt_a, "-L", $opt_L, "fork-server", "server", "--reply-fd", $fd);
+            if (defined $log_fd) {
+                $^F = 2;
+                open(STDERR, ">&", $log_wr) ||
+                    die "Could not dup log pipe to STDERR: $^E";
+                if ($starter->{unlog} > 0) {
+                    # We'd like to use "adb nodaemon server" which writes
+                    # to STDERR, but unfortunately it doesn't support
+                    # --reply-fd, so we don't know if/when the server runs
+                    $ENV{ANDROID_ADB_LOG_PATH} = "/proc/$$/fd/$log_fd";
+                }
+            }
+            local $SIG{__WARN__} = sub {};
+            exec(@adb) || die "$^E\n";
+        };
+        my $err = $@ || "Assertion: Missing error";
+        eval { print $exec_wr "ERR=$err" };
+        _exit(1);
+    }
+    # Parent
+    $starter->{pid} = $pid;
+    close($exec_wr) || die "Assertion: Error closing exec writer: $^E";
+    if ($log_wr) {
+        close($log_wr) ||
+            die "Assertion: Error closing log writer: $^E";
+    }
+    close($wr) || die "Assertion: Error closing adb writer: $^E";
+
+    $exec_rd->blocking(0);
+    $exec_rd->add_read(sub { $starter->_reader_exec });
+    $starter->{exec_rd} = $exec_rd;
+    $starter->{log_rd}  = $log_rd;
+
+    $rd->blocking(0);
+    $starter->{rd} = $rd;
 }
 
 # Assumes it is being called during an event callback
 sub join {
-    my ($class, $client_ref, $bind_addr, $unlog) = @_;
-    # $unlog = $unlog ? 1 : 0;
-    $unlog = $unlog ? 1 : -1;
+    my ($class, $client_ref, $bind_addr) = @_;
 
-    # info("Spawn::join($class, $client_ref, $ip, $port, $unlog)") if $DEBUG;
+    # info("Spawn::join($class, $client_ref, $ip, $port)") if $DEBUG;
 
     $client_ref->fatal("Already spawning an ADB server") if
         $client_ref->{starter};
@@ -125,30 +251,52 @@ sub join {
     # Make sure we don't lose events. Caller should set a timeout AFTER join()
     $client_ref->fatal("Already have a timeout") if $client_ref->{timeout};
 
-    my $family = sockaddr_family($bind_addr);
-    my ($port, $packed_ip) =
-        $family == AF_INET  ? unpack_sockaddr_in ($bind_addr) :
-        $family == AF_INET6 ? unpack_sockaddr_in6($bind_addr) :
-        return "Assertion: Unknown family $family";
-    my $ip = inet_ntop($family, $packed_ip);
+    my ($addr, $adb_socket);
+    if (defined fileno $bind_addr) {
+        $addr = getsockname($bind_addr) ||
+-            return "Cannot getsockname: $^E";
+        if (!eval { is_listening($bind_addr) }) {
+            $@ || return "Socket is not listening";
+            $@ =~ s/ at .*//s;
+            return "$@";
+        }
+    } else {
+        $addr = $bind_addr;
+    }
+    my ($ip, $port, $family) = ip_port_from_addr($addr);
+
+    if (defined fileno $bind_addr) {
+        if ($family == AF_INET6) {
+            my $packed = getsockopt($bind_addr, IPPROTO_IPV6, IPV6_V6ONLY) ||
+                return "Cannot getsockopt(IPPROTO_IPV6, IPV6_V6ONLY): $^E";
+            $adb_socket = unpack("I", $packed) ? -1 : 1;
+        } else {
+            $adb_socket = 1;
+        }
+    } else {
+        $adb_socket = $client_ref->{adb_socket} <=> 0;
+        $adb_socket = 1 if $adb_socket < 0 && $family != AF_INET6;
+    }
 
     my $key = "$ip:$port";
     my $starter = $starters{$key};
     if ($starter) {
         $client_ref->{adb} eq $starter->{adb} ||
             return "Attempt to start '$client_ref->{adb}' on $ip port $port while already busy starting '$starter->{adb}' there";
-        $unlog == $starter->{unlog} ||
-            return "Attempt to start with unlog '$unlog' on $ip port $port while already busy starting with '$starter->{unlog}' there";
-        $client_ref->{adb_socket} == $starter->{adb_socket} ||
-            return "Attempt to start with adb_socket '$client_ref->{adb_socket}' on $ip port $port while already busy starting with '$starter->{adb_socket}' there";
+        $adb_socket == $starter->{adb_socket} ||
+            return "Attempt to start with adb_socket '$adb_socket' on $ip port $port while already busy starting with '$starter->{adb_socket}' there";
         return ADB::Client::SpawnRef->new($starter, $client_ref);
     }
 
     $starters{$key} = $starter = bless {
         key		=> $key,
         adb		=> $client_ref->{adb},
-        adb_socket	=> $client_ref->{adb_socket},
-        unlog		=> $unlog,
+        adb_socket	=> $adb_socket,
+        family		=> $family,
+        bind_addr	=> $bind_addr,
+        ip		=> $ip,
+        port		=> $port,
+        unlog		=> 0,
         index		=> 0,
         pid		=> undef,
         pid_adb		=> undef,
@@ -161,107 +309,7 @@ sub join {
         timeout		=> undef,
     }, $class;
     ++$objects;
-    eval {
-        # This forces CLO_EXEC off ($^F is 32 bit signed)
-        local $^F = 2**31-1;
-        pipe(my $rd, my $wr) || die "Could not create adb pipe: $^E\n";
-        my $fd = fileno($wr) // die "Assertion: No fd for adb pipe";
-        my ($log_rd, $log_wr, $log_fd, $accept_socket, $accept_fd);
-        if ($unlog) {
-            pipe($log_rd, $log_wr) || die "Could not create log pipe: $^E\n";
-            $log_fd = fileno($log_wr) //
-                die "Assertion: No fd for log pipe";
-        }
-        if ($starter->{adb_socket}) {
-            $accept_fd = fileno($starter->{adb_socket});
-            if (defined $accept_fd) {
-                $accept_socket = $starter->{adb_socket};
-            } else {
-                socket($accept_socket ,$family, SOCK_STREAM, IPPROTO_TCP) ||
-                    die "Could not create listen socket: $^E\n";
-                $accept_fd = fileno($accept_socket) //
-                    die "Assertion: No fd for accept socket";
-                # adb itself also sets socket to non blocking
-                # so this is not really needed
-                $accept_socket->blocking(0);
-                $family != AF_INET6 ||
-                    setsockopt($accept_socket, IPPROTO_IPV6, IPV6_V6ONLY, $starter->{adb_socket} > 0 ? 0 : 1) ||
-                    die "Assertion: Could not setsockopt(IPPROTO_IPV6, IPV6_V6ONLY): $^E";
-                setsockopt($accept_socket, SOL_SOCKET, SO_REUSEADDR, 1) ||
-                    die "Assertion: Could not setsockopt(SOL_SOCKET, SO_REUSEADDR): $^E";
-                bind($accept_socket, $bind_addr) ||
-                    die "Could not bind($ip, $port): $^E\n";
-                listen($accept_socket, $LISTEN) ||
-                    die "Could not listen on port $port at $ip: $^E\n";
-            }
-        }
-
-        # This forces CLO_EXEC on ($^F is 32 bit signed)
-        $^F = -1;
-        pipe(my $exec_rd, my $exec_wr) ||
-            die "Could not create exec pipe: $^E";
-
-        my $opt_L =
-            $accept_socket ? "acceptfd:$accept_fd" :
-            $ip eq "127.0.0.1" || $ip eq "::" ? "tcp:$port" :
-            "tcp:$ip:$port";
-        my @opt_a = !$accept_fd && $ip eq "::" ? "-a" : ();
-
-        my $pid = fork() // die "Could not fork: $^E";
-        if (!$pid) {
-            # Child
-            eval {
-                select($exec_wr);
-                $| = 1;
-                close($exec_rd) ||
-                    die "Assertion: Error closing exec reader: $^E";
-                if ($log_rd) {
-                    close($log_rd) ||
-                        die "Assertion: Error closing log reader: $^E";
-                }
-                close($rd) ||
-                    die "Assertion: Error closing adb reader: $^E";
-                # Use double fork trick to avoid zombies
-                my $pid = fork() // die "Could not fork: $^E";
-                # Parent
-                _exit(0) if $pid;
-                print $exec_wr "PID=$$\n";
-                my @adb = ($client_ref->{adb}, @opt_a, "-L", $opt_L, "fork-server", "server", "--reply-fd", $fd);
-                if (defined $log_fd) {
-                    $^F = 2;
-                    open(STDERR, ">&", $log_wr) ||
-                        die "Could not dup log pipe to STDERR: $^E";
-                    if ($unlog > 0) {
-                        # We'd like to use "adb nodaemon server" which writes
-                        # to STDERR, but unfortunately it doesn't support
-                        # --reply-fd, so we don't know if/when the server runs
-                        $ENV{ANDROID_ADB_LOG_PATH} = "/proc/$$/fd/$log_fd";
-                    }
-                }
-                local $SIG{__WARN__} = sub {};
-                exec(@adb) || die "$^E\n";
-            };
-            my $err = $@ || "Assertion: Missing error";
-            eval { print $exec_wr "ERR=$err" };
-            _exit(1);
-        }
-        # Parent
-        $starter->{pid} = $pid;
-        close($exec_wr) || die "Assertion: Error closing exec writer: $^E";
-        if ($log_wr) {
-            close($log_wr) ||
-                die "Assertion: Error closing log writer: $^E";
-        }
-        close($wr) || die "Assertion: Error closing adb writer: $^E";
-
-        $exec_rd->blocking(0);
-        $exec_rd->add_read(sub { $starter->_reader_exec });
-        $starter->{exec_rd} = $exec_rd;
-        $starter->{log_rd}  = $log_rd;
-
-        $rd->blocking(0);
-        $starter->{rd} = $rd;
-    };
+    eval { $starter->_spawn };
     if ($@) {
         my $err = $@;
         $err =~ s/\s+\z//;
@@ -283,6 +331,8 @@ sub _reader_exec {
 
         if ($starter->{in} ne "") {
             $starter->{in} =~ s/^ERR=//;
+            $starter->{in} =~ s/\s+\z//;
+            $starter->{in} = "Reason unknown" if $starter->{in} eq "";
             $starter->close("Could not start '$starter->{adb}': $starter->{in}");
             return;
         }
@@ -292,7 +342,7 @@ sub _reader_exec {
             return;
         }
 
-        $starter->{timeout} = timer($SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
+        $starter->{timeout} = timer($ADB_SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
 
         $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
@@ -318,6 +368,7 @@ sub _timeout {
         $starter->close("Unresponsive '$starter->{adb}' even with pid $starter->{pid_adb} gone");
         return;
     }
+    ++$kills->{$signal};
     if (!kill $signal, $starter->{pid_adb}) {
         if ($! != ESRCH) {
             $starter->close("Could not kill unresponsive ADB at pid $starter->{pid_adb}: $^E");
@@ -326,11 +377,11 @@ sub _timeout {
     } else {
         $starter->{killed} = $signal;
         if ($signal ne "KILL") {
-            $starter->{timeout} = timer($TERM_TIMEOUT, sub {$starter->_timeout("KILL")});
+            $starter->{timeout} = timer($SIGTERM_TIMEOUT, sub {$starter->_timeout("KILL")});
             return;
         }
     }
-    $starter->{timeout} = timer($KILL_TIMEOUT, sub {$starter->_timeout});
+    $starter->{timeout} = timer($SIGKILL_TIMEOUT, sub {$starter->_timeout});
 }
 
 sub _reader_log {
@@ -349,9 +400,10 @@ sub _reader_log {
             if ($starter->{killed}) {
                 $starter->close("Killed unresponsive '$starter->{adb}' with SIG$$starter->{killed}");
             } elsif ($starter->{in} eq OK) {
+                warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
                 $starter->close(undef);
             } else {
-                # _nok always does a close
+                # _nok always does a delete
                 $starter->_nok();
             }
         }
@@ -377,13 +429,14 @@ sub _reader {
         if ($starter->{killed}) {
             $starter->close("Killed unresponsive '$starter->{adb}' with SIG$starter->{killed}");
         } elsif ($starter->{in} eq OK) {
+            warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
             $starter->close(undef);
         } elsif ($starter->{log_rd}) {
             $starter->{rd}->delete_read;
             $starter->{rd} = undef;
             # We'll wait for $starter->{log_rd} to finish
         } else {
-            # _nok always does a close
+            # _nok always does a delete
             $starter->_nok();
         }
     } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
@@ -396,20 +449,49 @@ sub _reader {
 sub _nok {
     my ($starter) = @_;
 
-    if ($starter->{in} eq "") {
-        if (my ($line) = $starter->{log_in} =~ /(\S.*\S)\s*\z/) {
-            $starter->close("Could not successfully start '$starter->{adb}': $line", 1);
-            return;
-        }
-        $starter->close("Could not successfully start '$starter->{adb}': Reason unknown", 1);
-    } else {
+    # The program complained: Immediately return error
+    if ($starter->{in} ne "") {
         my $response = display_string($starter->{in});
-        $starter->close("Could not successfully start '$starter->{adb}': Unexpected response $response)");
+        $starter->close("Could not start '$starter->{adb}': Unexpected response $response)");
+        return;
     }
+
+    if (my ($line) = $starter->{log_in} =~ /\s*(.*\S)\s*\z/) {
+        $starter->close("Could not start '$starter->{adb}': $line", 1);
+        return;
+    }
+
+    # We have no idea why the program failed. Try again and intercept logging
+    # (we don't do this by default since it stops normal adb logging)
+    if (!$starter->{unlog} && $^O eq "linux" && -d "/proc/$$/fd/" && -x _) {
+        # Remove all callbacks
+        $starter->{pid_adb} = undef;
+        $starter->delete(1);
+
+        # And redo
+        $starter->{unlog} = 1;
+        eval { $starter->_spawn };
+        if ($@) {
+            my $err = $@;
+            $err =~ s/\s+\z//;
+            $starter->close($err);
+        }
+        return;
+    }
+
+    $starter->close("Could not start '$starter->{adb}': Reason unknown", 1);
 }
 
 sub objects {
     return $objects;
+}
+
+sub spawns {
+    return $spawns;
+}
+
+sub kills {
+    return $kills;
 }
 
 END {

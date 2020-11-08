@@ -12,8 +12,9 @@ our $VERSION = "1.000";
 use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
+use Socket qw(AF_INET);
 
-use Test::More tests => 631;
+use Test::More tests => 635;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer adb_echo addr_filter dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);
@@ -53,6 +54,7 @@ my $client_closer = new_ok("ADB::Client" =>
 $result = $client_closer->connect;
 isa_ok($result, "HASH", "Got a connection result from greeting server");
 
+# Do a basic connect
 my $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $port, blocking => 0]);
 is_deeply(\@results, [], "No results yet");
@@ -78,7 +80,7 @@ is_deeply(\@results, [
         "connect_ip" => "127.0.0.1",
         "connect_port" => $port,
         "connected" => 1,
-        "family" => 2
+        "family" => AF_INET,
     }],
     [ 1, undef ],
     [ 0, undef, 39 ],
@@ -140,6 +142,40 @@ is_deeply(\@results, [
   [ 0, undef, 10 ]	# Now we connect to the new server
 ], "Check re-resolve results");
 
+# connect to any addr behaves like connect to 127.0.0.1
+@results = ();
+$client = new_ok("ADB::Client" =>
+                    [host => "0.0.0.0", port => $port, blocking => 0]);
+is_deeply(\@results, [], "No results yet");
+$client->marker(callback => $callback);
+$client->connect(callback => $callback);
+$client->marker(callback => $callback);
+$client->version(callback => $callback);
+$client->marker(callback => $callback);
+$transaction_timeout = clocktime_running();
+mainloop();
+$transaction_timeout = clocktime_running() - $transaction_timeout;
+cmp_ok($transaction_timeout, ">", 0, "Transaction took time");
+# diag($transaction_timeout);
+$transaction_timeout = 2 * $transaction_timeout < 0.1 ?
+    0.1 : 2 * $transaction_timeout;
+$transaction_timeout = 0.1 if $transaction_timeout < 0.1;
+# dumper(\@results);
+is_deeply(\@results, [
+    [ 0, undef ],
+    [ 1, undef, {
+        "bind_ip" => "0.0.0.0",
+        "bind_port" => $port,
+        "connect_ip" => "127.0.0.1",
+        "connect_port" => $port,
+        "connected" => 1,
+        "family" => AF_INET,
+    }],
+    [ 1, undef ],
+    [ 0, undef, 39 ],
+    [ 0, undef ]
+], "Expected connection results") || dumper(\@results);
+
 # Now it's later. Check the closer and the greeter
 isa_ok($client_closer->connect, "HASH",
        "We will reconnect an immediate closer");
@@ -187,7 +223,7 @@ is_deeply(\@results, [
         "connect_ip" => "127.0.0.1",
         "connect_port" => $aport,
         "connected" => 1,
-        "family" => 2
+        "family" => AF_INET,
     }],
     [ 1, undef ],
     [ 1, undef, {
@@ -196,7 +232,7 @@ is_deeply(\@results, [
         "connect_ip" => "127.0.0.1",
         "connect_port" => $aport,
         "connected" => 1,
-        "family" => 2
+        "family" => AF_INET,
     }],
     [ 1, undef ],
     [ 0, "Operation timed out" ],
@@ -341,7 +377,7 @@ for my $i (0..2) {
                 "connect_ip" => "127.0.0.1",
                 "connect_port" => $old_port,
                 "connected" => $retry == 3 ? undef : 1,
-                "family" => 2,
+                "family" => AF_INET,
                 $retry == 1 || $retry == 2 ? (last_connect_error => "Unprobed") :
                 $retry == 3 ? (last_connect_error => $result->{last_connect_error}) :
                 (),
@@ -498,7 +534,7 @@ for my $i (0..4) {
 }
 # Do a request that would fit server 1 but we are sticky on server 3
 my $dummy = eval { $client->connect(version_max => 20) };
-like($@, qr{^Version '39' is above '20' at }, "Keep looking at server 3");
+like($@, qr{^\QADB server 127.0.0.1 port $port: Version '39' is above '20' at }, "Keep looking at server 3");
 for my $i (0..4) {
     if ($i == 3) {
         cmp_ok($_addr_info->[$i]{connected}, ">", 0,

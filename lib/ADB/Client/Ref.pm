@@ -5,7 +5,7 @@ use warnings;
 our $VERSION = '1.000';
 
 use Carp;
-use Scalar::Util qw(weaken refaddr blessed);
+use Scalar::Util qw(weaken refaddr blessed looks_like_number);
 use List::Util qw(first);
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
              ECONNREFUSED EACCES EPERM ENETUNREACH EHOSTUNREACH);
@@ -15,7 +15,7 @@ use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
 use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
     qw(info caller_info dumper adb_check_response display_string
-       clocktime_running
+       ip_port_from_addr clocktime_running
        FAILED BAD_ADB ASSERTION INFINITY
        $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
     _prefix => "utils_", qw(addr_info);
@@ -41,6 +41,9 @@ our $CALLBACK_DEFAULT	= \&callback_default;
 our $ADB_SOCKET	= undef;
 our $TRANSACTION_TIMEOUT = 10;
 our $CONNECTION_TIMEOUT = 10;
+# How long a Client wait for a Spawn object to return a result
+# After this the Client will get its response, but the Spawn object may still
+# wait for up to ADB_SPAWN_TIMEOUT
 our $SPAWN_TIMEOUT = 10;
 
 use constant {
@@ -112,6 +115,7 @@ sub new {
     my $blocking = (delete $arguments{blocking} // 1) ? 1 : 0;
     my $adb  = delete $arguments{adb} // $ADB;
     my $adb_socket = delete $arguments{adb_socket} // $ADB_SOCKET || 0;
+    $adb_socket = looks_like_number($adb_socket) ? $adb_socket <=> 0 : 1;
     my $host = delete $arguments{host} // $ADB_HOST;
     my $port = delete $arguments{port} // $ADB_PORT;
     my $reresolve = delete $arguments{reresolve} // INFINITY;
@@ -183,6 +187,10 @@ sub host {
 
 sub port {
     return shift->{port};
+}
+
+sub adb_socket {
+    return shift->{adb_socket};
 }
 
 sub _addr_info {
@@ -619,7 +627,9 @@ sub connector {
         $state->{spawn}		= 1;
         $state->{kill}		= delete $arguments->{kill};
         $state->{adb}		= delete $arguments->{adb} // $client_ref->{adb};
-        $state->{adb_socket}	= delete $arguments->{adb_socket} // $client_ref->{adb_socket} // 0;
+        my $adb_socket		= delete $arguments->{adb_socket} // $client_ref->{adb_socket} || 0;
+        $state->{adb_socket}	= looks_like_number($adb_socket) ?
+            $adb_socket <=> 0 : 1;
     }
 
     if (defined $state->{version_min}) {
@@ -732,7 +742,6 @@ sub _connect_start {
     $state->{address_i}	= -1;
     $state->{address} = $client_ref->{addr_connected} ?
         [$client_ref->{addr_connected}] : $client_ref->{addr_info};
-    #Test::More::diag("_connect_start(@_) [@{$state->{address}}]");
 
     if ($client_ref->{socket}) {
         my $addr = $client_ref->{addr_connected} ||
@@ -839,6 +848,10 @@ sub _connect_next {
             }
         };
         $socket->blocking(0);
+        if ($addr->{connect_addr0}) {
+            bind($socket, $addr->{connect_addr0}) ||
+                return $client_ref->error("Could not bind to @{[ip_port_from_addr($addr->{connect_addr0})]}[0]: $^E");
+        }
         if (connect($socket, $addr->{connect_addr})) {
             # SOL_TCP == IPPROTO_TCP
             $socket->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1) //
@@ -888,7 +901,7 @@ sub _connect_writable {
         $client_ref->error("Assertion: $addr->{last_connect_error}");
         return;
     }
-    my $err =unpack("I", $packed);
+    my $err = unpack("I", $packed);
 
     # We should get a final result
     if ($err == EINPROGRESS || $err == EWOULDBLOCK) {
@@ -963,11 +976,13 @@ sub _connected {
             # succeeded but immediately after that the connection got reset ?
             # need to do a packet capture.
             # (Can be reproduced by kill -9 of adbd just before connect)
+
             if ($state->{spawn} && $state->{version_scan} < 1) {
+                # No scan or scan finished
                 $client_ref->_connect_step_spawn;
                 return 0;
             }
-            $state->{first_error} ||= $msg;
+            $state->{first_error} ||= $msg if !$state->{spawn};
             return 1;
         } else {
             $client_ref->error($msg);
@@ -1047,8 +1062,8 @@ sub _connect_step_version {
 
     if ($err) {
         $addr->{last_connect_error} = $err;
-        $state->{first_error} ||= $err;
-        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
+        $state->{first_error} ||= "ADB server $addr->{connect_ip} port $addr->{connect_port}: $err";
+        $client_ref->_connector_final($state->{first_error});
         return;
     }
     if (defined $state->{version_min} && $version < $state->{version_min}) {
@@ -1063,7 +1078,7 @@ sub _connect_step_version {
     }
     # Version is too low or too high
     $addr->{last_connect_error} = $err;
-    $state->{first_error} ||= $err;
+    $state->{first_error} ||= "ADB server $addr->{connect_ip} port $addr->{connect_port}: $err";
     $client_ref->_connect_next;
 }
 
@@ -1080,8 +1095,8 @@ sub _connect_step_kill {
 
     if ($err) {
         $addr->{last_connect_error} = $err;
-        $state->{first_error} ||= $err;
-        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: $err");
+        $state->{first_error} ||= "ADB server $addr->{connect_ip} port $addr->{connect_port}: $err";
+        $client_ref->_connector_final($state->{first_error});
         return;
     }
     $client_ref->_connect_step_spawn;
@@ -1096,21 +1111,20 @@ sub _connect_step_spawn {
         $client_ref->fatal("No command");
     my $state = $command->[STATE];
     my $addr = $state->{address}[$state->{address_i}];
-    my $result = ADB::Client::Spawn->join(
-        $client_ref, $addr->{bind_addr}, $state->{unlog}) ||
+    my $result = ADB::Client::Spawn->join($client_ref, $addr->{bind_addr}) ||
             $client_ref->fatal("ADB::Client::SpawnRef returns false");
 
     if (!blessed($result) || !$result->isa("ADB::Client::SpawnRef")) {
         ref $result eq "" || $client_ref->fatal("ADB::Client::SpawnRef returns invalid reference $result");
         $addr->{last_connect_error} = $result;
-        $state->{first_error} ||= $result;
-        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: Spawn failed: $result");
+        $state->{first_error} ||= "ADB server $addr->{bind_ip} port $addr->{bind_port}: Spawn failed: $result";
+        $client_ref->_connector_final($state->{first_error});
         return;
     }
     $client_ref->{starter} = $result;
     $client_ref->{timeout} = timer(
         $addr->{spawn_timeout} // $client_ref->{spawn_timeout},
-        sub { $client_ref->_spawn_timed_out });
+        sub { $client_ref->_spawn_result("Operation timed out")});
     $client_ref->{active} = 1;
 }
 
@@ -1126,22 +1140,26 @@ sub _spawn_result {
     my $addr = $state->{address}[$state->{address_i}];
 
     if ($err) {
-        if (!$state->{unlog}  && $^O eq "linux" && -d "/proc/$$/fd/" && -x _) {
-            # Alternatively: adb -a [-P <PORT_NUMBER>|-L <spec]  nodaemon server
-            # and get error from STDERR
-            $state->{unlog} = 1;
-            # Retry start (which failed without response)
-            $client_ref->_connect_step_spawn;
-            return;
-        }
         $addr->{last_connect_error} = $err;
-        $state->{first_error} ||= $err;
-        $client_ref->_connector_final("ADB server $addr->{connect_ip} port $addr->{connect_port}: Spawn failed: $err");
+        $state->{first_error} ||= "ADB server $addr->{bind_ip} port $addr->{bind_port}: Spawn failed: $err";
+        if ($more) {
+            # We didn't get OK from --reply-fd. This often means adb can't
+            # do this particular bind (e.g. specific IP or IPv6)
+            # Try another address/port
+            # This is important for the common case of using host "localhost"
+            # which resolves as ::1 and 127.0.0.1 but adb
+            # (at least as of version 41) cannot do a specific bind to ::1
+            # So we need to fail ::1 and fallback to 127.0.0.1
+            $client_ref->_connect_next;
+        } else {
+            $client_ref->_connector_final("ADB server $addr->{bind_ip} port $addr->{bind_port}: Spawn failed: $err");
+        }
         return;
     }
     $addr->{pid} = $more;
     # We have no idea what version the new server is
     delete $addr->{version};
+
     # As a sanity check we now will check the new server
     # $client_ref->_connector_final(undef, $addr);
 
@@ -1153,17 +1171,6 @@ sub _spawn_result {
     # Whatever happens during this final check is what we will report as error
     $state->{first_error} = undef;
     $client_ref->_connect_next;
-}
-
-sub _spawn_timed_out {
-    my ($client_ref) = @_;
-
-    my $command = $client_ref->{commands}[0] ||
-        $client_ref->fatal("No command");
-    my $state = $command->[STATE];
-    my $addr = $state->{address}[$state->{address_i}];
-
-    die "Unimplemented";
 }
 
 sub _writer {

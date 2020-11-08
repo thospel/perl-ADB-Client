@@ -5,7 +5,7 @@ use strict;
 use warnings;
 
 # Realy try not to get stuck
-alarm 20;
+alarm 60;
 
 our $VERSION = "1.000";
 
@@ -16,15 +16,19 @@ use Data::Dumper;
 use IO::Socket::IP qw();
 use IO::Socket qw(inet_ntoa pack_sockaddr_in inet_aton
                   AF_INET SOCK_DGRAM IPPROTO_UDP);
-use Errno qw(EADDRNOTAVAIL ECONNREFUSED ETIMEDOUT);
+use Errno qw(EADDRNOTAVAIL ECONNREFUSED ETIMEDOUT ENOENT);
 use Storable qw(dclone);
+use Cwd qw(abs_path);
 
 BEGIN {
+    $INC{"Test/More.pm"} || croak "Must use Test::More before using TestDrive";
+
     croak "Loaded ADB::Client::Utils before TestDrive" if $INC{"ADB/Client/Utils.pm"};
     # Ignore environment variables already set before calling "make test"
     $ENV{ADB_CLIENT_ENV} = 0;
     $ENV{ADB_FAKE_ERROR} = "";
     $ENV{ADB_FAKE_SLEEP} = 0;
+    delete $ENV{ANDROID_ADB_LOG_PATH};
 }
 
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
@@ -37,17 +41,15 @@ ADB::Client->add_command(["failer" => "Wee", 0, 1]);
 ADB::Client->add_command(["echo" => "internal:echo:%s", -1, 1]);
 ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 1]);
 ADB::Client->add_command(["pid" => "internal:pid", -1, 1]);
-
-BEGIN {
-    $INC{"Test/More.pm"} || croak "Must use Test::More before using TestDrive";
-}
+ADB::Client->add_command(["argv" => "internal:argv", -1, 1, sub { return [ split /\0/, shift]}]);
 
 use Exporter::Tidy
     other =>
-    [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects
+    [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects $adb_fake
         $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
-        adb_start adb_stop adb_unacceptable adb_unreachable adb_closer adb_echo
-        adb_version adb_blackhole remote_ip is_remote4 addr_filter
+        adb_start adb_stop adb_unacceptable adb_unreachable adb_unreachable6
+        adb_closer adb_echo adb_echo6 adb_version adb_version6 adb_blackhole
+        remote_ip is_remote4 addr_filter
         collect_stderr collected_stderr uncollect_stderr dumper)];
 
 $SIG{INT} = sub {
@@ -56,16 +58,19 @@ $SIG{INT} = sub {
     exit 1;
 };
 
+$Bin = abs_path($Bin);
 $Bin =~ s{/+\z}{};
 our $t_dir = $Bin;
 our $base_dir = $t_dir;
 $base_dir =~ s{/t\z}{} ||
     croak "test directory $t_dir does not seem to end on /t";
-$ADB = "$base_dir/bin/adb_fake";
+our $adb_fake = "$base_dir/bin/adb_fake";
+$ADB = $adb_fake;
 
 my ($adb_out, $adb_control, $pid);
 my $ECONNREFUSED = $! = ECONNREFUSED;
 my $ETIMEDOUT    = $! = ETIMEDOUT;
+my $ENOENT       = $! = ENOENT;
 
 our $TRANSACTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_TRANSACTION_TIMEOUT} || 0.5;
 our $CONNECTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_CONNECTION_TIMEOUT} // undef;
@@ -153,12 +158,12 @@ sub remote_ip {
 }
 
 sub adb_start {
-    my $blib = grep $_ eq "$base_dir/blib/lib", @INC;
+    my $blib = grep abs_path($_) eq "$base_dir/blib/lib", @INC;
 
     $pid = do {
         local $SIG{__WARN__} = sub {};
-        # open($adb_out = undef, "-|", "$base_dir/bin/adb_fake")
-        open($adb_out = undef, "-|", $^X, "$base_dir/bin/adb_fake", $blib ? "--blib" : ()) ||
+        # open($adb_out = undef, "-|", $adb_fake)
+        open($adb_out = undef, "-|", $^X, $adb_fake, $blib ? "--blib" : ()) ||
             Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");
     };
     my $line = <$adb_out> //
@@ -221,6 +226,10 @@ sub adb_unreachable {
     return _adb_listener("Unreachable");
 }
 
+sub adb_unreachable6 {
+    return _adb_listener("Unreachable6");
+}
+
 sub adb_closer {
     return _adb_listener("Closer");
 }
@@ -229,8 +238,16 @@ sub adb_echo {
     return _adb_listener("Echo");
 }
 
+sub adb_echo6 {
+    return _adb_listener("Echo6");
+}
+
 sub adb_version {
     return _adb_listener("Listener" . (@_ ? " @_" : ""));
+}
+
+sub adb_version6 {
+    return _adb_listener("Listener6" . (@_ ? " @_" : ""));
 }
 
 sub adb_blackhole {
@@ -247,6 +264,7 @@ sub addr_filter {
     my $ais = dclone($addr_info);
     $ais = [$ais] if UNIVERSAL::isa($addr_info, "HASH");
     for my $ai (@$ais) {
+        defined $ai || next;
         for my $name (qw(bind_addr bind_addr0 connect_addr)) {
             if (!delete $ai->{$name}) {
                 local $Data::Dumper::Indent	  = 1;
@@ -257,15 +275,20 @@ sub addr_filter {
                 $dump =~ s/\s+\z//;
                 die "No $name in addr_info element: $dump";
             }
-            $ai->{connected} = 1 if $ai->{connected};
-            $ai->{pid} = 1 if $ai->{pid};
-            if ($ai->{last_connect_error}) {
-                for ($ai->{last_connect_error}) {
-                    m{^Connect error: } || next;
-                    next if s{^Connect error: \Q$ECONNREFUSED\E\z}{Connect error: Connection refused};
-                    next if s{^Connect error: \Q$ETIMEDOUT\E\z}{Connect error: Connection timed out};
-                    die "Cannot normalize connection error '$_'";
+        }
+        delete $ai->{connect_addr0};
+        $ai->{connected} = 1 if $ai->{connected};
+        $ai->{pid} = 1 if $ai->{pid};
+        if ($ai->{last_connect_error}) {
+            for ($ai->{last_connect_error}) {
+                if (m{^Could not start }) {
+                    s{: \Q$ENOENT\E\b}{: No such file or directory};
+                    next;
                 }
+                m{^Connect error: } || next;
+                next if s{^Connect error: \Q$ECONNREFUSED\E\z}{Connect error: Connection refused};
+                next if s{^Connect error: \Q$ETIMEDOUT\E\z}{Connect error: Connection timed out};
+                die "Cannot normalize connection error '$_'";
             }
         }
     }
@@ -278,7 +301,8 @@ sub dumper {
     local $Data::Dumper::Useqq	  = 1;
     local $Data::Dumper::Terse	  = 1;
 
-    Test::More::diag("Dumped variable:");
+    my (undef, $filename, $line) = caller(0);
+    Test::More::diag("Dumped variable ($filename:$line):");
     print STDERR Dumper(@_);
 }
 

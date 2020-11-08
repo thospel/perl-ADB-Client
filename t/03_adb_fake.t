@@ -11,9 +11,11 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
+use Socket qw(AF_INET);
+
 use Test::More tests => 101;
-use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable dumper
-            $UNREACHABLE);
+use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable addr_filter
+                 dumper $UNREACHABLE);
 
 # We already checked loading in 02_adb_client.t
 use ADB::Client qw(mainloop immediate);
@@ -100,16 +102,13 @@ for (1..2) {
 
 my $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port]);
 my $result = $client->connect;
-is_deeply($result, {
-   "bind_addr" => $result->{bind_addr},
-   "bind_addr0" => $result->{bind_addr0},
+is_deeply(addr_filter($result), {
    "bind_ip" => "127.0.0.1",
    "bind_port" => $port,
-   "connect_addr" => $result->{connect_addr},
    "connect_ip" => "127.0.0.1",
    "connect_port" => $port,
-   "connected" => $result->{connected},
-   "family" => 2
+   "connected" => 1,
+   "family" => AF_INET,
  }, "Get a proper connection") ||
     BAIL_OUT("Didn't get a proper connection to the fake adb server");
 is($client->connected, 1, "Succesfully connected") ||
@@ -146,16 +145,13 @@ for (1..2) {
 }
 
 $result = $client->connect;
-is_deeply($result, {
-  "bind_addr" => $result->{bind_addr},
-  "bind_addr0" => $result->{bind_addr0},
+is_deeply(addr_filter($result), {
   "bind_ip" => "127.0.0.1",
   "bind_port" => $port,
-  "connect_addr" => $result->{connect_addr},
   "connect_ip" => "127.0.0.1",
   "connect_port" => $port,
-  "connected" => $result->{connected},
-  "family" => 2
+  "connected" => 1,
+  "family" => AF_INET,
 }, "Can still do a connect and get connection properties") ||
     BAIL_OUT("Cannot do repeat connect on connected client");
 cmp_ok($result->{connected}, '>', 0, "Connection time is positive");
@@ -186,16 +182,13 @@ is($client->connected, 0, "Client is not connected") ||
 my $aport = adb_unacceptable();
 $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $aport]);
 my @result = $client->connect();
-is_deeply(\@result, [{
-     "bind_addr" => $result[0]{bind_addr},
-     "bind_addr0" => $result[0]{bind_addr0},
+is_deeply(addr_filter(\@result), [{
      "bind_ip" => "127.0.0.1",
      "bind_port" => $aport,
-     "connect_addr" => $result[0]{connect_addr},
      "connect_ip" => "127.0.0.1",
      "connect_port" => $aport,
-     "connected" => $result[0]{connected},
-     "family" => 2
+     "connected" => 1,
+     "family" => AF_INET,
    }], "We can still connect to a port not doing accepts") ||
     BAIL_OUT("Cannot connect to listening but unresponsive port");
 # We leave the connection open

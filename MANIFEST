@@ -23,6 +23,9 @@ t/05_marker.t
 t/06_commands.t
 t/07_connect.t
 t/08_spawn.t
+t/09_ipv6.t
+t/10_is_listening.t
+t/11_ip_port_from_addr.t
 t/98_fatal.t
 t/99_internals.t
 t/TestDrive.pm

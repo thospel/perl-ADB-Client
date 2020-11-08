@@ -7,18 +7,25 @@ our $VERSION = '1.000';
 use Data::Dumper;
 use Time::Local qw(timegm);
 use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
+use Errno qw(ENOTCONN EPROTONOSUPPORT);
 use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
-              pack_sockaddr_in pack_sockaddr_in6
-              SOCK_STREAM IPPROTO_TCP IPPROTO_UDP AF_INET AF_INET6 SOCK_DGRAM);
+              inet_pton inet_aton sockaddr_family pack_sockaddr_in
+              pack_sockaddr_in6
+              SOCK_STREAM IPPROTO_TCP IPPROTO_UDP AF_INET AF_INET6 SOCK_DGRAM
+              SOL_SOCKET SO_ACCEPTCONN);
+our $SO_ACCEPTCONN = eval { SO_ACCEPTCONN };
+use Carp;
+our @CARP_NOT = qw(ADB::Client::Ref);
 
 use Exporter::Tidy
     other	=>[qw(addr_info adb_addr_info info caller_info callers dumper
                       string_from_value display_string adb_check_response
                       realtime clocktime realtime_running clocktime_running
-                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE
+                      ip_port_from_addr addr_from_ip_port is_listening
+                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
                       $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
-                      DISPLAY_MAX)];
+                      DISPLAY_MAX IPV6)];
 
 use constant {
     # Code assumes OKAY and FAIL both have length 4, so you can't change this
@@ -30,6 +37,10 @@ use constant {
     BAD_ADB		=> 2,
     ASSERTION		=> 3,
     INFINITY		=> 9**9**9,
+    IPV6		=>
+    socket(my $s, AF_INET6, SOCK_STREAM, IPPROTO_TCP) ? 1 :
+    $! == EPROTONOSUPPORT ? 0 :
+    die("Cannot create socket: $^E"),
 };
 
 our ($DEBUG, $VERBOSE, $QUIET);
@@ -82,70 +93,117 @@ sub addr_info {
         return $err if $no_die;
         die $err;
     }
-    my $result = adb_addr_info(\@ai);
-    if (ref $result eq "") {
-        my $err = $result ? "Could not resolve($host, $port): $result" :
-            "No usable resolve for ($host, $port)";
-        return $err if $no_die;
-        die $err;
-    }
-
-    # dumper($result);
-    return $result;
-
+    my $address = $no_die ? eval { adb_addr_info(\@ai) } : adb_addr_info(\@ai);
+    # dumper($address);
+    return $address if $address;
+    $err = $@;
+    $err =~ s/ at .*//s;
+    return $err;
 }
 
 sub adb_addr_info {
     my ($ais) = @_;
 
-    my ($first_err, @address);
+    @$ais || die "Empty address info list";
+    my @address;
     for my $ai (@$ais) {
-        eval {
-            socket(my $udp, $ai->{family}, SOCK_DGRAM, IPPROTO_UDP) || next;
-            my ($bind_port, $b_addr, @rest) =
-                $ai->{family} == AF_INET  ? unpack_sockaddr_in ($ai->{addr}) :
-                $ai->{family} == AF_INET6 ? unpack_sockaddr_in6($ai->{addr}) :
-                die "Assertion: Unknown family '$ai->{family}'\n";
-            $bind_port || die "Invalid zero port\n";
-            # Address with unspecified port
-            # Used to try a local UDP bind to see if this address is local
-            # (we don't want to clash with an existing port)
-            my $bind_addr0 =
-                $ai->{family} == AF_INET  ? pack_sockaddr_in (0, $b_addr) :
-                $ai->{family} == AF_INET6 ? pack_sockaddr_in6(0, $b_addr, @rest) :
-                die "Assertion: Unknown family '$ai->{family}'\n";
-            # Make sure we have a canonical form without garbage
-            # cpan/Socket/Socket.xs zeroes the structure before filling it in
-            my $bind_addr =
-                $ai->{family} == AF_INET  ? pack_sockaddr_in ($bind_port, $b_addr) :
-                $ai->{family} == AF_INET6 ? pack_sockaddr_in6($bind_port, $b_addr, @rest) :
-                die "Assertion: Unknown family '$ai->{family}'\n";
-            connect($udp, $ai->{addr}) ||
-                die "Assertion: Could not connect UDP probe socket: $^E\n";
-            my $connect_addr = getpeername($udp) //
-                die "Assertion: No getpeername on connected UDP socket: $^E\n";
-            my ($connect_port, $c_addr) =
-                $ai->{family} == AF_INET  ? unpack_sockaddr_in ($connect_addr) :
-                $ai->{family} == AF_INET6 ? unpack_sockaddr_in6($connect_addr) :
-                die "Assertion: Unknown family '$ai->{family}'\n";
-            push @address, {
-                family		=> $ai->{family},
-                bind_addr0	=> $bind_addr0,
-                bind_addr	=> $bind_addr,
-                bind_port	=> $bind_port,
-                bind_ip		=> inet_ntop($ai->{family}, $b_addr),
-                connect_addr	=> $connect_addr,
-                connect_port	=> $connect_port,
-                connect_ip	=> inet_ntop($ai->{family}, $c_addr),
-            };
+        socket(my $udp, $ai->{family}, SOCK_DGRAM, IPPROTO_UDP) ||
+            die "Could not create AF_INET UDP socket: $^E";
+        my ($bind_ip, $bind_port, $family, @rest) =
+            ip_port_from_addr($ai->{addr});
+        $bind_port || die "Invalid zero port\n";
+
+        # Address with unspecified port
+        # Used to try a local UDP bind to see if this address is local
+        # (we don't want to clash with an existing port)
+        my $bind_addr0 = addr_from_ip_port($bind_ip, 0, @rest);
+
+        # Make sure we have a canonical form without garbage
+        # cpan/Socket/Socket.xs zeroes the structure before filling it in
+        my $bind_addr = addr_from_ip_port($bind_ip, $bind_port, @rest);
+
+        my $connect_addr = addr_from_ip_port(
+            $bind_ip eq "0.0.0.0" ? "127.0.0.1" :
+            $bind_ip eq "::"      ? "::1" :
+            $bind_ip, $bind_port, @rest);
+        connect($udp, $connect_addr) ||
+            die "Assertion: Could not connect UDP probe socket: $^E\n";
+        $connect_addr = getpeername($udp) ||
+            die "Assertion: Could not getpeername on connected UDP socket: $^E\n";
+        my ($connect_ip, $connect_port) = ip_port_from_addr($connect_addr);
+
+        my $connect_addr0;
+        if (0) {
+            $connect_addr0 = getsockname($udp) ||
+                die "Assertion: No getsockname on connected UDP socket: $^E\n";
+            my ($ip, undef, undef, @rest) = ip_port_from_addr($connect_addr0);
+            $connect_addr0 = addr_from_ip_port($ip, 0, @rest);
+            # dumper([ip_port_from_addr($connect_addr), ip_port_from_addr($connect_addr0)]);
+        }
+        push @address, {
+            family		=> $ai->{family},
+            bind_addr0		=> $bind_addr0,
+            bind_addr		=> $bind_addr,
+            bind_port		=> $bind_port,
+            bind_ip		=> $bind_ip,
+            $connect_addr0 ? (connect_addr0	=> $connect_addr0) : (),
+            connect_addr	=> $connect_addr,
+            connect_port	=> $connect_port,
+            connect_ip		=> $connect_ip,
         };
-        $first_err ||= $@;
-    }
-    if (!@address) {
-        $first_err =~ s/\s+\z// if defined $first_err;
-        return $first_err;
     }
     return \@address;
+}
+
+sub ip_port_from_addr {
+    my ($addr) = @_;
+
+    my $family = sockaddr_family($addr);
+    my ($port, $packed, @more) =
+        $family == AF_INET  ? unpack_sockaddr_in ($addr) :
+        $family == AF_INET6 ? unpack_sockaddr_in6($addr) :
+        croak "Unhandled family '$family'";
+    return inet_ntop($family, $packed), $port, $family, @more;
+}
+
+sub addr_from_ip_port {
+    my $ip   = shift;
+    my $port = shift;
+    if (my $addr = inet_aton($ip)) {
+        return pack_sockaddr_in($port, $addr);
+    }
+    return pack_sockaddr_in6($port, inet_pton(AF_INET6, $ip), @_);
+}
+
+sub is_listening {
+    my ($socket) = @_;
+
+    fileno($socket) // croak "Not a filehandle";
+
+    if (defined $SO_ACCEPTCONN) {
+        # Failure means it's not a socket or it's not a type that can listen
+        my $packed = getsockopt($socket, SOL_SOCKET, SO_ACCEPTCONN) ||
+            croak "Could not getsockopt(SOL_SOCKET, SO_ACCEPTCONN): $^E";
+        return unpack("I", $packed);
+    }
+    # On systems Without SO_ACCEPTCONN we cannot determine if a socket listens
+    # But we can at least do some sanity checks
+
+    # If it is listening it cannot be connected
+    return 0 if getpeername($socket);
+    # Should only call this on sockets
+    $! == ENOTCONN || croak "Could not getpeername: $^E";
+
+    # Check the local address.
+    # die instead of croak since getpeername already checked sanity of $socket
+    my $addr = getsockname($socket) ||
+        die "Could not getsockname: $^E";
+    my (undef, $port) = ip_port_from_addr($addr);
+    # If no port is set this socket isn't bound
+    $port || return 0;
+    # Should we try to connect to it ?
+    # Can that be blocked by OS rules leading to timeouts ?
+    return 1;
 }
 
 sub info {

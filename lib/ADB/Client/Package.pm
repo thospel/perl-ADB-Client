@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "020";
-$release_time = 1604868006;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "021";
+$release_time = 1605031642;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -84,6 +84,15 @@ $release_time = 1604868006;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/08_spawn.t' => {
+    '1.000' => '1.000'
+  },
+  't/09_ipv6.t' => {
+    '1.000' => '1.000'
+  },
+  't/10_is_listening.t' => {
+    '1.000' => '1.000'
+  },
+  't/11_ip_port_from_addr.t' => {
     '1.000' => '1.000'
   },
   't/98_fatal.t' => {

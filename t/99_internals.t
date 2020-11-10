@@ -17,7 +17,7 @@ my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 110;
+use Test::More tests => 116;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -252,6 +252,25 @@ for my $name (qw(read write error)) {
     $socket1->$delete_name(sub {});
 }
 
+my $client = new_ok("ADB::Client", [port => $port]);
+is($client->version, 39, "Sanity check. We can run");
+ADB::Client->add_command([version0 => "host:version", -1, 1, sub { return {} }]);
+eval { $client->version0 };
+like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
+# This broke $client. Create a new one
+$client = new_ok("ADB::Client", [port => $port]);
+
+ADB::Client->add_command([version1 => "host:version", -1, 1, sub { die "Boem\n" }]);
+eval { $client->version1 };
+like($@, qr{Assertion: Could not process host:version output "0027": Boem at },
+     "process must not die");
+
+ADB::Client->add_command([version2 => "host:version", -1, 1, sub { return "Bad" }]);
+my @result;
+$client->version2(blocking => 0, callback => sub { shift; push @result, [@_] });
+mainloop();
+is_deeply(\@result, [["Bad"]], "Process can return an error");
+
 eval { ADB::Client->add_command(["space space" => "Wee", 0, 1]) };
 like($@, qr{^Illegal declaration of subroutine ADB::Client::space at }, "");
 
@@ -263,7 +282,7 @@ eval { ADB::Client->new(model => bless [], "Foo") };
 like($@, qr{^Model without client_ref at }, "");
 
 # Try some bad ADB::Client::Ref commands
-my $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
+$client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 eval { $client->post_activate() };
 like($@, qr{^Missing post_activate argument at },

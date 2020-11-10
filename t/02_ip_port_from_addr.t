@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 11_ip_port_from_addr.t'
+# `make test'. After `make install' it should work as `perl 02_ip_port_from_addr.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

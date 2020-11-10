@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 05_marker.t'
+# `make test'. After `make install' it should work as `perl 07_marker.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

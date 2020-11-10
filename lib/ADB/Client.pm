@@ -55,16 +55,22 @@ sub client_ref {
     return ${shift()};
 }
 
-my @keep_spawn_socket = qw(adb adb_socket spawn_timeout blocking);
+my @keep_spawn_socket = qw(adb adb_socket spawn_timeout);
 sub spawn_socket {
     @_ % 2 == 0 || croak "Odd number of arguments";
-    my ($class, $socket, %arguments) = @_;
-    my %keep_args;
+    my ($class, $s, %arguments) = @_;
+    my %keep_args = (blocking => delete $arguments{blocking} // 1 );
     @keep_args{@keep_spawn_socket} = delete @arguments{@keep_spawn_socket};
-    my $callback = delete $arguments{callback} || $CALLBACK_DEFAULT;
+    my $callback = $keep_args{blocking} ? undef : delete $arguments{callback};
     croak "Unknown argument " . join(", ", keys %arguments) if %arguments;
 
-    fileno($socket) // croak "Socket is not an IO handle";
+    fileno($s) // croak "Socket is not an IO handle";
+    my $socket;
+    {
+        # Make a copy without CLOEXEC
+        local $^F = 2**31-1;
+        open($socket, "+>&", $s) || croak "Could not dup socket: $^E";
+    }
     my $addr = getsockname($socket) || croak "Cannot getsockname: $^E";
     @keep_args{qw(host port)} = ip_port_from_addr($addr);
     is_listening($socket) || croak "Socket is not listening";
@@ -74,23 +80,20 @@ sub spawn_socket {
     @$_addr_info == 1 || die "Assertion: Multiple addr_info";
     $_addr_info->[0]{bind_addr} = $socket;
 
-    $client->spawn(blocking => 0, callback => sub {
-                       my $client = shift;
-                       # Shouldn already be closed, but just make sure
-                       $client->client_ref->close;
-                       # Stop the _fatal from running
-                       $client->post_activate(0);
-                       # Original callback
-                       $callback->($client, @_);
-                   });
-    # Don't use this client after spawn
-    $client->_fatal(blocking => 0);
+    $client->spawn($callback ? (callback => $callback) : ());
     return $client;
+}
+
+# Forward activate with a toplevel argument
+sub activate {
+    my ($client, $top_level) = @_;
+
+    $client->client_ref->activate();
 }
 
 # Simply forward command
 for my $name (
-    qw(connected activate host port adb_socket fatal addr_info _addr_info
+    qw(connected host port adb_socket fatal addr_info _addr_info
        connection_data command_retired post_activate blocking)) {
     my %replace = (
         NAME	=> $name,

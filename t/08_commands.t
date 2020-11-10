@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 06_commands.t'
+# `make test'. After `make install' it should work as `perl 08_commands.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

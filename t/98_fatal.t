@@ -31,7 +31,7 @@ eval { $client->fatal("Bullet") };
 my $err = $@;
 like($err, qr{^Fatal: Assertion: Bullet at }, "Expected fatal error");
 for (1..2) {
-    eval { $client->activate };
+    eval { $client->activate(0) };
     $err = $@;
     like($err, qr{^Attempt to restart a dead ADB::Client at },
          "Expected fatal error");
@@ -60,7 +60,7 @@ like($err, qr{^Attempt to restart a dead ADB::Client at },
 # dumper(\@results);
 is_deeply(\@results, [ [ 0, undef, 39 ]], "The commands before _fatal do run");
 for (1..2) {
-    eval { $client->activate };
+    eval { $client->activate(0) };
     $err = $@;
     like($err, qr{^Attempt to restart a dead ADB::Client at },
          "Expected fatal error");
@@ -81,7 +81,7 @@ like($err, qr{^Attempt to restart a dead ADB::Client at },
 # dumper(\@results);
 is_deeply(\@results, [], "The commands before _fatal do run");
 for (1..2) {
-    eval { $client->activate };
+    eval { $client->activate(0) };
     $err = $@;
     like($err, qr{^Attempt to restart a dead ADB::Client at },
          "Expected fatal error");

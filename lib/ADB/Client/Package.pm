@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "021";
-$release_time = 1605031642;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "022";
+$release_time = 1605050996;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -65,34 +65,37 @@ $release_time = 1605031642;	## no critic (UselessNoCritic MagicNumbers)
   't/01_adb_check_response.t' => {
     '1.000' => '1.000'
   },
-  't/02_adb_client.t' => {
+  't/02_ip_port_from_addr.t' => {
     '1.000' => '1.000'
   },
-  't/03_adb_fake.t' => {
+  't/03_is_listening.t' => {
     '1.000' => '1.000'
   },
-  't/04_kill.t' => {
+  't/04_adb_client.t' => {
     '1.000' => '1.000'
   },
-  't/05_marker.t' => {
+  't/05_adb_fake.t' => {
     '1.000' => '1.000'
   },
-  't/06_commands.t' => {
+  't/06_kill.t' => {
     '1.000' => '1.000'
   },
-  't/07_connect.t' => {
+  't/07_marker.t' => {
     '1.000' => '1.000'
   },
-  't/08_spawn.t' => {
+  't/08_commands.t' => {
     '1.000' => '1.000'
   },
-  't/09_ipv6.t' => {
+  't/09_connect.t' => {
     '1.000' => '1.000'
   },
-  't/10_is_listening.t' => {
+  't/10_spawn.t' => {
     '1.000' => '1.000'
   },
-  't/11_ip_port_from_addr.t' => {
+  't/11_spawn_socket.t' => {
+    '1.000' => '1.000'
+  },
+  't/20_ipv6.t' => {
     '1.000' => '1.000'
   },
   't/98_fatal.t' => {

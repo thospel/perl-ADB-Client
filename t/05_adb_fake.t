@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 03_adb_fake.t'
+# `make test'. After `make install' it should work as `perl 05_adb_fake.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

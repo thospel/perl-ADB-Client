@@ -287,12 +287,6 @@ sub wait : method {
     return @$result;
 }
 
-sub server_start {
-    my ($client_ref, $arguments, $callback) = @_;
-
-    ADB::Client::ServerStart->new($client_ref, $callback, $arguments);
-}
-
 sub commands_add {
     my ($class, $client_class) = @_;
     $client_class->_add_command($_) for 0..$#COMMANDS;
@@ -514,6 +508,7 @@ sub success {
         $result = eval { $command_ref->[PROCESS]->($_[0], $command_ref->[COMMAND], $client_ref, $result) };
         if ($@) {
             my $err = $@;
+            $err =~ s/\s+\z//;
             my $str = display_string($_[0]);
             unshift @{$client_ref->{commands}}, $command;
             $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
@@ -521,11 +516,9 @@ sub success {
         }
         if (ref $result ne "ARRAY") {
             unshift @{$client_ref->{commands}}, $command;
-            if (ref $result eq "") {
-                $client_ref->error($result);
-            } else {
-                $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
-            }
+            ref $result eq "" ||
+                $client_ref->fatal("Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
+            $client_ref->error($result);
             return;
         }
     }
@@ -958,11 +951,24 @@ sub _connected {
         # $client_ref->{expect_eof} = undef;
         $addr->{connected} = clocktime_running() || 1e-9;
         $client_ref->{addr_connected} = $addr;
+        if (defined fileno $addr->{bind_addr}) {
+            # Implies $state->{spawn}
+            $client_ref->close;
+            $client_ref->_connect_step_spawn;
+            return 0;
+        }
         $client_ref->success(dclone($addr));
         return 0;
     } else {
         $addr->{last_connect_error} = "Connect error: $err";
         my $msg = "ADB server $addr->{connect_ip} port $addr->{connect_port}: $addr->{last_connect_error}";
+        if (defined fileno $addr->{bind_addr}) {
+            # Implies $state->{spawn}
+            # We already did getsockname on the socket during spawn_socket
+            $addr->{bind_addr} = getsockname($addr->{bind_addr}) ||
+                $client_ref->fatal("Cannot getsockname: $^E");
+            delete $state->{spawn};
+        }
         if ($err == ECONNREFUSED ||
             $err == ECONNRESET ||
             $err == EACCES ||
@@ -1113,6 +1119,12 @@ sub _connect_step_spawn {
     my $addr = $state->{address}[$state->{address_i}];
     my $result = ADB::Client::Spawn->join($client_ref, $addr->{bind_addr}) ||
             $client_ref->fatal("ADB::Client::SpawnRef returns false");
+
+    if (defined fileno $addr->{bind_addr}) {
+        # We already did getsockname on the socket during spawn_socket
+        $addr->{bind_addr} = getsockname($addr->{bind_addr}) ||
+            $client_ref->fatal("Cannot getsockname: $^E");
+    }
 
     if (!blessed($result) || !$result->isa("ADB::Client::SpawnRef")) {
         ref $result eq "" || $client_ref->fatal("ADB::Client::SpawnRef returns invalid reference $result");

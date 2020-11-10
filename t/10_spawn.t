@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 08_spawn.t'
+# `make test'. After `make install' it should work as `perl 10_spawn.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -732,10 +732,10 @@ for my $adb_socket (0, 1) {
     mainloop;
     is_deeply(\@result, [
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '/home/ton/src/git/perl-adb-client/bin/adb_fake' with SIGTERM"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '$ADB' with SIGTERM"
         ],
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '/home/ton/src/git/perl-adb-client/bin/adb_fake' with SIGTERM"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '$ADB' with SIGTERM"
         ]
     ], "Expected history") || dumper(\@result);
     $spawns1 = ADB::Client::Spawn->spawns;
@@ -768,10 +768,10 @@ for my $adb_socket (0, 1) {
     mainloop;
     is_deeply(\@result, [
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '/home/ton/src/git/perl-adb-client/bin/adb_fake' with SIGKILL"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '$ADB' with SIGKILL"
         ],
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '/home/ton/src/git/perl-adb-client/bin/adb_fake' with SIGKILL"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Killed unresponsive '$ADB' with SIGKILL"
         ]
     ], "Expected history") || dumper(\@result);
     $spawns1 = ADB::Client::Spawn->spawns;
@@ -1010,10 +1010,10 @@ for my $os ("$^O", "FleaBSD","stderr") {
     $spawns0 = $spawns1;
     is_deeply(\@result, [
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Could not start '/home/ton/src/git/perl-adb-client/bin/adb_fake': $reason"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Could not start '$ADB': $reason"
         ],
         [
-            "ADB server 127.0.0.1 port $rport: Spawn failed: Could not start '/home/ton/src/git/perl-adb-client/bin/adb_fake': $reason"
+            "ADB server 127.0.0.1 port $rport: Spawn failed: Could not start '$ADB': $reason"
         ]
     ], "Both spawns failed [$os]") || dumper(\@result);
     is($spawns, $espawns, "Only one failure [$os]");

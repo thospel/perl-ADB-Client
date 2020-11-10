@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 10_is_listening.t'
+# `make test'. After `make install' it should work as `perl 03_is_listening.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -43,6 +43,7 @@ my $socket_connected = IO::Socket::IP->new(
     PeerHost	=> "127.0.0.1",
     PeerPort	=> $socket_listen->sockport) ||
     die "Could not create connected socket: $@";
+
 for my $_soacc ($ADB::Client::Utils::SO_ACCEPTCONN, undef) {
     my $soacc = $_soacc;
     local $ADB::Client::Utils::SO_ACCEPTCONN = $soacc;

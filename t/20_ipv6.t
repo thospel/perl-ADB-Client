@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 09_ipv6.t'
+# `make test'. After `make install' it should work as `perl 20_ipv6.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

@@ -7,12 +7,12 @@ our $VERSION = '1.000';
 use Carp;
 # our @CARP_NOT = qw(ADB::Client::Ref);
 
-use ADB::Client::Utils qw(info $DEBUG $QUIET);
+use ADB::Client::Utils qw(adb_check_response info $DEBUG $QUIET);
 
 use Exporter::Tidy
     other	=>[
-        qw(COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
-           EXPECT_EOF
+        qw(command_check_response
+           COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE EXPECT_EOF
            COMMAND_REF CALLBACK ARGUMENTS STATE)];
 
 use constant {
@@ -77,6 +77,13 @@ sub command_name {
 
 sub arguments {
     return shift->[ARGUMENTS];
+}
+
+sub command_check_response {
+    my ($data, $len_added, $command_ref) = @_;
+
+    return adb_check_response($data, $len_added, $command_ref->[NR_RESULTS],
+                              $command_ref->[FLAGS] & EXPECT_EOF);
 }
 
 sub objects {

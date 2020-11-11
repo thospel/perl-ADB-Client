@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 09_connect.t'
+# `make test'. After `make install' it should work as `perl 10_connect.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -14,7 +14,7 @@ use lib $Bin;
 use Storable qw(dclone);
 use Socket qw(AF_INET);
 
-use Test::More tests => 635;
+use Test::More tests => 636;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer adb_echo addr_filter dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);

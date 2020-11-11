@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "023";
-$release_time = 1605091685;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "024";
+$release_time = 1605128630;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -56,6 +56,9 @@ $release_time = 1605091685;	## no critic (UselessNoCritic MagicNumbers)
   'lib/ADB/Client/Timer.pm' => {
     '1.000' => '1.000'
   },
+  'lib/ADB/Client/Tracker.pm' => {
+    '1.000' => '1.000'
+  },
   'lib/ADB/Client/Utils.pm' => {
     '1.000' => '1.000'
   },
@@ -86,13 +89,16 @@ $release_time = 1605091685;	## no critic (UselessNoCritic MagicNumbers)
   't/08_commands.t' => {
     '1.000' => '1.000'
   },
-  't/09_connect.t' => {
+  't/09_devices.t' => {
     '1.000' => '1.000'
   },
-  't/10_spawn.t' => {
+  't/10_connect.t' => {
     '1.000' => '1.000'
   },
-  't/11_spawn_socket.t' => {
+  't/11_spawn.t' => {
+    '1.000' => '1.000'
+  },
+  't/12_spawn_socket.t' => {
     '1.000' => '1.000'
   },
   't/20_ipv6.t' => {

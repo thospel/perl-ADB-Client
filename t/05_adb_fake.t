@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 101;
+use Test::More tests => 102;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable addr_filter
                  dumper $UNREACHABLE);
 
@@ -40,7 +40,8 @@ for (1..2) {
     my ($echo, $c);
     my $err = "No error";
     $client->echo("Foo", callback => sub {
-                      $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                      # The command is still stored in retired
+                      $obj_failed += !is(ADB::Client::Command->objects, 1, "Command objects are gone");
                       ($c, $err, $echo) = @_;
                   });
     isa_ok($client->addr_info, "ARRAY", "Can fetch addr_info clone");
@@ -66,7 +67,8 @@ for (1..2) {
     my ($version, $c);
     my $err = "No error";
     $client->version(callback => sub {
-                         $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                         # The command is still stored in retired
+                         $obj_failed += !is(ADB::Client::Command->objects, 1, "Command objects are gone");
                          ($c, $err, $version) = @_;
                      });
     mainloop();
@@ -121,7 +123,8 @@ for (1..2) {
     my ($dummy, $c);
     my $err = "No error";
     $client->failer(callback => sub {
-                        $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
+                        # The command is still stored in retired
+                        $obj_failed += !is(ADB::Client::Command->objects, 1, "Command objects are gone");
                         ($c, $err, $dummy) = @_;
                     });
     mainloop();

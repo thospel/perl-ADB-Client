@@ -21,9 +21,10 @@ use ADB::Client::Utils
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
-use ADB::Client::Command qw(COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
-                            EXPECT_EOF
+use ADB::Client::Command qw(command_check_response
+                            COMMAND_NAME COMMAND FLAGS PROCESS CODE EXPECT_EOF
                             COMMAND_REF CALLBACK ARGUMENTS STATE);
+use ADB::Client::Tracker;
 
 use Exporter::Tidy
     other	=> [qw($CALLBACK_DEFAULT
@@ -35,7 +36,7 @@ use constant {
 
 our @CARP_NOT = qw(ADB::Client ADB::Client::Events);
 
-our $BLOCK_SIZE = 65536;
+our $BLOCK_SIZE = int(2**16);
 
 our $CALLBACK_DEFAULT	= \&callback_default;
 our $ADB_SOCKET	= undef;
@@ -77,6 +78,7 @@ our @COMMANDS = (
     [remount		=> "remount:", INFINITY, EXPECT_EOF],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
+    [devices_track	=> "host:track-devices", -1, 0, \&process_devices],
     [transport		=> "host:transport-%s", 0, 0],
     [tport		=> "host:tport:%s", 8, 0, \&process_tport],
     [unroot		=> "unroot:", INFINITY, EXPECT_EOF],
@@ -261,9 +263,13 @@ sub connected {
 sub callback_blocking {
     my ($client_ref, $loop_levels) = @_;
 
-    $client_ref->{result}[$loop_levels] = undef;
+    croak "Assertion: Already are waiting at level $loop_levels" if
+        defined $client_ref->{result}[$loop_levels];
+    $client_ref->{result}[$loop_levels] = "";
     return sub {
         my $client_ref = $ {shift()};
+        $client_ref->fatal("Result already set at level $loop_levels") if
+            $client_ref->{result}[$loop_levels];
         $client_ref->{result}[$loop_levels] = \@_;
         unloop($loop_levels);
     };
@@ -274,10 +280,12 @@ sub wait : method {
 
     mainloop();
     if (@{$client_ref->{commands}}) {
+        delete $client_ref->{result}[$loop_levels];
         # Remove the command we are waiting for since we sort of had an error
-        croak "A previous command in the queue failed";
+        pop @{$client_ref->{commands}};
+        croak "A previous command in the queue failed (level $loop_levels)";
     }
-    my $result = delete $client_ref->{result}[$loop_levels] //
+    my $result = delete $client_ref->{result}[$loop_levels] ||
         die "Assertion: Exit mainloop without setting result";
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
@@ -328,7 +336,11 @@ sub command_simple {
         $out = display_string($out);
         croak "Command too long: $out";
     }
-    push @{$client_ref->{commands}}, [$command_ref, $callback, sprintf("%04X", length $out) . $out];
+    push @{$client_ref->{commands}}, ADB::Client::Command->new(
+        $command_ref,
+        $callback,
+        undef,
+        sprintf("%04X", length $out) . $out);
     $client_ref->activate(1);
 }
 
@@ -475,12 +487,13 @@ sub post_activate {
 
 sub error {
     my $client_ref = shift;
+    my $err = shift || "Unknown error";
 
     $client_ref->close();
     local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
         $client_ref->fatal("error without command");
     local $client_ref->{post_activate} = 0;
-    $client_ref->{command_retired}->[CALLBACK]->($client_ref->{client}, @_);
+    $client_ref->{command_retired}->[CALLBACK]->($client_ref->{client}, $err, @_);
     $client_ref->activate if $client_ref->{post_activate};
     # Make sure not to return anything
     return;
@@ -1232,7 +1245,7 @@ sub _reader {
                 $client_ref->success($$str);
             } elsif ($command) {
                 my $command_ref = $command->[COMMAND_REF];
-                my ($error, $str) = adb_check_response($client_ref, 0, $command_ref->[NR_RESULTS],  $command_ref->[FLAGS] & EXPECT_EOF);
+                my ($error, $str) = command_check_response($client_ref, 0, $command_ref);
                 return $client_ref->error($str) if $error;
                 if ($client_ref->{in} ne "") {
                     $str = display_string($client_ref->{in});
@@ -1281,7 +1294,7 @@ sub _reader {
         return;
     }
 
-    my ($error, $str) = adb_check_response($client_ref, $rc, $command_ref->[NR_RESULTS], $command_ref->[FLAGS] & EXPECT_EOF) or return;
+    my ($error, $str) = command_check_response($client_ref, $rc, $command_ref) or return;
     return $client_ref->error($str) if $error;
     if ($client_ref->{in} ne "") {
         $str = display_string($client_ref->{in});
@@ -1322,7 +1335,7 @@ sub process_features {
 }
 
 sub process_devices {
-    my ($devices, $command) = @_;
+    my ($devices, $command, $client_ref) = @_;
 
     my $long = $command eq "host:devices-l";
     my (@devices, %devices);
@@ -1351,7 +1364,16 @@ sub process_devices {
         $devices = display_string($devices);
         die "Could not parse $devices";
     }
-    return [\%devices, \@devices, shift];
+    my @tracker;
+    if ($command eq "host:track-devices" && $client_ref->isa(__PACKAGE__)) {
+        my $socket = $client_ref->{socket} ||
+            die "No open socket after '$command'";
+        # Notice that close doesn't actually close the socket, it just removes
+        # the reference. And since we have a copy the socket remains open
+        $client_ref->close;
+        @tracker = ADB::Client::Tracker->new($socket, \%devices, $client_ref->command_retired->ref, $client_ref->{block_size});
+    }
+    return [\%devices, \@devices, shift, @tracker];
 }
 
 sub process_tport {

@@ -16,7 +16,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 29;
+use Test::More tests => 30;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 02_adb_client.t

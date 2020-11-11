@@ -40,6 +40,7 @@ use ADB::Client qw($ADB);
 ADB::Client->add_command(["failer" => "Wee", 0, 1]);
 ADB::Client->add_command(["echo" => "internal:echo:%s", -1, 1]);
 ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 1]);
+ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, 1]);
 ADB::Client->add_command(["pid" => "internal:pid", -1, 1]);
 ADB::Client->add_command(["argv" => "internal:argv", -1, 1, sub { return [ split /\0/, shift]}]);
 
@@ -83,7 +84,8 @@ our $old_stderr;
 
 # Classes for which we count bless/destruct cycles
 my @object_classes = qw(ADB::Client ADB::Client::Ref ADB::Client::Command
-                        ADB::Client::Spawn ADB::Client::SpawnRef);
+                        ADB::Client::Spawn ADB::Client::SpawnRef
+                        ADB::Client::Tracker);
 our %expect_objects;
 $expect_objects{$_} = 0 for @object_classes;
 

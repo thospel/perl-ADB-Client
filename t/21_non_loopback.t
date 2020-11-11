@@ -62,7 +62,7 @@ BEGIN {
     (undef, $addr) = unpack_sockaddr_in($addr);
     $local_ip = inet_ntoa($addr);
 
-    plan tests => 21;
+    plan tests => 22;
 }
 # diag("$example_host, $example_ip, $remote_ip, $local_ip");
 

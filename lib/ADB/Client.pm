@@ -150,7 +150,11 @@ sub NAME : method {
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
         my $loop_levels = loop_levels();
-        $client_ref->PROXY(\%arguments, $client_ref->callback_blocking($loop_levels), INDEX, \@vars);
+        eval { $client_ref->PROXY(\%arguments, $client_ref->callback_blocking($loop_levels), INDEX, \@vars) };
+        if ($@) {
+            delete $client_ref->{result}[$loop_levels];
+            die $@;
+        }
         return $client_ref->wait($loop_levels);
     }
     $client_ref->PROXY(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT, INDEX, \@vars);

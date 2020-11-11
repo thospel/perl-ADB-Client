@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 10_spawn.t'
+# `make test'. After `make install' it should work as `perl 11_spawn.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 385;
+use Test::More tests => 386;
 use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper);
 
 # We already checked loading in 02_adb_client.t

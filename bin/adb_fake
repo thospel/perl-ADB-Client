@@ -71,15 +71,16 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "reply-fd=o"	=> \my $reply_fd,
                "acceptfd=o"	=> \my $accept_fd);
 
-my @devices = (
-    ["10.253.0.13:5555",
-     "device",
-     "product:zerofltexx model:SM_G920F device:zeroflte transport_id:3",
-     [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec)]],
-    ["52000c4748d6a283",
-     "device",
-     "usb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2",
-     [qw(shell_v2 cmd stat_v2)]],
+# Little set of model devices
+my %devices = (
+    "10.253.0.13:5555" => [
+        "device",
+        "product:zerofltexx model:SM_G920F device:zeroflte transport_id:3",
+        [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec)]],
+    "52000c4748d6a283" => [
+        "device",
+        "usb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2",
+        [qw(shell_v2 cmd stat_v2)]],
 );
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
@@ -210,9 +211,11 @@ sub output {
     # Should always be downgraded, but let's be paranoid
     die "Unexpected upgrade string" if utf8::is_utf8($str);
 
-    weaken(my $s = $state);
-    $state->{socket}->add_write(sub { writer($s) });
-    $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
+    if ($state->{out} eq "") {
+        weaken(my $s = $state);
+        $state->{socket}->add_write(sub { writer($s) });
+        $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
+    }
     $state->{out} .= $str;
 }
 
@@ -275,6 +278,7 @@ sub adb_close {
     my ($state) = @_;
 
     delete $state->{listener}{accepted}{$state->{key}};
+    delete $state->{listener}{trackers}{$state->{key}};
 }
 
 sub adb_discard {
@@ -299,6 +303,7 @@ sub adb_echo {
 sub adb_read {
     my ($state, $rc) = @_;
 
+    my $len = length $state->{in};
     while ($state->{in} ne "") {
         # For convenient debugging with telnet...
         next if $state->{in} =~ s/^[\r\n]+//;
@@ -311,6 +316,13 @@ sub adb_read {
         my $command = substr($state->{in}, 0, 4 + $len, "");
         substr($command, 0, 4, "");
         adb_command($state, $command);
+        if ($state->{on_read} != \&adb_read) {
+            if ($state->{in} ne "") {
+                $rc -= $len - length $state->{in};
+                $state->{on_read}->($state, $rc);
+            }
+            last;
+        }
     }
 }
 
@@ -346,6 +358,11 @@ sub adb_command {
         adb_output($state, OKAY, $listener->{devices}->string);
     } elsif ($command eq "host:devices-l") {
         adb_output($state, OKAY, $listener->{devices}->string_long);
+    } elsif ($command eq "host:track-devices") {
+        adb_output($state, OKAY, $listener->{devices}->string, 1);
+        # Become a tracker
+        $listener->{trackers}{$state->{key}} = $state;
+        $state->{on_read} = \&adb_close;
     } elsif ($command eq "host:features") {
         # Check transport first
         my $nr = $listener->{devices}->count;
@@ -359,32 +376,32 @@ sub adb_command {
         }
     } elsif ($command eq "host:kill") {
         adb_output($state);
-   } elsif ($command eq "root:") {
-       if (!$state->{transport}) {
-           adb_output($state, FAIL, "no devices/emulators found");
-       } elsif ($listener->{root}) {
-           adb_output($state, UNCOUNTED, "adbd is already running as root\n");
-       } else {
-           adb_output($state, UNCOUNTED, "restarting adbd as root\n");
-           $listener->{root} = 1;
-       }
-   } elsif ($command eq "unroot:") {
-       if (!$state->{transport}) {
-           adb_output($state, FAIL, "no devices/emulators found");
-       } elsif ($listener->{root}) {
-           adb_output($state, UNCOUNTED, "restarting adbd as non root\n", 1);
-           $listener->{root} = 0;
-       } else {
-           adb_output($state, UNCOUNTED, "adbd not running as root\n", 1);
-       }
-   } elsif ($command eq "remount:") {
-       if (!$state->{transport}) {
-           adb_output($state, FAIL, "device offline (no transport)");
-       } elsif ($listener->{root}) {
-           adb_output($state, UNCOUNTED, "remount succeeded\n", 1);
-       } else {
-           adb_output($state, UNCOUNTED, "Not running as root. Try \"adb root\" first.\n", 1);
-       }
+    } elsif ($command eq "root:") {
+        if (!$state->{transport}) {
+            adb_output($state, FAIL, "no devices/emulators found");
+        } elsif ($listener->{root}) {
+            adb_output($state, UNCOUNTED, "adbd is already running as root\n");
+        } else {
+            adb_output($state, UNCOUNTED, "restarting adbd as root\n");
+            $listener->{root} = 1;
+        }
+    } elsif ($command eq "unroot:") {
+        if (!$state->{transport}) {
+            adb_output($state, FAIL, "no devices/emulators found");
+        } elsif ($listener->{root}) {
+            adb_output($state, UNCOUNTED, "restarting adbd as non root\n", 1);
+            $listener->{root} = 0;
+        } else {
+            adb_output($state, UNCOUNTED, "adbd not running as root\n", 1);
+        }
+    } elsif ($command eq "remount:") {
+        if (!$state->{transport}) {
+            adb_output($state, FAIL, "device offline (no transport)");
+        } elsif ($listener->{root}) {
+            adb_output($state, UNCOUNTED, "remount succeeded\n", 1);
+        } else {
+            adb_output($state, UNCOUNTED, "Not running as root. Try \"adb root\" first.\n", 1);
+        }
     } elsif ($command =~ m{^internal:(.*)\z}s) {
         # Non standard adb commands for testing
         internal($state, $1);
@@ -408,15 +425,61 @@ sub internal {
     } elsif ($command eq "argv") {
         # Fake command: Show commandline
         adb_output($state, OKAY, join("\0", @argv_old));
-    } elsif (my ($serial) = $command =~ m{^device_drop:(.*)\z}s) {
+    } elsif (my ($serial) = $command =~ m{^device_add:(.*)\z}s) {
+        # Fake command: Add device
+        my $serial = $1;
+        if ($listener->{devices}->get($serial)) {
+            adb_output($state, FAIL, "Already have device $serial");
+        } elsif (!$devices{$serial}) {
+            adb_output($state, FAIL, "Unknown device $serial");
+        } else {
+            my $device = $listener->{devices}->add($serial);
+
+            $device->offline;
+            my $str = $listener->{devices}->string;
+            $str = sprintf("%04X", length $str) . $str;
+            for my $state (values %{$listener->{trackers}}) {
+                output($state, $str);
+            }
+
+            $device->online;
+            $str = $listener->{devices}->string;
+            $str = sprintf("%04X", length $str) . $str;
+            for my $state (values %{$listener->{trackers}}) {
+                output($state, $str);
+            }
+
+            # Send result
+            adb_output($state, OKAY, "Added");
+        }
+    } elsif (($serial) = $command =~ m{^device_drop:(.*)\z}s) {
         # Fake command: Drop device
-        if ($listener->{devices}->drop($1)) {
+        my $serial = $1;
+        if (my $device = $listener->{devices}->get($serial)) {
+            # Take device offline
+            $device->offline;
+            my $str = $listener->{devices}->string;
+            $str = sprintf("%04X", length $str) . $str;
+            for my $state (values %{$listener->{trackers}}) {
+                output($state, $str);
+            }
+
+            # Drop device
+            $listener->{devices}->drop($serial);
+            $str = $listener->{devices}->string;
+            $str = sprintf("%04X", length $str) . $str;
+            for my $state (values %{$listener->{trackers}}) {
+                output($state, $str);
+            }
+
+            # Send result
             adb_output($state, OKAY, "Dropped");
         } else {
             adb_output($state, FAIL, "No such device");
         }
     } else {
-        adb_output($state, FAIL, "unknown internal");
+        $command = display_string($command);
+        adb_output($state, FAIL, "unknown internal command $command");
     }
 }
 
@@ -446,6 +509,7 @@ sub add_listener {
         socket		=> $socket,
         port		=> $port,
         accepted	=> {},
+        trackers	=> {},
         type		=> $type,
         arg		=> $arg,
         $type == LISTENER ? (version => $arg // $ADB_VERSION) : (),
@@ -608,6 +672,18 @@ sub serial {
     return shift->{serial};
 }
 
+sub offline {
+    my ($device) = @_;
+
+    $device->{state} = "offline";
+}
+
+sub online {
+    my ($device) = @_;
+
+    $device->{state} = "device";
+}
+
 sub string {
     my ($device) = @_;
 
@@ -626,11 +702,6 @@ sub features_string {
     return join "," => @{$device->{features}};
 }
 
-sub list_init {
-    my ($class) = @_;
-    return [map $class->new(@$_), @devices];
-}
-
 sub DESTROY {
     --$devices;
 }
@@ -639,13 +710,19 @@ package Devices;
 
 sub init {
     my $devices = bless {}, shift;
-    for my $d (@devices) {
-        my $device = Device->new(@$d);
-        my $serial = $device->serial;
-        die "Duplicate device $serial" if $devices->{$serial};
-        $devices->{$serial} = $device;
+    for my $serial (sort keys %devices) {
+        $devices->add($serial);
     }
     return $devices;
+}
+
+sub add {
+    my ($devices, $serial) = @_;
+
+    my $device = Device->new($serial, @{$devices{$serial}});
+    die "Duplicate device $serial" if $devices->{$serial};
+    $devices->{$serial} = $device;
+    return $device;
 }
 
 sub count {
@@ -671,6 +748,12 @@ sub drop {
     my ($devices, $serial) = @_;
 
     return delete $devices->{$serial};
+}
+
+sub get {
+    my ($devices, $serial) = @_;
+
+    return $devices->{$serial};
 }
 
 package main;

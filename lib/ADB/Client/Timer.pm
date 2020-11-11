@@ -59,7 +59,7 @@ sub timer {
     if ($DEBUG) {
         my $callers = callers();
         $timer->[CALLERS] = $callers;
-        info("add Timer(%s) %08x [%s]", $_[1], refaddr($timer), $callers);
+        info("add Timer(%s) %08x [%s]", $_[0], refaddr($timer), $callers);
     }
     return $timer;
 }

@@ -39,7 +39,7 @@ BEGIN {
         plan skip_all => "Cannot connect to 127.0.0.1:5037 even after '$adb start-server': $@";
         exit;
     }
-    plan tests => 16;
+    plan tests => 17;
 }
 
 use TestDrive qw(dumper);

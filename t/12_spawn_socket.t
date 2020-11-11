@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 11_spawn_socket.t'
+# `make test'. After `make install' it should work as `perl 12_spawn_socket.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -14,7 +14,7 @@ use lib $Bin;
 use Socket qw(AF_INET SOCK_STREAM IPPROTO_TCP);
 use IO::Socket::IP qw();
 
-use Test::More tests => 33;
+use Test::More tests => 34;
 
 use TestDrive qw(addr_filter dumper);
 

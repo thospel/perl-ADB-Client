@@ -17,7 +17,7 @@ my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 116;
+use Test::More tests => 117;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules

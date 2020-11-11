@@ -11,7 +11,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 21;
+use Test::More tests => 22;
 use TestDrive qw(adb_start);
 use Storable qw(dclone);
 
@@ -74,7 +74,7 @@ my $dummy = eval {
 my $err = $@;
 ok($err, "Marker unexpectedly succeeded") ||
     BAIL_OUT("Marker unexpectedly succeeded");
-like($err, qr{^A previous command in the queue failed at },
+like($err, qr{^\QA previous command in the queue failed (level 0) at },
      "Proper failed marker result") ||
     BAIL_OUT("Unexpected marker error");
 is_deeply(\@results, [

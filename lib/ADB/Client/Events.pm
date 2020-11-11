@@ -146,8 +146,8 @@ sub mainloop {
         info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
         until ($unlooping[-1]) {
-            my $timeout = timers_collect() //
-                (%read_refs || %write_refs || %error_refs || last);
+            my $timeout = timers_collect();
+            $timeout // (%read_refs || %write_refs || %error_refs || last);
             if ((select(my $r = $read_mask,
                         my $w = $write_mask,
                         my $e = $error_mask, $timeout) || (timers_run(), next)) > 0) {

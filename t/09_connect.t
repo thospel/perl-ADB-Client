@@ -61,6 +61,8 @@ is_deeply(\@results, [], "No results yet");
 $client->marker(callback => $callback);
 $client->connect(callback => $callback);
 $client->marker(callback => $callback);
+$client->connect(callback => $callback);
+$client->marker(callback => $callback);
 $client->version(callback => $callback);
 $client->marker(callback => $callback);
 my $transaction_timeout = clocktime_running();
@@ -74,6 +76,15 @@ $transaction_timeout = 0.1 if $transaction_timeout < 0.1;
 # dumper(\@results);
 is_deeply(\@results, [
     [ 0, undef ],
+    [ 1, undef, {
+        "bind_ip" => "127.0.0.1",
+        "bind_port" => $port,
+        "connect_ip" => "127.0.0.1",
+        "connect_port" => $port,
+        "connected" => 1,
+        "family" => AF_INET,
+    }],
+    [ 1, undef ],
     [ 1, undef, {
         "bind_ip" => "127.0.0.1",
         "bind_port" => $port,

@@ -49,8 +49,7 @@ use Exporter::Tidy
         $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
         adb_start adb_stop adb_unacceptable adb_unreachable adb_unreachable6
         adb_closer adb_echo adb_echo6 adb_version adb_version6 adb_blackhole
-        remote_ip is_remote4 addr_filter
-        collect_stderr collected_stderr uncollect_stderr dumper)];
+        addr_filter collect_stderr collected_stderr uncollect_stderr dumper)];
 
 $SIG{INT} = sub {
     Test::More::diag("Caught signal INT");
@@ -134,27 +133,6 @@ sub collected_stderr {
     my $old = do { local $/; <$fh> };
     # unlink("$tmp_dir/stderr");
     return $old;
-}
-
-sub is_remote4 {
-    my ($ip) = @_;
-    my $addr = inet_aton($ip) || croak "Cannot resolve '$ip'";
-    socket(my $udp, AF_INET, SOCK_DGRAM, IPPROTO_UDP) ||
-        die "Could not create AF_INET udp socket: $^E";
-    return undef if bind($udp, pack_sockaddr_in(0, $addr));
-    $! == EADDRNOTAVAIL || die "Could not bind UDP socket: $^E";
-    return inet_ntoa($addr);
-}
-
-sub remote_ip {
-    my $addr = inet_aton("1.2.3.4");
-    for (0..999) {
-        my $ip = inet_ntoa($addr) ||
-            die "Assertion: Invalid packed IP ", unpack("N", $addr);
-        return $ip if is_remote4($ip);
-        $addr = pack("N", rand((224-1)*2**24)+2**24);
-    }
-    die "Could not determine any non local IP. It seems I can bind to anything";
 }
 
 sub adb_start {

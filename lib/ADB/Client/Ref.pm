@@ -495,6 +495,7 @@ sub success {
     my $command = shift @{$client_ref->{commands}} ||
         $client_ref->fatal("success without command");
     if ($client_ref->{active}) {
+        # Is this even correct ? (current "make test" never reaches this) --Ton
         $client_ref->{socket}->delete_read if
             $client_ref->{socket} && defined $client_ref->{in};
         $client_ref->{timeout} = undef;
@@ -833,7 +834,7 @@ sub _connect_next {
 
         my $socket;
         do {
-            # Make sure CLO_EXEC is set
+            # Make sure CLOEXEC is set
             local $^F = -1;
             if (!socket($socket, $addr->{family}, SOCK_STREAM, IPPROTO_TCP)) {
                 $addr->{last_connect_error} = "Socket: $^E";

@@ -27,6 +27,8 @@ t/09_connect.t
 t/10_spawn.t
 t/11_spawn_socket.t
 t/20_ipv6.t
+t/21_non_loopback.t
+t/90_real_adb.t
 t/98_fatal.t
 t/99_internals.t
 t/TestDrive.pm

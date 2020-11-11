@@ -13,9 +13,8 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 390;
-use TestDrive qw(adb_start adb_version adb_unreachable remote_ip is_remote4
-                 addr_filter dumper);
+use Test::More tests => 385;
+use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper);
 
 # We already checked loading in 02_adb_client.t
 use ADB::Client qw(mainloop $ADB);
@@ -31,41 +30,6 @@ my $port_10 = adb_version(10);
 my $port_20 = adb_version(20);
 # Occupy a port that rejects connections
 my $rport = adb_unreachable();
-
-my $example_host = "www.example.com";
-my $example_ip = eval { is_remote4($example_host) };
-my $remote_ip = remote_ip();
-
-# Cannot bind to a remote IP
-$addr_info =
-    [@{addr_info($remote_ip, 1)},	# Remote
-     @{addr_info("127.0.0.1", $port)},	# OK
-     ];
-is(@$addr_info, 2, "Two addresses");
-
-$client = new_ok("ADB::Client" =>
-                    [host => "127.0.0.1", port => $port,
-                     addr_info => $addr_info, blocking => 1]);
-@result = eval { $client->spawn() };
-like($@, qr{^\QCould not bind to $remote_ip (127.0.0.1): }, "Cannot bind to remote ip");
-
-# Cannot bind to an already connected remote IP
-SKIP: {
-    skip "Cannot resolve $example_host", 2 unless defined $example_ip;
-    # Use a pretty low timeout. It's more important that I can run this
-    # test on my development system than that the user can
-    # (with the default timeout adb_fake will autoquit in the mean time)
-    my $client = new_ok("ADB::Client" =>
-                        [host => $example_ip, port => 80,
-                         connection_timeout => 0.5, blocking => 1]);
-    eval { $client->connect() };
-  SKIP: {
-        skip $@, 1 if $@;
-        eval { $client->spawn() };
-        like($@, qr{^\QCould not bind to $example_ip ($example_ip): },
-         "Can connect but not bind to $example_host ($example_ip)");
-    }
-}
 
 $addr_info =
     [@{addr_info(undef, $port_10)},	# OK, version 10

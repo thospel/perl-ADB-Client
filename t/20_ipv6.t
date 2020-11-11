@@ -11,11 +11,11 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More;
 use Errno qw(EPROTONOSUPPORT);
 use Socket qw(AF_INET AF_INET6 SOCK_STREAM IPPROTO_TCP);
 use IO::Socket::IP qw();
 
+use Test::More;
 BEGIN {
     if (!socket(my $s, AF_INET6, SOCK_STREAM, IPPROTO_TCP)) {
         $! == EPROTONOSUPPORT || die "Cannot create socket: $^E";
@@ -216,6 +216,6 @@ for my $adb_socket (0, 1, -1) {
 #my $s = IO::Socket::IP(
 #    LocalHost	=> "::1",
 #    LocalPort	=> 0,
-#    Reuseaddr	=> 1) || die "Cannot create socket: $@";
+#    ReuseAddr	=> 1) || die "Cannot create socket: $@";
 #ADB::Client->new(
 #V6Only

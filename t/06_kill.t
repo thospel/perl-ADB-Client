@@ -14,7 +14,7 @@ use lib $Bin;
 use Test::More tests => 16;
 use TestDrive qw(adb_start adb_stop);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop timer);
 
 $ADB::Client::Events::IGNORE_PIPE_LOCAL = 1;

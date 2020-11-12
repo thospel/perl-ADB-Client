@@ -13,10 +13,10 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 40;
+use Test::More tests => 47;
 use TestDrive qw(adb_start adb_version dumper);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop);
 
 # keep this one alive
@@ -98,6 +98,8 @@ is_deeply(\@result, [
 ], "Expected track-devices and version output") || dumper(\@result);
 my @tracked;
 $tracker->track(sub { shift; push @tracked, [@_] });
+eval { $tracker->track(sub {}) };
+like($@, qr{^Already tracking at }, "Cannot do a double track");
 
 eval { $client->features };
 like($@, qr{^more than one device/emulator at }, "Cannot get features from more than 1 device");
@@ -215,6 +217,11 @@ is_deeply(\@tracked, [[
     "EOF",
     1
 ]], "Expected device history") || dumper(\@tracked);
+eval { $tracker->untrack };
+like($@, qr{^Not tracking at }, "Cannot undo a finished tracker");
+eval { $tracker->track };
+like($@, qr{^Socket closed at }, "Cannot track a finished tracker");
+
 # Restart killed service
 $port_10 = adb_version(10);
 
@@ -300,3 +307,13 @@ is_deeply(\@tracked, [
         }
     }
 ], "Fourth event") || dumper(\@tracked);
+is($client->device_add("10.253.0.13:5555", blocking => 1),
+   "Added", "Add device");
+my $tracked = scalar $tracker->wait;
+is_deeply($tracked, { "10.253.0.13:5555" => "offline" }, "Scalar context") ||
+    dumper($tracked);
+is($client->device_add("52000c4748d6a283", blocking => 1),
+   "Added", "Add device");
+$tracker->track(sub { die "Boem" if $_[4] =~ /52000c4748d6a283/});
+eval { mainloop() };
+like($@, qr{^\QBoem at }, "Error during callback");

@@ -16,7 +16,7 @@ use Socket qw(AF_INET);
 use Test::More tests => 386;
 use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop $ADB);
 use ADB::Client::Utils qw(addr_info);
 

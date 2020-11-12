@@ -17,7 +17,7 @@ use Test::More tests => 102;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable addr_filter
                  dumper $UNREACHABLE);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop immediate);
 
 my $obj_failed = 0;
@@ -128,7 +128,7 @@ for (1..2) {
                         ($c, $err, $dummy) = @_;
                     });
     mainloop();
-    is($err, "unknown host service", "Error (loop $_)") ||
+    is($err, "device offline (no transport)", "Error (loop $_)") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server");
     is($dummy, undef, "Correct echo (loop $_)") ||
         BAIL_OUT("Bad version from fake adb server");
@@ -142,7 +142,7 @@ for (1..2) {
         local $SIG{__DIE__} = undef;
         mainloop();
     };
-    like($@, qr{^unknown host service at }, "Error (loop $_)") ||
+    like($@, qr{^\Qdevice offline (no transport) at }, "Error (loop $_)") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server");
     $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
@@ -206,7 +206,7 @@ for (1..2) {
         $client->failer;
     };
     my $err = $@;
-    like($err, qr{^unknown host service at }, "Expected error from unknown command") ||
+    like($err, qr{^\Qdevice offline (no transport) at }, "Expected error from unknown command") ||
         BAIL_OUT("Bad error when sending an unknown command to fake adb server: $err");
     $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }

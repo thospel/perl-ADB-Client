@@ -9,7 +9,7 @@ use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
 $SUB_VERSION = "024";
-$release_time = 1605128630;	## no critic (UselessNoCritic MagicNumbers)
+$release_time = 1605186876;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -27,6 +27,9 @@ $release_time = 1605128630;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   'bin/adb_fake' => {
+    '1.000' => '1.000'
+  },
+  'bin/adb_tester' => {
     '1.000' => '1.000'
   },
   'lib/ADB/Client.pm' => {

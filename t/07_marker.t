@@ -15,7 +15,7 @@ use Test::More tests => 22;
 use TestDrive qw(adb_start);
 use Storable qw(dclone);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop);
 
 $SIG{__DIE__} = sub {
@@ -47,7 +47,7 @@ is_deeply(\@results, [
   [ undef ],
   [ undef, 39 ],
   [ undef ],
-  [ "unknown host service" ]
+  [ "device offline (no transport)" ]
 ], "Proper sequencing") ||
     BAIL_OUT("Improper sequencing");
 
@@ -74,7 +74,7 @@ my $dummy = eval {
 my $err = $@;
 ok($err, "Marker unexpectedly succeeded") ||
     BAIL_OUT("Marker unexpectedly succeeded");
-like($err, qr{^\QA previous command in the queue failed (level 0) at },
+like($err, qr{^\QA previous command in the queue failed at },
      "Proper failed marker result") ||
     BAIL_OUT("Unexpected marker error");
 is_deeply(\@results, [
@@ -84,7 +84,7 @@ is_deeply(\@results, [
   [ undef ],
   [ undef, 39 ],
   [ undef ],
-  [ "unknown host service" ]
+  [ "device offline (no transport)" ]
 ], "Everything upto failer worked") ||
     BAIL_OUT("Improper sequencing");
 @results = ();

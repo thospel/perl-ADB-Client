@@ -22,12 +22,12 @@ BEGIN {
         plan skip_all => "IPv6 not supported on this host";
         exit;
     }
-    plan tests => 78;
+    plan tests => 87;
 }
 
 use TestDrive qw(adb_start adb_version6 adb_unreachable6 addr_filter dumper);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client;
 use ADB::Client::Utils qw(ip_port_from_addr addr_from_ip_port is_listening
                           IPV6 addr_info);
@@ -203,6 +203,20 @@ for my $adb_socket (0, 1, -1) {
     my $result = eval { $client2->version };
     if ($adb_socket == -1) {
         like($@, qr{^\QADB server 127.0.0.1 port $rport: Connect error: },
+             "IPv4 is not allowed [$adb_socket]");
+        is($result, undef, "Expected version [$adb_socket]");
+    } else {
+        is($@, "", "No error [$adb_socket]");
+        is($result, 30, "Expected version [$adb_socket]");
+    }
+
+    # We can also reach it using IPv4
+    $client2 = new_ok("ADB::Client" =>
+                     [host => "::ffff:127.0.0.1", port => $rport,
+                      adb_socket => $adb_socket]);
+    $result = eval { $client2->version };
+    if ($adb_socket == -1) {
+        like($@, qr{^\QADB server ::ffff:127.0.0.1 port $rport: Connect error: },
              "IPv4-mapped is not allowed [$adb_socket]");
         is($result, undef, "Expected version [$adb_socket]");
     } else {

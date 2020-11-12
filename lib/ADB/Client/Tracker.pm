@@ -23,7 +23,7 @@ sub new {
     return bless {
         socket		=> $socket,
         in		=> "",
-        result		=> [],
+        result		=> undef,
         current		=> {%$current},
         command_ref	=> $command_ref,
         callback	=> undef,
@@ -73,7 +73,6 @@ sub error {
 sub _process {
     my ($tracker) = @_;
 
-    $tracker->{callback} || die "_process without callback";
     if ($tracker->{timeout}) {
         $tracker->{timeout} = undef;
         $tracker->{socket}->add_read(sub { $tracker->_reader });
@@ -92,7 +91,8 @@ sub _process {
         $result = [$result];
         my $command_ref = $tracker->{command_ref};
         if (my $process = $command_ref->[PROCESS]) {
-            # $_[0] as first arguments since the others will typically be ignored
+            # $result->[0] as first arguments since the others will typically
+            # be ignored
             $result = eval { $command_ref->[PROCESS]->($result->[0], $command_ref->[COMMAND], $tracker, $result) };
             if ($@) {
                 my $err = $@;
@@ -124,10 +124,9 @@ sub _process {
         eval { $tracker->{callback}->($tracker, undef, @$result) };
         if ($@) {
             my $err = $@;
-            $err =~ s/\s+\z//;
-            Test::More::diag("ERR=$err");
-            $tracker->error($err);
-            return;
+            $tracker->untrack;
+            $tracker->{socket} = undef;
+            die $err;
         }
         $tracker->{callback} || return
     }
@@ -160,24 +159,29 @@ sub _reader {
 sub wait : method {
     my ($tracker) = @_;
 
+    croak "Assertion: Already are waiting" if defined $tracker->{result};
     my $loop_levels = loop_levels();
-    croak "Assertion: Already are waiting at level $loop_levels" if
-        defined $tracker->{result}[$loop_levels];
     $tracker->track(sub {
-                        my $tracker = shift;
+        my $tracker = shift;
 
-                        die "Result already set" if
-                            $tracker->{result}[$loop_levels];
-                        $tracker->{result}[$loop_levels] = \@_;
-                        unloop($loop_levels);
-                        $tracker->untrack;
-                    });
-    $tracker->{result}[$loop_levels] = "";
+        defined $tracker->{result} || die "Assertion: Not waiting";
+        die "Assertion: Result already set" if $tracker->{result};
+        $tracker->{result} = \@_;
+        unloop($loop_levels);
+        $tracker->untrack;
+    });
+    $tracker->{result} = "";
 
-    mainloop();
+    eval { mainloop() };
+    if ($@) {
+        my $err = $@;
+        $tracker->{result} = undef;
+        die $err;
+    }
 
-    my $result = delete $tracker->{result}[$loop_levels] ||
-        die "Assertion: Exit mainloop without setting result";
+    my $result = $tracker->{result};
+    $tracker->{result} = undef;
+    $result || die "Assertion: Exit mainloop without setting result";
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
     wantarray || return $result->[1];

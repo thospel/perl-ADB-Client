@@ -19,7 +19,7 @@ use Storable qw(dclone);
 use Test::More tests => 30;
 use TestDrive qw(adb_start dumper);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop);
 
 my $port = adb_start();

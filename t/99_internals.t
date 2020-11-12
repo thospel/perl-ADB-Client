@@ -13,11 +13,12 @@ use warnings;
 our $VERSION = "1.000";
 
 my $client_name = my $ref_name = my $cmd_name = "dummy";
-my (@info_command, @info_client, @info_ref, @info_events, $socket_fd);
+my (@info_command, @info_client, @info_ref, @info_events);
+my $socket_fd = -1;
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 117;
+use Test::More tests => 120;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -254,6 +255,12 @@ for my $name (qw(read write error)) {
 
 my $client = new_ok("ADB::Client", [port => $port]);
 is($client->version, 39, "Sanity check. We can run");
+my $client2 = new_ok("ADB::Client", [port => $port, blocking => 0]);
+$client2->marker(callback => sub { die "Killer\n" });
+eval { $client->version };
+is($@, "Killer\n", "Expected error exit");
+is($client->version, 39, "We can still do blocking commands");
+
 ADB::Client->add_command([version0 => "host:version", -1, 1, sub { return {} }]);
 eval { $client->version0 };
 like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
@@ -402,6 +409,7 @@ like($@, qr{^Fatal: Assertion: success without command at },
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 # Finally trigger object count errors
+$client2 = undef;
 $client = undef;
 @timers = ();
 $ADB::Client::Command::DEBUG = 1;

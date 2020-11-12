@@ -61,15 +61,20 @@ use constant {
     NULL	=> "/dev/null",
 };
 
+my $IDLE_TIMEOUT = 10;
+
 $| = 1;
 
 my $Listen = "tcp:localhost:5037";
 my @argv_old = @ARGV;
 die "Could not parse your command line. Try $0 -h\n" unless
-    GetOptions("a!",		=> \my $all,
+    GetOptions("a!"		=> \my $all,
                "L=s"		=> \$Listen,
                "reply-fd=o"	=> \my $reply_fd,
-               "acceptfd=o"	=> \my $accept_fd);
+               "acceptfd=o"	=> \my $accept_fd,
+               # Non standard options
+               "timeout|t=o"	=> \$IDLE_TIMEOUT,
+           );
 
 # Little set of model devices
 my %devices = (
@@ -85,7 +90,6 @@ my %devices = (
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
-my $IDLE_TIMEOUT = 10;
 my $accepted = my $listening = my $devices = 0;
 my ($finish, $idle_timeout, %listeners, %specials, @sockets);
 
@@ -405,8 +409,18 @@ sub adb_command {
     } elsif ($command =~ m{^internal:(.*)\z}s) {
         # Non standard adb commands for testing
         internal($state, $1);
+    } elsif ($command eq "host:transport-local") {
+        # Don't close the connection. Leave any transports untouched
+        adb_output($state, FAIL, "no emulators found", 1);
     } else {
-        adb_output($state, FAIL, "unknown host service");
+        if ($command =~ /^host:/) {
+            adb_output($state, FAIL, "unknown host service");
+        } elsif (0) {
+            # Have transport
+            adb_output($state, FAIL, "closed");
+        } else {
+            adb_output($state, FAIL, "device offline (no transport)");
+        }
         # adb_output($state, FAIL, "unknown host service:" . display_string($command));
     }
 }

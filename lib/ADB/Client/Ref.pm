@@ -161,7 +161,7 @@ sub new {
         commands	=> [],
         command_retired	=> undef,
         post_activate	=> undef,
-        result		=> [],
+        result		=> undef,
         starter		=> undef,
     }, $class;
     ++$objects;
@@ -224,7 +224,7 @@ sub delete {
     my ($client_ref) = @_;
 
     $client_ref->close;
-    @{$client_ref->{result}} = ();
+    $client_ref->{result} = undef;
     @{$client_ref->{commands}} = [FATAL];
     #if (my $client = $client_ref->client) {
     #    $$client = undef;
@@ -261,32 +261,93 @@ sub connected {
 }
 
 sub callback_blocking {
-    my ($client_ref, $loop_levels) = @_;
+    my ($client_ref) = @_;
 
-    croak "Assertion: Already are waiting at level $loop_levels" if
-        defined $client_ref->{result}[$loop_levels];
-    $client_ref->{result}[$loop_levels] = "";
+    croak "Already have a blocking command pending" if
+        defined $client_ref->{result};
+    my $loop_levels = loop_levels();
     return sub {
         my $client_ref = $ {shift()};
-        $client_ref->fatal("Result already set at level $loop_levels") if
-            $client_ref->{result}[$loop_levels];
-        $client_ref->{result}[$loop_levels] = \@_;
+        $client_ref->fatal("No wait pending") if !defined $client_ref->{result};
+        $client_ref->fatal("Result already set") if $client_ref->{result};
+        $client_ref->fatal("We are not the final command") if @{$client_ref->{commands}};
+        $client_ref->{result} = \@_;
         unloop($loop_levels);
     };
 }
 
 sub wait : method {
-    my ($client_ref, $loop_levels) = @_;
+    my ($client_ref) = @_;
 
-    mainloop();
-    if (@{$client_ref->{commands}}) {
-        delete $client_ref->{result}[$loop_levels];
-        # Remove the command we are waiting for since we sort of had an error
-        pop @{$client_ref->{commands}};
-        croak "A previous command in the queue failed (level $loop_levels)";
+    # Wait should be called directly after command queue by callback_blocking
+    # So this should not trigger
+    $client_ref->fatal("Already have a blocking command pending") if
+        defined $client_ref->{result};
+    $client_ref->{result} = "";
+
+    eval { mainloop() };
+    if ($@) {
+        # Died out of mainloop. Could be something completely unrelated
+        my $err = $@;
+        if (!defined $client_ref->{result}) {
+            # Don't do fixups on fatal client_refs
+            # (this die could very well be the fatality message)
+            die $err if
+                @{$client_ref->{commands}} &&
+                $client_ref->{commands}[0][COMMAND_REF] == FATAL;
+            $client_ref->fatal("Waiting for command without expecting result after $@");
+        }
+        if ($client_ref->{result}) {
+            # We already had a result. In case of an error we could report it
+            # here, but the thing crashing mainloop is probably more important
+            $client_ref->fatal("Result while commands after $@") if
+                @{$client_ref->{commands}};
+            $client_ref->close;
+        } else {
+            pop @{$client_ref->{commands}} ||
+                $client_ref->fatal("No wait result but also no command after $err");
+            # Also remove associated autoconnect
+            pop @{$client_ref->{commands}} if
+                @{$client_ref->{commands}} &&
+                $client_ref->{commands}[0][COMMAND_REF] == CONNECT &&
+                !defined $client_ref->{commands}[0][STATE]{callback};
+            $client_ref->close if !@{$client_ref->{commands}};
+        }
+        $client_ref->{result} = undef;
+        die $err;
     }
-    my $result = delete $client_ref->{result}[$loop_levels] ||
-        die "Assertion: Exit mainloop without setting result";
+    if (@{$client_ref->{commands}}) {
+        $client_ref->fatal("Waiting for command without expecting result") if
+            !defined $client_ref->{result};
+        $client_ref->fatal("Command still pending while we have a result") if
+            $client_ref->{result};
+        $client_ref->{result} = undef;
+
+        # We just fell out of mainloop without setting result
+        # This must mean there were non-blocking commands queued before the
+        # (final) blocking one, and one of them must have failed leaving no
+        # activity for mainloop. (Or something else called unloop)
+
+        # Remove the command we are waiting for since we sort of had an error
+        # and we cannot expect the user to properly recover from this
+        pop @{$client_ref->{commands}};
+        # Also remove associated autoconnect
+        pop @{$client_ref->{commands}} if
+            @{$client_ref->{commands}} &&
+            $client_ref->{commands}[0][COMMAND_REF] == CONNECT &&
+            !defined $client_ref->{commands}[0][STATE]{callback};
+        # In case something else called unloop
+        $client_ref->close if !@{$client_ref->{commands}};
+        croak "A previous command in the queue failed";
+    }
+
+    # If there are no more commands we should also not be active
+    $client_ref->fatal("Active during wait") if $client_ref->{active};
+
+    # Sigh. We finally are at the "normal" path.
+    my $result = $client_ref->{result} ||
+        $client_ref->fatal("Exit mainloop without setting result");
+    $client_ref->{result} = undef;
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
     wantarray || return $result->[1];
@@ -330,6 +391,8 @@ sub command_simple {
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
 
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
+
     my $out = sprintf($command_ref->[COMMAND], @$args);
     utf8::encode($out);
     if (length $out >= 2**16) {
@@ -366,6 +429,7 @@ sub _fatal {
 
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
     push @{$client_ref->{commands}}, [$command_ref];
     $client_ref->activate(1);
 }
@@ -430,6 +494,8 @@ sub connect : method {
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
+
     push @{$client_ref->{commands}}, $connector;
     $client_ref->activate(1);
 }
@@ -443,6 +509,8 @@ sub spawn {
         $client_ref->connector($command_ref, $arguments, $callback, 1);
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
+
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
 
     push @{$client_ref->{commands}}, $connector;
     $client_ref->activate(1);

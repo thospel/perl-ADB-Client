@@ -19,7 +19,7 @@ use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer adb_echo addr_filter dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);
 
-# We already checked loading in 02_adb_client.t
+# We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop);
 use ADB::Client::Utils qw(addr_info clocktime_running);
 

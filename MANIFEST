@@ -4,6 +4,7 @@ MANIFEST.SKIP
 Makefile.PL
 README
 bin/adb_fake
+bin/adb_tester
 lib/ADB/Client.pm
 lib/ADB/Client/Command.pm
 lib/ADB/Client/Events.pm

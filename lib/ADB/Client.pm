@@ -170,42 +170,42 @@ __PACKAGE__->add_commands();
 # Convenience functions
 sub transport_usb {
     my $client = shift;
-    return $client->transport("usb", @_);
+    return $client->transport_type("usb", @_);
 }
 
 sub transport_tcp {
     my $client = shift;
-    return $client->transport("tcp", @_);
+    return $client->transport_type("tcp", @_);
 }
 
 sub transport_any {
     my $client = shift;
-    return $client->transport("any", @_);
+    return $client->transport_type("any", @_);
 }
 
 sub transport_local {
     my $client = shift;
-    return $client->transport("local", @_);
+    return $client->transport_type("local", @_);
 }
 
 sub tport_usb {
     my $client = shift;
-    return $client->tport("usb", @_);
+    return $client->tport_type("usb", @_);
 }
 
 sub tport_tcp {
     my $client = shift;
-    return $client->tport("tcp", @_);
+    return $client->tport_type("tcp", @_);
 }
 
 sub tport_any {
     my $client = shift;
-    return $client->tport("any", @_);
+    return $client->tport_type("any", @_);
 }
 
 sub tport_local {
     my $client = shift;
-    return $client->tport("local", @_);
+    return $client->tport_type("local", @_);
 }
 
 1;

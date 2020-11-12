@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 22;
+use Test::More tests => 29;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -32,12 +32,19 @@ is($client->echo($str), $str, "Special characters and utf8");
 $str = " abc\nd\r\tf zg\x{123}z\0z ";
 is($client->echo($str), $str, "Special characters and utf8");
 
+is($client->transport_usb, "", "Connect to usb device");
 is($client->remount, qq(Not running as root. Try "adb root" first.\n),
    "Cannot remount as non-root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->root,   "restarting adbd as root\n", "Can set root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->root,   "adbd is already running as root\n", "Can set root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->unroot, "restarting adbd as non root\n", "Can set root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->unroot, "adbd not running as root\n", "Can set root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->root,   "restarting adbd as root\n", "Can set root");
+is($client->transport_usb, "", "Connect to usb device");
 is($client->remount, qq(remount succeeded\n),
    "Can remount as root");

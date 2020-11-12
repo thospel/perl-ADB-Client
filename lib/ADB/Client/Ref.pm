@@ -23,7 +23,7 @@ use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(command_check_response
                             COMMAND_NAME COMMAND FLAGS PROCESS CODE EXPECT_EOF
-                            COMMAND_REF CALLBACK ARGUMENTS STATE);
+                            MAYBE_EOF COMMAND_REF CALLBACK ARGUMENTS STATE);
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
@@ -79,8 +79,10 @@ our @COMMANDS = (
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [devices_track	=> "host:track-devices", -1, 0, \&process_devices],
-    [transport		=> "host:transport-%s", 0, 0],
-    [tport		=> "host:tport:%s", 8, 0, \&process_tport],
+    [transport_type	=> "host:transport-%s", 0, MAYBE_EOF],
+    [transport		=> "host:transport:%s", 0, MAYBE_EOF],
+    [tport_type		=> "host:tport:%s", 8, 0, \&process_tport],
+    [tport		=> "host:tport:serial:%s", 8, 0, \&process_tport],
     [unroot		=> "unroot:", INFINITY, EXPECT_EOF],
     [root		=> "root:", INFINITY, EXPECT_EOF],
 );
@@ -221,11 +223,11 @@ sub blocking {
 }
 
 sub delete {
-    my ($client_ref) = @_;
+    my ($client_ref, $deleted) = @_;
 
     $client_ref->close;
     $client_ref->{result} = undef;
-    @{$client_ref->{commands}} = [FATAL];
+    @{$client_ref->{commands}} = $deleted ? () : ADB::Client::Command->new(FATAL);
     #if (my $client = $client_ref->client) {
     #    $$client = undef;
     #}
@@ -249,7 +251,7 @@ sub _fatal_run {
 sub DESTROY {
     --$objects;
     info("DESTROY @_") if $DEBUG;
-    shift->delete;
+    shift->delete(1);
 }
 
 sub callback_default {
@@ -341,13 +343,13 @@ sub wait : method {
         croak "A previous command in the queue failed";
     }
 
-    # If there are no more commands we should also not be active
-    $client_ref->fatal("Active during wait") if $client_ref->{active};
-
-    # Sigh. We finally are at the "normal" path.
     my $result = $client_ref->{result} ||
         $client_ref->fatal("Exit mainloop without setting result");
     $client_ref->{result} = undef;
+    # If there are no more commands we should also not be active
+    $client_ref->fatal("Active during wait") if $client_ref->{active};
+
+    # At last we feel confident that everything is in its proper state
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
     wantarray || return $result->[1];
@@ -430,7 +432,7 @@ sub _fatal {
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
     croak "Already have a blocking command pending" if defined $client_ref->{result};
-    push @{$client_ref->{commands}}, [$command_ref];
+    push @{$client_ref->{commands}}, ADB::Client::Command->new($command_ref);
     $client_ref->activate(1);
 }
 
@@ -619,9 +621,7 @@ sub activate {
     return if $client_ref->{active} || !@{$client_ref->{commands}};
 
     for (1) {
-        my $command = $client_ref->{commands}[0] ||
-            $client_ref->fatal("No command");
-        my $command_ref = $command->[COMMAND_REF];
+        my $command_ref = $client_ref->{commands}[0]->ref;
         if ($client_ref->{out} ne "") {
             my $response = display_string($client_ref->{out});
             $client_ref->fatal("$response to ADB still pending when starting $command_ref->[COMMAND]");
@@ -723,25 +723,17 @@ sub connector {
         $state->{version_scan} ||= 1;
     }
 
-    my $command = ADB::Client::Command->new;
-    $command->[STATE] = $state;
-    $command->[COMMAND_REF] = $command_ref;
     my $step =
         !$callback ? \&_autoconnect_done :		# autoconnect
         $spawn     ? \&_connect_step :			# spawn()
         $state->{version_scan} ? \&_connect_step :	# connect()
         # No need for complexity if there is no version_min in connect()
         undef;
-    if ($step) {
-        $state->{callback} = $callback;
-        $state->{step} = $step;
+    return ADB::Client::Command->new($command_ref, $callback, $state) if !$step;
 
-        $command->[CALLBACK] = \&_connector;
-    } else {
-        $command->[CALLBACK] = $callback;
-    }
-
-    return $command;
+    $state->{callback} = $callback;
+    $state->{step} = $step;
+    return ADB::Client::Command->new($command_ref, \&_connector, $state);
 }
 
 sub _connector {
@@ -1445,9 +1437,7 @@ sub process_devices {
 }
 
 sub process_tport {
-    my ($id) = @_;
-
-    return [unpack("q", $id)];
+    return [unpack("q", shift)];
 }
 
 1;

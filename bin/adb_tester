@@ -30,7 +30,7 @@ use IO::Socket::IP qw();
 use Getopt::Long 2.24 qw(:config bundling);
 
 use ADB::Client::Events qw(mainloop event_init);
-use ADB::Client::Utils qw(display_string);
+use ADB::Client::Utils qw(string_from_value);
 
 my $host = "127.0.0.1";
 my $port = 5037;
@@ -48,6 +48,13 @@ print "Connected to $host:$port\n";
 my $command_in = "";
 my $command_out = "";
 my $socket_out = "";
+
+sub unstring {
+    my $str = string_from_value(shift);
+    $str =~ s/^"//;
+    $str =~ s/"\z//;
+    return $str;
+}
 
 sub socket_writer {
     my $rc = syswrite($socket, $socket_out, 2**16);
@@ -75,7 +82,7 @@ sub command_reader {
             die "Line too long" if $len >= 2**16;
             $socket->add_write(\&socket_writer) if $socket_out eq "";
             $line = sprintf("%04x", $len) . $line;
-            print "$line\t\t-> adb\n";
+            print "-> adb\n$line\n";
             $socket_out .= $line;
         }
         return;
@@ -88,11 +95,12 @@ sub command_reader {
 sub socket_reader {
     my $rc = sysread($socket, my $buffer, 2**16);
     if ($rc) {
-        print "$buffer\t\t<- adb\n";
+        $buffer = unstring($buffer);
+        print "<- adb\n$buffer\n";
         return;
     }
     if (defined $rc) {
-        print "Close from socket\n";
+        print "<- adb: Close\n";
         $socket->delete_read;
         $socket->delete_write if $socket_out ne "";
 
@@ -102,7 +110,7 @@ sub socket_reader {
         $socket->blocking(0);
         $socket_out = "";
         $socket->add_read(\&socket_reader);
-        print "Reconnected to $host:$port\n";
+        print "-> adb: Connect\n";
         return;
     }
     return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;

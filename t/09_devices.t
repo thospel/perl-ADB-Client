@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 47;
+use Test::More tests => 72;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -48,7 +48,7 @@ is_deeply(\@result, [
             "model" => "SM_G920F",
             "product" => "zerofltexx",
             "state" => "device",
-            "transport_id" => 3
+            "transport_id" => 1
         },
         "52000c4748d6a283" => {
             "device" => "kminiltexx",
@@ -60,7 +60,7 @@ is_deeply(\@result, [
         }
     },
     ["10.253.0.13:5555", "52000c4748d6a283"],
-    "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:3\n52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2\n"],
+    "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:1\n52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2\n"],
           "Expected devices long result");
 
 my $client2 = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port_10, blocking => 0]);
@@ -103,7 +103,24 @@ like($@, qr{^Already tracking at }, "Cannot do a double track");
 
 eval { $client->features };
 like($@, qr{^more than one device/emulator at }, "Cannot get features from more than 1 device");
-$client->device_drop("10.253.0.13:5555");
+
+eval { $client->transport_any };
+like($@, qr{^\Qmore than one device/emulator at },
+     "Multiple devices for transport any");
+
+eval { $client->transport_tcp };
+like($@, qr{^\Qmore than one device/emulator at},
+     "Multiple devices for transport tcp");
+
+eval { $client->tport_any };
+like($@, qr{^\Qmore than one device/emulator at },
+     "Multiple devices for tport any");
+
+eval { $client->tport_tcp };
+like($@, qr{^\Qmore than one device/emulator at},
+     "Multiple devices for tport tcp");
+
+is($client->transport_usb, "", "Can transport usb");
 @result = $client->features;
 is_deeply(\@result, [{
     "cmd" => 1,
@@ -113,10 +130,135 @@ is_deeply(\@result, [{
     "shell_v2",
     "cmd",
     "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device");
+], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+
+is($client->transport_local, "", "Can transport local");
+@result = $client->features;
+is_deeply(\@result, [
+    {
+        "abb" => 1,
+        "abb_exec" => 1,
+        "apex" => 1,
+        "cmd" => 1,
+        "fixed_push_mkdir" => 1,
+        "fixed_push_symlink_timestamp" => 1,
+        "shell_v2" => 1,
+        "stat_v2" => 1
+    },
+    [
+        "fixed_push_mkdir",
+        "shell_v2",
+        "apex",
+        "stat_v2",
+        "abb",
+        "fixed_push_symlink_timestamp",
+        "cmd",
+        "abb_exec"
+    ],
+    "fixed_push_mkdir,shell_v2,apex,stat_v2,abb,fixed_push_symlink_timestamp,cmd,abb_exec"
+], "Can get features from single device") || dumper(\@result);
+
+is($client->transport("52000c4748d6a283"), "", "Connect by serial");
+@result = $client->features;
+is_deeply(\@result, [{
+    "cmd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1
+}, [
+    "shell_v2",
+    "cmd",
+    "stat_v2"
+], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+
+is($client->tport("52000c4748d6a283"), 2, "Connect by serial");
+@result = $client->features;
+is_deeply(\@result, [{
+    "cmd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1
+}, [
+    "shell_v2",
+    "cmd",
+    "stat_v2"
+], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+
+is($client->tport_usb, 2, "Can tport usb");
+@result = $client->features;
+is_deeply(\@result, [{
+    "cmd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1
+}, [
+    "shell_v2",
+    "cmd",
+    "stat_v2"
+], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+
+is($client->tport_local, 1, "Can tport local");
+@result = $client->features;
+is_deeply(\@result, [
+    {
+        "abb" => 1,
+        "abb_exec" => 1,
+        "apex" => 1,
+        "cmd" => 1,
+        "fixed_push_mkdir" => 1,
+        "fixed_push_symlink_timestamp" => 1,
+        "shell_v2" => 1,
+        "stat_v2" => 1
+    },
+    [
+        "fixed_push_mkdir",
+        "shell_v2",
+        "apex",
+        "stat_v2",
+        "abb",
+        "fixed_push_symlink_timestamp",
+        "cmd",
+        "abb_exec"
+    ],
+    "fixed_push_mkdir,shell_v2,apex,stat_v2,abb,fixed_push_symlink_timestamp,cmd,abb_exec"
+], "Can get features from single device") || dumper(\@result);
+
+$client->device_drop("10.253.0.13:5555");
+eval { $client->transport("10.253.0.13:5555") };
+like($@, qr{^\Qdevice '10.253.0.13:5555' not found at},
+     "Connect to non-existing device");
+
+@result = $client->features;
+is_deeply(\@result, [{
+    "cmd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1
+}, [
+    "shell_v2",
+    "cmd",
+    "stat_v2"
+], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+
+is($client->transport_any, "", "Can transport any");
+is($client->transport_tcp, "", "Can transport tcp");
+is($client->transport_usb, "", "Can transport usb");
+eval { $client->transport_local };
+like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
+
 is($client->device_drop("52000c4748d6a283"), "Dropped", "Drop device");
 eval { $client->features };
 like($@, qr{^no devices/emulators found at }, "Cannot get features without devices");
+
+eval { $client->transport_any };
+like($@, qr{^\Qno devices/emulators found at },
+     "No devices for transport any");
+eval { $client->transport_tcp };
+like($@, qr{^\Qno devices/emulators found at},
+     "No devices for transport tcp");
+eval { $client->transport_local };
+like($@, qr{^\Qno emulators found at },
+     "No devices for transport any");
+eval { $client->transport_usb };
+like($@, qr{^\Qno devices found at},
+     "No devices for transport tcp");
+
 is($client->device_add("10.253.0.13:5555"), "Added", "Add device");
 $client->kill(blocking => 0);
 

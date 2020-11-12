@@ -14,7 +14,7 @@ use lib $Bin;
 use Socket qw(AF_INET SOCK_STREAM IPPROTO_TCP);
 use IO::Socket::IP qw();
 
-use Test::More tests => 34;
+use Test::More tests => 38;
 
 use TestDrive qw(addr_filter dumper);
 
@@ -29,7 +29,11 @@ my $socket = IO::Socket::IP->new(
 
 # Non blocking
 $spawns0 = ADB::Client::Spawn->spawns;
-my $client = ADB::Client->spawn_socket($socket, blocking => 0);
+my ($client, @result);
+$client = ADB::Client->spawn_socket($socket, blocking => 0, callback => sub {
+    cmp_ok(shift, "==", $client, "callback first argument is the client");
+    push @result, [@_];
+});
 isa_ok($client, "ADB::Client", "spawn_socket returns an ADB::Client object");
 is($client->host, "127.0.0.1", "Derived proper host");
 is($client->port, $socket->sockport, "Derived proper port");
@@ -50,6 +54,7 @@ is_deeply(addr_filter($connection_data), {
   "pid" => 1
 }, "Expected history") || dumper(addr_filter($connection_data));
 is(ref $connection_data->{bind_addr}, "", "Plain bind_addr");
+is_deeply(\@result, [[undef, $connection_data]], "Callback returns connection_data") || dumper(\@result, $connection_data);
 $argv = join(" ", $client->argv(blocking => 1));
 like($argv,
      qr{^-L acceptfd:\d+ fork-server server --reply-fd \d+\z}a,
@@ -134,5 +139,10 @@ $spawns1 = ADB::Client::Spawn->spawns;
 $spawns = $spawns1 - $spawns0;
 $spawns0 = $spawns1;
 is($spawns, 0, "Nothing more started");
+
+eval { ADB::Client->spawn_socket };
+like($@, qr{^\QOdd number of arguments at }, "Must have even arguments");
+eval { ADB::Client->spawn_socket($socket, Foo => 5) };
+like($@, qr{^\QUnknown argument Foo at }, "Must have even arguments");
 
 __END__

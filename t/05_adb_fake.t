@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 102;
+use Test::More tests => 106;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable addr_filter
                  dumper $UNREACHABLE);
 
@@ -116,6 +116,15 @@ is_deeply(addr_filter($result), {
 is($client->connected, 1, "Succesfully connected") ||
     BAIL_OUT("Connection to the fake adb server without socket");
 
+is(eval { $client->transport_usb }, "", "Connect to usb device") ||
+    BAIL_OUT("Cannot use usb transport");
+is($client->connected, 1, "Still connected after transport-usb") ||
+    BAIL_OUT("Lost connection after transport-usb");
+is(eval { $client->transport_local }, "", "Connect to a tcp device") ||
+    BAIL_OUT("Cannot use tcp transport");
+is($client->connected, 1, "Still connected after transport-local") ||
+    BAIL_OUT("Lost connection after transport-local");
+
 # Test that we get a proper error for unknown commands
 # First try a basic blocking call
 for (1..2) {
@@ -160,7 +169,6 @@ is_deeply(addr_filter($result), {
 cmp_ok($result->{connected}, '>', 0, "Connection time is positive");
 
 # Before testing the blocking variant of the call, set up some other
-
 # ADB:Client objects that we keep around. This checks that we can have
 # more than one object at a time
 

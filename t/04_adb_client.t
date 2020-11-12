@@ -104,7 +104,9 @@ $failed += ok($client_ref, "There is a client ref even for a failed client");
 $client = undef;
 $failed += !is(ADB::Client::Ref->objects, 1, "Ref keeps ADB::Client::Ref alive");
 $failed += !is(ADB::Client->objects, 0, "No objects are left, ref does not keep ADB::Client alive");
-$failed += !is(ADB::Client::Command->objects, 0, "Still no command objects are left");
+$failed +=
+    !is(ADB::Client::Command->objects, 1,
+        "One command object is left (the FATAL put in ref by client DESTROY)");
 $ref = undef;
 $failed += !is(ADB::Client::Ref->objects, 0, "No objects are left");
 $failed += !is(ADB::Client->objects, 0, "No objects are left, ref does not keep ADB::Client alive");

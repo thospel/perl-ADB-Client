@@ -7,13 +7,13 @@ our $VERSION = '1.000';
 use Carp;
 # our @CARP_NOT = qw(ADB::Client::Ref);
 
-use ADB::Client::Utils qw(adb_check_response info $DEBUG $QUIET);
+use ADB::Client::Utils qw(adb_check_response display_string info $DEBUG $QUIET);
 
 use Exporter::Tidy
     other	=>[
         qw(command_check_response
            COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE EXPECT_EOF
-           MAYBE_EOF COMMAND_REF CALLBACK ARGUMENTS STATE)];
+           MAYBE_EOF SERIAL COMMAND_REF CALLBACK ARGUMENTS STATE)];
 
 use constant {
     # Index in @COMMANDS element
@@ -30,13 +30,14 @@ use constant {
 
     # FLAGS values:
     # After OKAY we still expect the connection to be closed
-    EXPECT_EOF => 1,
+    EXPECT_EOF	=> 1,
     # FAIL may or may not close the connection
     # Currently not relevant since we always close the connection ourselves
     # if we see a FAIL
     # Mainly meant for host:transport which may close the connection or not
     # depending on the adb version
-    MAYBE_EOF  => 2,
+    MAYBE_EOF	=> 2,
+    SERIAL	=> 4,
 
     # Index in ADB::Client::Command
     COMMAND_REF	=> 0,

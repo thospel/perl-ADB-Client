@@ -13,8 +13,9 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 386;
-use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper);
+use Test::More tests => 406;
+
+use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper unalarm);
 
 # We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop $ADB);
@@ -69,6 +70,7 @@ for my $pre_connect (0, 1) {
 
 # Version scan without kill. Everything is occupied with bad versions
 for my $pre_connect (0, 1) {
+    unalarm();
     is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
        "Keep adb_fake alive");
 
@@ -140,6 +142,7 @@ $addr_info =
  ];
 
 for my $adb_socket (0, 1) {
+    unalarm();
     is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
        "Keep adb_fake alive");
 
@@ -204,6 +207,10 @@ $addr_info =
  ];
 
 for my $adb_socket (0, 1) {
+    unalarm();
+    is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+       "Keep adb_fake alive");
+
     # Version scan without kill.
     # Not everything is occupied and have no good version
     $client = new_ok("ADB::Client" =>
@@ -310,6 +317,10 @@ is($client->version, 10, "Expected version");
 
 # Version scan without kill. Not everything is occupied but have a good version
 for my $pre_connect (0, 1) {
+    unalarm();
+    is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+       "Keep adb_fake alive");
+
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
                       addr_info => $addr_info, blocking => 1]);
@@ -353,6 +364,10 @@ for my $pre_connect (0, 1) {
 }
 
 for my $pre_connect (0, 1) {
+    unalarm();
+    is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+       "Keep adb_fake alive");
+
     # Version scan with kill. Not everything is occupied but have a good version
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
@@ -402,6 +417,10 @@ for my $pre_connect (0, 1) {
 # Spawned adb is good
 for my $adb_socket (0, 1) {
     for my $pre_connect (0, 1) {
+        unalarm();
+        is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+           "Keep adb_fake alive");
+
         $client = new_ok("ADB::Client" =>
                          [host => "127.0.0.1", port => $port,
                           adb_socket => $adb_socket,
@@ -468,6 +487,10 @@ for my $adb_socket (0, 1) {
 # Spawned adb is bad
 for my $adb_socket (0, 1) {
     for my $pre_connect (0, 1) {
+        unalarm();
+        is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+           "Keep adb_fake alive");
+
         $client = new_ok("ADB::Client" =>
                          [host => "127.0.0.1", port => $port,
                           adb_socket => $adb_socket,
@@ -538,6 +561,10 @@ for my $adb_socket (0, 1) {
 # Unconditional kill, no version check
 for my $adb_socket (0, 1) {
     for my $pre_connect (0, 1) {
+        unalarm();
+        is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+           "Keep adb_fake alive");
+
         $client = new_ok("ADB::Client" =>
                          [host => "127.0.0.1", port => $port, blocking => 1,
                           adb_socket => $adb_socket, addr_info => $addr_info]);
@@ -591,6 +618,10 @@ for my $adb_socket (0, 1) {
 }
 
 for my $adb_socket (0, 1) {
+    unalarm();
+    is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
+       "Keep adb_fake alive");
+
     # Test a join
     local $ENV{ADB_FAKE_SLEEP} = 0.1;
 
@@ -756,6 +787,7 @@ $spawns0 = ADB::Client::Spawn->spawns;
 for my $os ("$^O", "FleaBSD","stderr") {
     local $^O = $os;
 
+    unalarm();
     is(ADB::Client->new(host => "127.0.0.1", port => $port_10)->version, 10,
        "Keep adb_fake alive");
 

@@ -16,7 +16,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 30;
+use Test::More tests => 32;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -43,6 +43,13 @@ eval { $client->_fatal(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Fatal needs proper arguments");
 eval { $client->client_ref->_fatal({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at }, "Fatal needs proper arguments");
+
+eval { $client->_fatal(blocking => 1) };
+like($@, qr{^\QAttempt to restart a dead ADB::Client at }, "Blocking fatal");
+
+# Ok, mount a scratch ADB::Client
+$client = new_ok("ADB::Client" =>
+                    [host => "127.0.0.1", port => $port, blocking => 0]);
 
 my @results;
 my $callback = sub { push @results, [shift->connected, @{dclone(\@_)}] };

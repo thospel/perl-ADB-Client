@@ -5,7 +5,11 @@ use strict;
 use warnings;
 
 # Realy try not to get stuck
-alarm 60;
+my $ALARM = 60;
+sub unalarm {
+    alarm $ALARM;
+}
+unalarm();
 
 our $VERSION = "1.000";
 
@@ -35,19 +39,20 @@ BEGIN {
 use ADB::Client::Utils qw(display_string);
 # We tested in t/02_adb_client (with BAIL_OUT) that this can be used
 use ADB::Client qw($ADB);
+use ADB::Client::Command qw(EXPECT_EOF);
 
 # We tested in t/02_adb_client (with BAIL_OUT) that we can add these commands
-ADB::Client->add_command(["failer" => "Wee", 0, 1]);
-ADB::Client->add_command(["echo" => "internal:echo:%s", -1, 1]);
-ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 1]);
-ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, 1]);
-ADB::Client->add_command(["pid" => "internal:pid", -1, 1]);
-ADB::Client->add_command(["argv" => "internal:argv", -1, 1, sub { return [ split /\0/, shift]}]);
+ADB::Client->add_command(["failer" => "Wee", 0, EXPECT_EOF]);
+ADB::Client->add_command(["echo" => "internal:echo:%s", -1, EXPECT_EOF]);
+ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, EXPECT_EOF]);
+ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, EXPECT_EOF]);
+ADB::Client->add_command(["pid" => "internal:pid", -1, EXPECT_EOF]);
+ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { return [ split /\0/, shift]}]);
 
 use Exporter::Tidy
     other =>
     [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects $adb_fake
-        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
+        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE unalarm
         adb_start adb_stop adb_unacceptable adb_unreachable adb_unreachable6
         adb_closer adb_echo adb_echo6 adb_version adb_version6 adb_blackhole
         addr_filter collect_stderr collected_stderr uncollect_stderr dumper)];

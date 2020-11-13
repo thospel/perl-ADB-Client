@@ -129,6 +129,16 @@ sub _add_command {
 
     my ($command_name, $nr_vars, $special) =
         $class->ref_class->command_get($index);
+
+    # Check before utf8::encode (no need to utf8::upgrade or utf8::downgrade)
+    # This also checks higher up in the class hierarchy
+    croak "Attempt to redefine already existing command '$command_name'" if
+        $class->can($command_name);
+
+    $command_name =~ /^[^\W\d]\w*\z/u ||
+        croak "Command_name '$command_name' is invalid as a perl identifier";
+    utf8::encode($command_name);
+
     my %replace = (
         NAME	=> $command_name,
         PROXY	=> $special ? $command_name : "command_simple",
@@ -139,6 +149,8 @@ sub _add_command {
     );
     my $code = '
 #line LINE "FILE"
+use utf8;
+
 sub NAME : method {
     @_ > NR_VARS || croak "Too few arguments";
     @_ % 2 != NR_VARS % 2 || croak "Odd number of arguments";
@@ -170,42 +182,42 @@ __PACKAGE__->add_commands();
 # Convenience functions
 sub transport_usb {
     my $client = shift;
-    return $client->transport_type("usb", @_);
+    return $client->_transport("usb", @_);
 }
 
 sub transport_tcp {
     my $client = shift;
-    return $client->transport_type("tcp", @_);
+    return $client->_transport("tcp", @_);
 }
 
 sub transport_any {
     my $client = shift;
-    return $client->transport_type("any", @_);
+    return $client->_transport("any", @_);
 }
 
 sub transport_local {
     my $client = shift;
-    return $client->transport_type("local", @_);
+    return $client->_transport("local", @_);
 }
 
 sub tport_usb {
     my $client = shift;
-    return $client->tport_type("usb", @_);
+    return $client->_tport("usb", @_);
 }
 
 sub tport_tcp {
     my $client = shift;
-    return $client->tport_type("tcp", @_);
+    return $client->_tport("tcp", @_);
 }
 
 sub tport_any {
     my $client = shift;
-    return $client->tport_type("any", @_);
+    return $client->_tport("any", @_);
 }
 
 sub tport_local {
     my $client = shift;
-    return $client->tport_type("local", @_);
+    return $client->_tport("local", @_);
 }
 
 1;

@@ -9,7 +9,7 @@ use warnings;
 
 our $VERSION = "1.000";
 
-use Test::More tests => 37;
+use Test::More tests => 38;
 
 use Scalar::Util qw(weaken);
 
@@ -29,6 +29,8 @@ BEGIN {
               OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
               DISPLAY_MAX)) ||
                   BAIL_OUT("Cannot even use ADB::Client::Utils");
+    use_ok("ADB::Client::Command", qw(EXPECT_EOF)) ||
+        BAIL_OUT("Cannot even use ADB::Client::Command");
 }
 
 my $failed = 0;

@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 29;
+use Test::More tests => 30;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -32,6 +32,48 @@ is($client->echo($str), $str, "Special characters and utf8");
 $str = " abc\nd\r\tf zg\x{123}z\0z ";
 is($client->echo($str), $str, "Special characters and utf8");
 
+@result = $client->host_features;
+is_deeply(\@result, [
+    {
+        "abb" => 1,
+        "abb_exec" => 1,
+        "apex" => 1,
+        "cmd" => 1,
+        "fixed_push_mkdir" => 1,
+        "fixed_push_symlink_timestamp" => 1,
+        "ls_v2" => 1,
+        "push_sync" => 1,
+        "remount_shell" => 1,
+        "sendrecv_v2" => 1,
+        "sendrecv_v2_brotli" => 1,
+        "sendrecv_v2_dry_run_send" => 1,
+        "sendrecv_v2_lz4" => 1,
+        "sendrecv_v2_zstd" => 1,
+        "shell_v2" => 1,
+        "stat_v2" => 1,
+        "track_app" => 1
+    },
+    [
+        "shell_v2",
+        "cmd",
+        "stat_v2",
+        "ls_v2",
+        "fixed_push_mkdir",
+        "apex",
+        "abb",
+        "fixed_push_symlink_timestamp",
+        "abb_exec",
+        "remount_shell",
+        "track_app",
+        "sendrecv_v2",
+        "sendrecv_v2_brotli",
+        "sendrecv_v2_lz4",
+        "sendrecv_v2_zstd",
+        "sendrecv_v2_dry_run_send",
+        "push_sync"
+    ],
+    "shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,push_sync"
+], "Get host features") || dumper(\@result);
 is($client->transport_usb, "", "Connect to usb device");
 is($client->remount, qq(Not running as root. Try "adb root" first.\n),
    "Cannot remount as non-root");

@@ -18,7 +18,10 @@ my $socket_fd = -1;
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 267;
+
+use IO::Socket::IP qw();
+
+use Test::More tests => 418;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -61,11 +64,12 @@ END {
 use TestDrive qw(adb_start adb_unreachable dumper
                  collect_stderr collected_stderr uncollect_stderr
                  %expect_objects);
+
 use ADB::Client qw(mainloop event_init unloop timer immediate);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
                           realtime_running clocktime_running);
-use IO::Socket::IP qw();
+use ADB::Client::Command qw(EXPECT_EOF);
 
 my $port  = adb_start();
 my $rport = adb_unreachable();
@@ -148,6 +152,7 @@ $IGNORE_PIPE_LOCAL = undef;
 
 # Trigger EVENT_INITER in mainloop()
 mainloop();
+# So this should do nothing (do this for better test coverage)
 event_init();
 
 my $read = 0;
@@ -263,33 +268,74 @@ my $client = new_ok("ADB::Client", [port => $port]);
 # See if we properly recover
 is($client->version, 39, "Sanity check. We can run");
 my $client2 = new_ok("ADB::Client", [port => $port, blocking => 0]);
-$client2->marker(callback => sub { die "Killer\n" });
+$client2->marker(callback => sub {
+    # While we are here, check the tests for queueing while blocking
+    eval { $client->version };
+    like($@, qr{^\QAlready have a blocking command pending at },
+         "Test duplicate block");
+    eval { $client->version(blocking => 0) };
+    like($@, qr{^\QAlready have a blocking command pending at },
+         "Test duplicate block");
+    eval { $client->_fatal(blocking => 0) };
+    like($@, qr{^\QAlready have a blocking command pending at },
+         "Test duplicate block");
+    eval { $client->connect(blocking => 0) };
+    like($@, qr{^\QAlready have a blocking command pending at },
+         "Test duplicate block");
+    eval { $client->spawn(blocking => 0) };
+    like($@, qr{^\QAlready have a blocking command pending at },
+         "Test duplicate block");
+    # Ok, finally the real point: cause a die with a pending blocking command
+    die "Killer\n";
+});
 eval { $client->version };
 is($@, "Killer\n", "Expected error exit");
 is($client->version, 39, "We can still do blocking commands");
 
 # Cause errors during the PROCESS callback
-ADB::Client->add_command([version0 => "host:version", -1, 1, sub { return {} }]);
+ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]);
+eval { ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]) };
+like($@, qr{^Attempt to redefine already existing command 'version0' at },
+     "Cannot create command twice");
 eval { $client->version0 };
 like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
 
-ADB::Client->add_command([version1 => "host:version", -1, 1, sub { die "Boem\n" }]);
+# Try an out of order wait
+$client2->marker(callback => sub {
+    eval { $client->client_ref->wait };
+    like($@,
+         qr{^\QFatal: Assertion: Already have a blocking command pending at },
+         "Test out of order wait");
+});
+eval { $client->version };
+like($@,
+     qr{^\QFatal: Assertion: ADB::Client is dead but something caught the exception at },
+     "We very much confused ADB::Client internals");
+# This broke $client. Create a new one
+$client = new_ok("ADB::Client", [port => $port]);
+
+ADB::Client->add_command([version1 => "host:version", -1, EXPECT_EOF, sub { die "Boem\n" }]);
 eval { $client->version1 };
 like($@, qr{Assertion: Could not process host:version output "0027": Boem at },
      "process must not die");
 
-ADB::Client->add_command([version2 => "host:version", -1, 1, sub { return "Bad" }]);
+ADB::Client->add_command([version2 => "host:version", -1, EXPECT_EOF, sub { return "Bad" }]);
 my @result;
 $client->version2(blocking => 0, callback => sub { shift; push @result, [@_] });
 mainloop();
 is_deeply(\@result, [["Bad"]], "Process can return an error");
+eval { $client->version2 };
+like($@, qr{^\QBad at }, "Blocking bad process");
 
 # Add a command that is invalid as a perl identifier
-eval { ADB::Client->add_command(["space space" => "Wee", 0, 1]) };
-like($@, qr{^Illegal declaration of subroutine ADB::Client::space at }, "");
-
+eval { ADB::Client->add_command(["space space" => "Wee", 0, EXPECT_EOF]) };
+like($@, qr{^\QCommand_name 'space space' is invalid as a perl identifier at },
+     "Cannot use invalid perl identifiers");
+eval { ADB::Client->add_command(["0space" => "Wee", 0, EXPECT_EOF]) };
+like($@, qr{^\QCommand_name '0space' is invalid as a perl identifier at },
+     "Cannot use invalid perl identifiers");
 
 # Check some bad ways to call autogenerated commands
 # Don't define new commands below this point
@@ -312,6 +358,8 @@ while (1) {
     eval { $code->($client, 1..$nr_vars, Foo => 5) };
     like($@, qr{^\QUnknown argument Foo at},
          "$command_name unknown argument error");
+    is(@{[$code->($client, 1..$nr_vars)]}, 0,
+       "Can submit non blocking command and it returns nothing");
 
     $client->blocking(1);
     eval { $code->("ADB::Client", 1..$nr_vars, Foo => 5) };
@@ -319,6 +367,11 @@ while (1) {
          "$command_name unknown argument error");
 }
 cmp_ok($index, ">", 0, "Discovered at least one command");
+
+# Try a way too long command
+eval { ADB::Client::Command->new([])->ref([version0 => "Foo:%s", -1, 1], "a" x 1e5) };
+like($@, qr{^Command too long: "Foo:a+"\.\.\. at },
+     "Too long command for ADB::Client::Command");
 
 # Try some bad ADB::Client->new
 eval { ADB::Client->new(undef) };
@@ -375,12 +428,12 @@ eval { $client->client_ref->spawn({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from version");
 
-eval { $client->echo("a" x 100000, blocking => 1) };
+eval { $client->echo("a" x 1e5, blocking => 1) };
 like($@, qr{^Command too long: "internal:echo:a+"\.\.\. at },
      "Expected error from version");
 
-eval { $client->transport("a" x 100000, blocking => 1) };
-like($@, qr{^Command too long: "host:transport:a+"\.\.\. at },
+eval { $client->_transport("a" x 1e5, blocking => 1) };
+like($@, qr{^Command too long: "host:transport-a+"\.\.\. at },
      "Expected error from version");
 
 is($client->blocking, 0, "Client is currently not blocking");
@@ -446,10 +499,18 @@ like($@, qr{^Fatal: Assertion: error without command at },
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 eval { $client->client_ref->success("Success") };
-like($@, qr{^Fatal: Assertion: success without command at },
+like($@, qr{^Fatal: Assertion: Success without command at },
      "Expected error from version");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
+
+$client->version;
+eval { $client->client_ref->success("Success") };
+like($@, qr{^Fatal: Assertion: Active during success at },
+     "Expected error from version");
+# This broke $client. Create a new one
+$client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
+
 
 # Finally trigger object count errors
 $client2 = undef;

@@ -23,7 +23,8 @@ use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(command_check_response
                             COMMAND_NAME COMMAND FLAGS PROCESS CODE EXPECT_EOF
-                            MAYBE_EOF COMMAND_REF CALLBACK ARGUMENTS STATE);
+                            MAYBE_EOF SERIAL COMMAND_REF CALLBACK ARGUMENTS
+                            STATE);
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
@@ -52,11 +53,12 @@ use constant {
     MARKER	=> [marker	=> SPECIAL, \&_marker],
     CONNECT	=> [connect	=> SPECIAL, \&_connect_start],
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
-    VERSION	=> [version	=> "host:version", -1, 1, \&process_version],
-    KILL	=> [kill	=> "host:kill", 0, 1],
+    VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
+    KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
 };
 
-our @COMMANDS = (
+our @COMMANDS;
+our @BUILTINS = (
     # command, number of result bytes, expect close
     # See the index in command array constants
     FATAL,
@@ -74,17 +76,25 @@ our @COMMANDS = (
     [_close		=> SPECIAL, \&_closer],
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
-    [features		=> "host:features", -1, EXPECT_EOF, \&process_features],
-    [remount		=> "remount:", INFINITY, EXPECT_EOF],
+    [features		=> "host:features", -1, EXPECT_EOF | SERIAL,
+     [\&process_features, "filter"]],
+    [host_features	=> "host:host-features", -1, EXPECT_EOF,
+     [\&process_features, "filter"]],
+    [serial		=> "host:get-serialno", -1, EXPECT_EOF | SERIAL],
+    [state		=> "host:get-state", -1, EXPECT_EOF | SERIAL],
+    [device_path	=> "host:get-devpath", -1, EXPECT_EOF | SERIAL],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [devices_track	=> "host:track-devices", -1, 0, \&process_devices],
-    [transport_type	=> "host:transport-%s", 0, MAYBE_EOF],
-    [transport		=> "host:transport:%s", 0, MAYBE_EOF],
-    [tport_type		=> "host:tport:%s", 8, 0, \&process_tport],
-    [tport		=> "host:tport:serial:%s", 8, 0, \&process_tport],
+    [_transport		=> "host:transport-%s", 0, MAYBE_EOF],
+    [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
+    [_tport		=> "host:tport:%s", 8, 0, \&process_tport],
+    [tport_serial	=> "host:tport:serial:%s", 8, 0, \&process_tport],
+    [remount		=> "remount:", INFINITY, EXPECT_EOF],
     [unroot		=> "unroot:", INFINITY, EXPECT_EOF],
     [root		=> "root:", INFINITY, EXPECT_EOF],
+    ["device_connect"	=> "host:connect:%s", -1, EXPECT_EOF],
+    ["device_disconnect"=> "host:disconnect:%s", -1, EXPECT_EOF],
 );
 
 my $objects = 0;
@@ -319,8 +329,12 @@ sub wait : method {
         die $err;
     }
     if (@{$client_ref->{commands}}) {
-        $client_ref->fatal("Waiting for command without expecting result") if
-            !defined $client_ref->{result};
+        if (!defined $client_ref->{result}) {
+            $client_ref->fatal(
+                $client_ref->{commands}[0][COMMAND_REF] == FATAL ?
+                "ADB::Client is dead but something caught the exception" :
+                "Waiting for command without expecting result");
+        }
         $client_ref->fatal("Command still pending while we have a result") if
             $client_ref->{result};
         $client_ref->{result} = undef;
@@ -360,7 +374,26 @@ sub wait : method {
 
 sub commands_add {
     my ($class, $client_class) = @_;
-    $client_class->_add_command($_) for 0..$#COMMANDS;
+
+    for my $command_ref  (@BUILTINS) {
+        if ($command_ref->[COMMAND] ne SPECIAL &&
+            ($command_ref->[FLAGS] & SERIAL)) {
+            # Instead of host:features we can also do:
+            #  host-usb:features
+            #  host-local:features
+            #  host-serial:52000c4748d6a283:features
+            for my $prefix (qw(usb local serial:%s)) {
+                my $ref = [@$command_ref];
+                $ref->[COMMAND] =~ s/:/-$prefix:/ ||
+                    croak "No : in command '$ref->[COMMAND_NAME]'";
+                my $suffix = $prefix;
+                $suffix =~ s/:.*//;
+                $ref->[COMMAND_NAME] .= "_" . $suffix;
+                $class->command_add($client_class, $ref);
+            }
+        }
+        $class->command_add($client_class, $command_ref);
+    }
 }
 
 sub command_add {
@@ -388,10 +421,18 @@ sub command_get {
 sub command_simple {
     my ($client_ref, $arguments, $callback, $index, $args) = @_;
 
-    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
-
+    my $state;
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
+
+    if (ref $command_ref->[PROCESS] eq "ARRAY") {
+        my $keys = $command_ref->[PROCESS];
+        # Skip first (the actual processing code)
+        for my $key (@$keys[1..$#$keys]) {
+            $state->{$key} = delete $arguments->{$key} if exists $arguments->{$key};
+        }
+    }
+    croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
     croak "Already have a blocking command pending" if defined $client_ref->{result};
 
@@ -404,7 +445,7 @@ sub command_simple {
     push @{$client_ref->{commands}}, ADB::Client::Command->new(
         $command_ref,
         $callback,
-        undef,
+        $state,
         sprintf("%04X", length $out) . $out);
     $client_ref->activate(1);
 }
@@ -571,25 +612,23 @@ sub error {
 
 # If used inside a calback (toplevel false) nothing after this call should
 # change client_ref state, so typically this should be the last thing you do
+# Caller is responsible to only call this with active = 0
 sub success {
     my $client_ref = shift;
 
-    my $result = \@_;
-    my $command = shift @{$client_ref->{commands}} ||
-        $client_ref->fatal("success without command");
-    if ($client_ref->{active}) {
-        # Is this even correct ? (current "make test" never reaches this) --Ton
-        $client_ref->{socket}->delete_read if
-            $client_ref->{socket} && defined $client_ref->{in};
-        $client_ref->{timeout} = undef;
-        $client_ref->{active} = 0;
-    }
+    $client_ref->fatal("Active during success") if $client_ref->{active};
 
+    my $command = shift @{$client_ref->{commands}} ||
+        $client_ref->fatal("Success without command");
     local $client_ref->{command_retired} = $command;
+
+    my $result = \@_;
     my $command_ref = $command->[COMMAND_REF];
     if ($command_ref->[PROCESS]) {
+        my $process = $command_ref->[PROCESS];
+        $process = $process->[0] if ref $process eq "ARRAY";
         # $_[0] as first arguments since the others will typically be ignored
-        $result = eval { $command_ref->[PROCESS]->($_[0], $command_ref->[COMMAND], $client_ref, $result) };
+        $result = eval { $process->($_[0], $command_ref->[COMMAND], $client_ref, $result) };
         if ($@) {
             my $err = $@;
             $err =~ s/\s+\z//;
@@ -1370,6 +1409,14 @@ sub _reader {
         $client_ref->{expect_eof} = \$str;
         return;
     }
+
+    # Don't expect any more input
+    $client_ref->{socket}->delete_read;
+    # Drop transaction timeout
+    $client_ref->{timeout} = undef;
+    # That should have been the only pending activity
+    $client_ref->{active} = 0;
+
     $client_ref->success($str);
 }
 
@@ -1386,18 +1433,31 @@ sub process_version {
 }
 
 sub process_features {
-    my ($features) = @_;
+    my ($features, $command_name, $client_ref) = @_;
 
-    my @features = split /,/, $features;
+    my $filter = $client_ref->command_retired->[STATE]{filter};
+    $filter = { map(($_ => 1), @$filter) } if ref $filter eq "ARRAY";
+
     my %features;
-    s/\s+\z//, s/^\s+//, ++$features{$_} for @features;
+    my @features = split /,/, $features;
+    for my $feature (@features) {
+        $feature =~ s/\s+\z//;
+        $feature =~ s/^\s+//;
+        if (!$filter || $filter->{$feature}) {
+            # Count feature in case there is more than one
+            # (shouldn't happen for real devices)
+            ++$features{$feature};
+        } else {
+            $features{$feature} = 0;
+        }
+    }
     return [\%features, \@features, $features];
 }
 
 sub process_devices {
-    my ($devices, $command, $client_ref) = @_;
+    my ($devices, $command_name, $client_ref) = @_;
 
-    my $long = $command eq "host:devices-l";
+    my $long = $command_name eq "host:devices-l";
     my (@devices, %devices);
   DEVICE:
     while ($devices =~ s{^(\S+)[^\S\n]+(device|no device|offline)(?:[^\S\n]+(\S.*\S))?\n}{}) {
@@ -1425,9 +1485,9 @@ sub process_devices {
         die "Could not parse $devices";
     }
     my @tracker;
-    if ($command eq "host:track-devices" && $client_ref->isa(__PACKAGE__)) {
+    if ($command_name eq "host:track-devices" && $client_ref->isa(__PACKAGE__)) {
         my $socket = $client_ref->{socket} ||
-            die "No open socket after '$command'";
+            die "No open socket after '$command_name'";
         # Notice that close doesn't actually close the socket, it just removes
         # the reference. And since we have a copy the socket remains open
         $client_ref->close;

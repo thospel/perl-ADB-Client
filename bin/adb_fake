@@ -77,12 +77,15 @@ my %devices = (
     "10.253.0.13:5555" => [
         "device",
         "product:zerofltexx model:SM_G920F device:zeroflte",
-        [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec)]],
+        [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec zorro)]],
     "52000c4748d6a283" => [
         "device",
         "usb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx",
-        [qw(shell_v2 cmd stat_v2)]],
+        [qw(shell_v2 cmd stat_v2 wabbits)]],
 );
+# my @host_features = qw(shell_v2cmd push_sync stat_v2);
+my @host_features = qw(shell_v2 cmd stat_v2 ls_v2 fixed_push_mkdir apex abb fixed_push_symlink_timestamp abb_exec remount_shell track_app sendrecv_v2 sendrecv_v2_brotli sendrecv_v2_lz4 sendrecv_v2_zstd sendrecv_v2_dry_run_send push_sync);
+my %host_features = map(($_ => 1), @host_features);
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
@@ -174,8 +177,13 @@ sub finish {
     %listeners = ();
 }
 
+sub timed_out {
+    print STDERR "Timed out after $IDLE_TIMEOUT seconds of inactivity\n";
+    finish();
+}
+
 sub unidle {
-    $idle_timeout = timer($IDLE_TIMEOUT, \&finish);
+    $idle_timeout = timer($IDLE_TIMEOUT, \&timed_out);
 }
 
 my $sleeper;
@@ -403,14 +411,16 @@ Listener0 [version]	Start a listener on ::
 Unacceptable		Start a listening port on 127.0.0.1 without accept handler
 Unacceptable6		Start a listening port on ::1 without accept handler
 Unreachable		Start a non-listening port on 127.0.0.1
-Unreachable6		Start a non-listening port on 127.0.0.1
-BlackHole [greeting]	Start a listener on 127.0.0.1 only reads
+Unreachable6		Start a non-listening port on ::1
+BlackHole [greeting]	Start a listener on 127.0.0.1 that only reads
 Closer [n]		Start a listener on 127.0.0.1 that closes after reading n bytes
 Echo			Start a listener on 127.0.0.1 that echoes everything
 Echo6			Start a listener on ::1 that echoes everything
 Quit			Exit the program (not just the control connection)
 Help			Show this help
 Dump			Dump the current state
+
+All listeners behave like independent ADB servers
 ");
             return;
         } elsif ($command eq "") {
@@ -553,6 +563,7 @@ sub transport_type_name {
 
 sub adb_command {
     my ($state, $command) = @_;
+    # print STDERR "Got command '$command'\n";
 
     my $listener = $state->{listener};
     if ($command eq "host:version") {
@@ -566,15 +577,43 @@ sub adb_command {
         # Become a tracker
         $listener->{trackers}{$state->{key}} = $state;
         $state->{on_read} = \&adb_close;
-    } elsif ($command eq "host:features") {
-        my $type = "any";
-        my @devices = $state->{transport} ||
-            $listener->{devices}->transport($type);
+    } elsif ($command eq "host:host-features") {
+        $state->adb_output(OKAY, join "," => @host_features);
+    } elsif ($command =~ m{^host(-usb|-local|-serial:(.*)|):(features|get-serialno|get-state|get-devpath)\z}) {
+        my $type =
+            $1 eq "" ? "any" :
+            $1 eq "-usb" ? "usb" :
+            $1 eq "-local" ? "local" :
+            "";
+        my $serial = $2;
+        my $command = $3;
+
+        my @devices;
+        if ($type eq "") {
+            @devices = $listener->{devices}->get($serial)
+        } else {
+            @devices = $type eq "any" && $state->{transport} ||
+                $listener->{devices}->transport($type);
+        }
+
         if (@devices == 1) {
-            $state->adb_output(OKAY, $devices[0]->features_string);
+            my $device = $devices[0];
+            if ($command eq "features") {
+                $state->adb_output(OKAY, $device->features_string);
+            } elsif ($command eq "get-devpath") {
+                $state->adb_output(OKAY, $device->usb // "unknown");
+            } elsif ($command eq "get-serialno") {
+                $state->adb_output(OKAY, $device->serial);
+            } elsif ($command eq "get-state") {
+                $state->adb_output(OKAY, $device->state);
+            } else {
+                die "Assertion: Unhandled command '$command'";
+            }
         } elsif (@devices) {
             my $name = transport_type_name($type, 0);
             $state->adb_output(FAIL, "more than one $name");
+        } elsif ($type eq "") {
+            $state->adb_output(FAIL, "device '$serial' not found");
         } else {
             my $name = transport_type_name($type, 1);
             $state->adb_output(FAIL, "no $name found");
@@ -636,6 +675,35 @@ sub adb_command {
             # on adb v39 this leaves the connection open, on v41 it closes
             $state->adb_output(FAIL, "device '$serial' not found");
         }
+    } elsif ($command =~ m{^host:connect:(.*?)(?::(\d+))?\z}as) {
+        my $host = $1;
+        my $port = $2 || 5555;
+        # Real ADB does name resolution
+        my $serial = "$host:$port";
+        # For the real adb if it could make the connection but not talk the
+        # device it is added in state "offline".
+        # I didn't bother to implement an example of that.
+        if ($listener->{devices}->get($serial)) {
+            $state->adb_output(FAIL, "already connected to $serial");
+        } elsif ($listener->device_add($serial)) {
+            $state->adb_output(OKAY, "connected to $serial");
+        } else {
+            # Several kinds of other connect and resolution errors are possible
+            $state->adb_output(FAIL, "failed to connect to '$serial': Connection refused");
+        }
+    } elsif ($command =~ m{^host:disconnect:((.*?)(?::(\d+))?)\z}as) {
+        my $name = $1;
+        my $host = $2;
+        my $port = $3 || 5555;
+        # Real ADB does name resolution
+        my $serial = "$host:$port";
+        if (my $device = $listener->{devices}->get($serial)) {
+            $state->adb_output(OKAY, "disconnected $name");
+            # AFTER adb_output since this can close $state
+            $listener->device_drop($device);
+        } else {
+            $state->adb_output(FAIL, "no such device '$serial'");
+        }
     } else {
         if ($command =~ /^host:/) {
             $state->adb_output(FAIL, "unknown host service");
@@ -671,22 +739,7 @@ sub internal {
         } elsif (!$devices{$serial}) {
             $state->adb_output(FAIL, "Unknown device $serial");
         } else {
-            my $device = $listener->{devices}->add($serial);
-
-            $device->offline;
-            my $str = $listener->{devices}->string;
-            $str = sprintf("%04X", length $str) . $str;
-            for my $state (values %{$listener->{trackers}}) {
-                $state->output($str);
-            }
-
-            $device->online;
-            $str = $listener->{devices}->string;
-            $str = sprintf("%04X", length $str) . $str;
-            for my $state (values %{$listener->{trackers}}) {
-                $state->output($str);
-            }
-
+            $listener->device_add($serial);
             # Send result
             $state->adb_output(OKAY, "Added");
         }
@@ -694,30 +747,10 @@ sub internal {
         # Fake command: Drop device
         my $serial = $1;
         if (my $device = $listener->{devices}->get($serial)) {
-            # Take device offline
-            $device->offline;
-            my $str = $listener->{devices}->string;
-            $str = sprintf("%04X", length $str) . $str;
-            for my $state (values %{$listener->{trackers}}) {
-                $state->output($str);
-            }
-
-            # Drop device
-            $listener->{devices}->drop($serial);
-            $str = $listener->{devices}->string;
-            $str = sprintf("%04X", length $str) . $str;
-            for my $state (values %{$listener->{trackers}}) {
-                $state->output($str);
-            }
-
             # Send result
             $state->adb_output(OKAY, "Dropped");
-
-            # Close all acepted connections that use this device as transport
-            # Last because this can close our own connection
-            for my $state (values %{$listener->{accepted}}) {
-                $state->adb_close if $state->{transport} == $device;
-            }
+            # AFTER adb_output since this can close $state
+            $listener->device_drop($device);
         } else {
             $state->adb_output(FAIL, "No such device");
         }
@@ -739,6 +772,56 @@ sub DESTROY {
         $listener->{socket}->delete_read;
 
     --$listening;
+}
+
+sub device_add {
+    my ($listener, $serial) = @_;
+
+    my $device = $listener->{devices}->add($serial) || return undef;
+    if ($device->state ne "offline") {
+        $device->offline;
+        my $str = $listener->{devices}->string;
+        $str = sprintf("%04X", length $str) . $str;
+        for my $state (values %{$listener->{trackers}}) {
+            $state->output($str);
+        }
+    }
+
+    $device->online;
+    my $str = $listener->{devices}->string;
+    $str = sprintf("%04X", length $str) . $str;
+    for my $state (values %{$listener->{trackers}}) {
+        $state->output($str);
+    }
+    return $device;
+}
+
+# Make sure to call this last if it can drop your own connection
+sub device_drop {
+    my ($listener, $device) = @_;
+
+    # Take device offline
+    if ($device->state ne "offline") {
+        $device->offline;
+        my $str = $listener->{devices}->string;
+        $str = sprintf("%04X", length $str) . $str;
+        for my $state (values %{$listener->{trackers}}) {
+            $state->output($str);
+        }
+    }
+
+    # Drop device
+    $listener->{devices}->drop($device->{serial});
+    my $str = $listener->{devices}->string;
+    $str = sprintf("%04X", length $str) . $str;
+    for my $state (values %{$listener->{trackers}}) {
+        $state->output($str);
+    }
+
+    # Close all acepted connections that use this device as transport
+    for my $state (values %{$listener->{accepted}}) {
+        $state->adb_close if $state->{transport} == $device;
+    }
 }
 
 sub close {
@@ -780,6 +863,10 @@ sub serial {
     return shift->{serial};
 }
 
+sub state {
+    return shift->{state};
+}
+
 sub offline {
     my ($device) = @_;
 
@@ -813,7 +900,7 @@ sub features_string {
 sub usb {
     my ($device) = @_;
 
-    return $device->{description} =~ m{(?:^| )usb:(\S+)} ? $1 : undef;
+    return $device->{description} =~ m{(?:^| )(usb:\S+)} ? $1 : undef;
 }
 
 sub DESTROY {
@@ -837,7 +924,7 @@ sub add {
     my ($devices, $serial) = @_;
 
     my $device = Device->new(++$devices->{transport_ids}, $serial,
-                             @{$devices{$serial}});
+                             @{$devices{$serial} || return undef});
     die "Duplicate device $serial" if $devices->{devices}{$serial};
     $devices->{devices}{$serial} = $device;
     return $device;

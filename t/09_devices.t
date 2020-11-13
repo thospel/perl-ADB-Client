@@ -3,7 +3,6 @@
 # `make test'. After `make install' it should work as `perl 09_devices.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
-
 # Test some simple commands
 
 use strict;
@@ -13,7 +12,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 72;
+use Test::More tests => 135;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -25,6 +24,59 @@ my $port = adb_start();
 my $port_10 = adb_version(10);
 
 my ($client, @result);
+my %serial_result = (
+    features => {
+        usb => [{
+            "cmd" => 1,
+            "shell_v2" => 1,
+            "stat_v2" => 1,
+            "wabbits" => 1,
+        }, [
+            "shell_v2",
+            "cmd",
+            "stat_v2",
+            "wabbits",
+        ], "shell_v2,cmd,stat_v2,wabbits"],
+        local => [
+            {
+                "abb" => 1,
+                "abb_exec" => 1,
+                "apex" => 1,
+                "cmd" => 1,
+                "fixed_push_mkdir" => 1,
+                "fixed_push_symlink_timestamp" => 1,
+                "shell_v2" => 1,
+                "stat_v2" => 1,
+                "zorro"	=> 1,
+            },
+            [
+                "fixed_push_mkdir",
+                "shell_v2",
+                "apex",
+                "stat_v2",
+                "abb",
+                "fixed_push_symlink_timestamp",
+                "cmd",
+                "abb_exec",
+                "zorro",
+            ],
+            "fixed_push_mkdir,shell_v2,apex,stat_v2,abb,fixed_push_symlink_timestamp,cmd,abb_exec,zorro"
+        ],
+    },
+    serial => {
+        usb => ["52000c4748d6a283"],
+        local => ["10.253.0.13:5555"],
+    },
+    state => {
+        usb => ["device"],
+        local => ["device"],
+    },
+    device_path => {
+        usb => ["usb:1-1.2"],
+        local => ["unknown"],
+    },
+);
+my @serial_commands = sort keys %serial_result;
 
 $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port_10]);
 
@@ -61,9 +113,56 @@ is_deeply(\@result, [
     },
     ["10.253.0.13:5555", "52000c4748d6a283"],
     "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:1\n52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2\n"],
-          "Expected devices long result");
+          "Expected devices long result") || dumper(\@result);
 
-my $client2 = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port_10, blocking => 0]);
+is($client->device_disconnect("10.253.0.13"), "disconnected 10.253.0.13",
+   "Disconnect device");
+eval { $client->device_disconnect("10.253.0.13") };
+like($@, qr{^\Qno such device '10.253.0.13:5555'},
+     "Cannot do a double disconnect");
+
+# Check that device is gone
+@result = $client->devices;
+is_deeply(\@result, [
+  {
+    "52000c4748d6a283" => "device"
+  },
+  [
+    "52000c4748d6a283"
+  ],
+  "52000c4748d6a283\tdevice\n"
+], "Expected devices result") || dumper(\@result);
+
+is($client->device_connect("10.253.0.13"), "connected to 10.253.0.13:5555",
+   "Connect device");
+eval { $client->device_connect("10.253.0.13:5555") };
+like($@, qr{^\Qalready connected to 10.253.0.13:5555 at },
+     "Cannot do a double connect");
+
+eval { $client->device_disconnect("52000c4748d6a283") };
+like($@, qr{^\Qno such device '52000c4748d6a283:5555' at},
+     "Cannot disconnect an usb device");
+
+eval { $client->device_connect("10.253.0.8") };
+like($@, qr{^\Qfailed to connect to '10.253.0.8:5555': Connection refused at },
+     "Cannot connect to something unreachable");
+
+# Check that device is back
+@result = $client->devices;
+is_deeply(\@result, [
+  {
+    "10.253.0.13:5555" => "device",
+    "52000c4748d6a283" => "device"
+  },
+  [
+    "10.253.0.13:5555",
+    "52000c4748d6a283"
+  ],
+  "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
+], "Expected devices long result") || dumper(\@result);
+
+my $client2 = new_ok("ADB::Client" => [host => "127.0.0.1",
+                                       port => $port_10, blocking => 0]);
 my $callback = sub {
     push @result, [shift->connected, @_];
 };
@@ -101,8 +200,32 @@ $tracker->track(sub { shift; push @tracked, [@_] });
 eval { $tracker->track(sub {}) };
 like($@, qr{^Already tracking at }, "Cannot do a double track");
 
-eval { $client->features };
-like($@, qr{^more than one device/emulator at }, "Cannot get features from more than 1 device");
+my $host_features = $client->host_features;
+is_deeply($host_features, {
+    "abb" => 1,
+    "abb_exec" => 1,
+    "apex" => 1,
+    "cmd" => 1,
+    "fixed_push_mkdir" => 1,
+    "fixed_push_symlink_timestamp" => 1,
+    "ls_v2" => 1,
+    "push_sync" => 1,
+    "remount_shell" => 1,
+    "sendrecv_v2" => 1,
+    "sendrecv_v2_brotli" => 1,
+    "sendrecv_v2_dry_run_send" => 1,
+    "sendrecv_v2_lz4" => 1,
+    "sendrecv_v2_zstd" => 1,
+    "shell_v2" => 1,
+    "stat_v2" => 1,
+    "track_app" => 1
+}, "Get just the host_features hash") || dumper($host_features);
+
+for my $command (@serial_commands) {
+    eval { $client->$command };
+    like($@, qr{^more than one device/emulator at },
+         "Cannot get '$command' from more than 1 device");
+}
 
 eval { $client->transport_any };
 like($@, qr{^\Qmore than one device/emulator at },
@@ -120,121 +243,98 @@ eval { $client->tport_tcp };
 like($@, qr{^\Qmore than one device/emulator at},
      "Multiple devices for tport tcp");
 
-is($client->transport_usb, "", "Can transport usb");
-@result = $client->features;
-is_deeply(\@result, [{
-    "cmd" => 1,
-    "shell_v2" => 1,
-    "stat_v2" => 1
-}, [
-    "shell_v2",
-    "cmd",
-    "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+for my $command (@serial_commands) {
+    is($client->transport_usb, "", "Can transport usb");
+    @result = $client->$command;
+    is_deeply(\@result, $serial_result{$command}{usb},
+              "Can get $command from single device") || dumper(\@result);
+}
 
-is($client->transport_local, "", "Can transport local");
-@result = $client->features;
-is_deeply(\@result, [
-    {
-        "abb" => 1,
-        "abb_exec" => 1,
-        "apex" => 1,
-        "cmd" => 1,
-        "fixed_push_mkdir" => 1,
-        "fixed_push_symlink_timestamp" => 1,
-        "shell_v2" => 1,
-        "stat_v2" => 1
-    },
-    [
-        "fixed_push_mkdir",
-        "shell_v2",
-        "apex",
-        "stat_v2",
-        "abb",
-        "fixed_push_symlink_timestamp",
-        "cmd",
-        "abb_exec"
-    ],
-    "fixed_push_mkdir,shell_v2,apex,stat_v2,abb,fixed_push_symlink_timestamp,cmd,abb_exec"
-], "Can get features from single device") || dumper(\@result);
+for my $command (@serial_commands) {
+    is($client->transport_local, "", "Can transport local");
+    @result = $client->$command;
+    is_deeply(\@result, $serial_result{$command}{local}, "Can get $command from single device") || dumper(\@result);
+}
 
-is($client->transport("52000c4748d6a283"), "", "Connect by serial");
-@result = $client->features;
-is_deeply(\@result, [{
-    "cmd" => 1,
-    "shell_v2" => 1,
-    "stat_v2" => 1
-}, [
-    "shell_v2",
-    "cmd",
-    "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+for my $command (@serial_commands) {
+    is($client->transport_serial("52000c4748d6a283"), "", "Connect by serial");
+    @result = $client->$command;
+    is_deeply(\@result, $serial_result{$command}{usb},
+              "Can get $command from single device") || dumper(\@result);
+}
 
-is($client->tport("52000c4748d6a283"), 2, "Connect by serial");
-@result = $client->features;
-is_deeply(\@result, [{
-    "cmd" => 1,
-    "shell_v2" => 1,
-    "stat_v2" => 1
-}, [
-    "shell_v2",
-    "cmd",
-    "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+# Try a filtered features by HASH, try connecting with tport serial
+is($client->tport_serial("52000c4748d6a283"), 2, "Connect by serial");
+@result = $client->features(filter => $host_features);
+is_deeply(\@result,
+          [{
+              "cmd" => 1,
+              "shell_v2" => 1,
+              "stat_v2" => 1,
+              "wabbits"	=> 0,
+          }, [
+              "shell_v2",
+              "cmd",
+              "stat_v2",
+              "wabbits",
+          ], "shell_v2,cmd,stat_v2,wabbits"],
+          "Can get filtered features from single device") || dumper(\@result);
 
+# Try a filtered features by ARRAY, try connecting with tport usb
 is($client->tport_usb, 2, "Can tport usb");
-@result = $client->features;
+@result = $client->features(filter => [keys %$host_features]);
 is_deeply(\@result, [{
     "cmd" => 1,
     "shell_v2" => 1,
-    "stat_v2" => 1
+    "stat_v2" => 1,
+    "wabbits"	=> 0,
 }, [
     "shell_v2",
     "cmd",
-    "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+    "stat_v2",
+    "wabbits",
+], "shell_v2,cmd,stat_v2,wabbits"], "Can get features from single device") || dumper(\@result);
 
-is($client->tport_local, 1, "Can tport local");
-@result = $client->features;
-is_deeply(\@result, [
-    {
-        "abb" => 1,
-        "abb_exec" => 1,
-        "apex" => 1,
-        "cmd" => 1,
-        "fixed_push_mkdir" => 1,
-        "fixed_push_symlink_timestamp" => 1,
-        "shell_v2" => 1,
-        "stat_v2" => 1
-    },
-    [
-        "fixed_push_mkdir",
-        "shell_v2",
-        "apex",
-        "stat_v2",
-        "abb",
-        "fixed_push_symlink_timestamp",
-        "cmd",
-        "abb_exec"
-    ],
-    "fixed_push_mkdir,shell_v2,apex,stat_v2,abb,fixed_push_symlink_timestamp,cmd,abb_exec"
-], "Can get features from single device") || dumper(\@result);
+# Use tport to get to command
+for my $command (@serial_commands) {
+    is($client->tport_local, 3, "Can tport local");
+    @result = $client->$command;
+    is_deeply(\@result, $serial_result{$command}{local},
+              "Can get $command from single device") || dumper(\@result);
+}
 
+for my $command (@serial_commands) {
+    # Can get directly from usb/local
+    for my $type (qw(usb local)) {
+        my $c = "${command}_$type";
+        @result = $client->$c;
+        is_deeply(\@result, $serial_result{$command}{$type},
+                  "Can get $c from single device") || dumper(\@result);
+    }
+    # Can get directly from serial
+    my $c = "${command}_serial";
+    @result = $client->$c("52000c4748d6a283");
+    is_deeply(\@result, $serial_result{$command}{usb},
+              "Can get $c from single device") || dumper(\@result);
+}
+
+# Reduce to one devices
 $client->device_drop("10.253.0.13:5555");
-eval { $client->transport("10.253.0.13:5555") };
+
+eval { $client->transport_serial("10.253.0.13:5555") };
 like($@, qr{^\Qdevice '10.253.0.13:5555' not found at},
      "Connect to non-existing device");
 
-@result = $client->features;
-is_deeply(\@result, [{
-    "cmd" => 1,
-    "shell_v2" => 1,
-    "stat_v2" => 1
-}, [
-    "shell_v2",
-    "cmd",
-    "stat_v2"
-], "shell_v2,cmd,stat_v2"], "Can get features from single device") || dumper(\@result);
+eval { $client->tport_serial("10.253.0.13:5555") };
+like($@, qr{^\Qdevice '10.253.0.13:5555' not found at},
+     "Connect to non-existing device");
+
+# Can get device properties without setting a transport
+for my $command (@serial_commands) {
+    @result = $client->$command;
+    is_deeply(\@result, $serial_result{$command}{usb},
+              "Can get $command from single device") || dumper(\@result);
+}
 
 is($client->transport_any, "", "Can transport any");
 is($client->transport_tcp, "", "Can transport tcp");
@@ -242,22 +342,37 @@ is($client->transport_usb, "", "Can transport usb");
 eval { $client->transport_local };
 like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
 
-is($client->device_drop("52000c4748d6a283"), "Dropped", "Drop device");
-eval { $client->features };
-like($@, qr{^no devices/emulators found at }, "Cannot get features without devices");
+is($client->tport_any, 2, "Can tport any");
+is($client->tport_tcp, 2, "Can tport tcp");
+is($client->tport_usb, 2, "Can tport usb");
+eval { $client->tport_local };
+like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
 
-eval { $client->transport_any };
+# No more devices
+is($client->device_drop("52000c4748d6a283"), "Dropped", "Drop device");
+
+for my $command (@serial_commands) {
+    eval { $client->$command };
+    like($@, qr{^no devices/emulators found at }, "Cannot get $command without devices");
+}
+
+for my $transport (qw(transport_any transport_tcp tport_any tport_tcp)) {
+eval { $client->$transport };
 like($@, qr{^\Qno devices/emulators found at },
-     "No devices for transport any");
-eval { $client->transport_tcp };
-like($@, qr{^\Qno devices/emulators found at},
-     "No devices for transport tcp");
-eval { $client->transport_local };
+     "No devices for $transport");
+}
+
+for my $transport (qw(transport_usb tport_usb)) {
+eval { $client->$transport };
+like($@, qr{^\Qno devices found at },
+     "No devices for $transport");
+}
+
+for my $transport (qw(transport_local tport_local)) {
+eval { $client->$transport };
 like($@, qr{^\Qno emulators found at },
-     "No devices for transport any");
-eval { $client->transport_usb };
-like($@, qr{^\Qno devices found at},
-     "No devices for transport tcp");
+     "No devices for $transport");
+}
 
 is($client->device_add("10.253.0.13:5555"), "Added", "Add device");
 $client->kill(blocking => 0);

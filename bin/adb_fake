@@ -43,7 +43,7 @@ use POSIX qw(_exit);
 use Errno qw(EAGAIN EINTR EWOULDBLOCK);
 
 use ADB::Client::Events qw(mainloop timer event_init);
-use ADB::Client::Utils qw(display_string ip_port_from_addr IPV6);
+use ADB::Client::Utils qw(info display_string ip_port_from_addr IPV6);
 
 use constant {
     CONTROL	=> 0,	# Control port
@@ -69,8 +69,10 @@ die "Could not parse your command line. Try $0 -h\n" unless
                "reply-fd=o"	=> \my $reply_fd,
                "acceptfd=o"	=> \my $accept_fd,
                # Non standard options
-               "timeout|t=o"	=> \$IDLE_TIMEOUT,
+               "verbose|v!"	=> \my $verbose,
+               "timeout|t=o"	=> \my $idle_timeout,
            );
+$idle_timeout //= $verbose ? 1200 : $IDLE_TIMEOUT;
 
 # Little set of model devices
 my %devices = (
@@ -90,7 +92,7 @@ my %host_features = map(($_ => 1), @host_features);
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
 my $accepted = my $listening = my $devices = 0;
-my ($finish, $idle_timeout, %listeners, %specials, @sockets);
+my ($finish, $idle_timer, %listeners, %specials, @sockets);
 
 our $BLOCK_SIZE = 65536;
 # Default ADB version for plain adb_fake
@@ -150,7 +152,7 @@ sub add_listener {
         socket		=> $socket,
         port		=> $port,
         accepted	=> {},
-        trackers	=> {},
+        device_events	=> {},
         type		=> $type,
         arg		=> $arg,
         $type == LISTENER ? (version => $arg // $ADB_VERSION) : (),
@@ -171,19 +173,20 @@ sub add_listener {
 }
 
 sub finish {
+    info("finish") if $verbose;
     $finish = 1;
-    $idle_timeout = undef;
+    $idle_timer = undef;
     %specials = ();
     %listeners = ();
 }
 
 sub timed_out {
-    print STDERR "Timed out after $IDLE_TIMEOUT seconds of inactivity\n";
+    print STDERR "Timed out after $idle_timeout seconds of inactivity\n";
     finish();
 }
 
 sub unidle {
-    $idle_timeout = timer($IDLE_TIMEOUT, \&timed_out);
+    $idle_timer = timer($idle_timeout, \&timed_out);
 }
 
 my $sleeper;
@@ -437,7 +440,7 @@ package ADB;
 use Scalar::Util qw(refaddr weaken);
 use ADB::Client::Utils qw(callers);
 
-use ADB::Client::Utils qw(display_string);
+use ADB::Client::Utils qw(display_string info);
 
 our @ISA = qw(Accepted);
 
@@ -480,7 +483,7 @@ sub adb_close {
 
     # print STDERR "ADB CLOSE ", callers();
     delete $state->{listener}{accepted}{$state->{key}};
-    delete $state->{listener}{trackers}{$state->{key}};
+    delete $state->{listener}{device_events}{$state->{key}};
 }
 
 sub adb_discard {
@@ -563,7 +566,7 @@ sub transport_type_name {
 
 sub adb_command {
     my ($state, $command) = @_;
-    # print STDERR "Got command '$command'\n";
+    info("Got command '$command'") if $verbose;
 
     my $listener = $state->{listener};
     if ($command eq "host:version") {
@@ -575,8 +578,25 @@ sub adb_command {
     } elsif ($command eq "host:track-devices") {
         $state->adb_output(OKAY, $listener->{devices}->string, 1);
         # Become a tracker
-        $listener->{trackers}{$state->{key}} = $state;
+        $state->{transport} = 0;
+        $listener->{device_events}{$state->{key}} = $state;
+        $state->{on_device_event} = \&tracker,
         $state->{on_read} = \&adb_close;
+    } elsif ($command eq "host:wait-for-any-device") {
+        $state->output("OKAY");
+        my @devices = $listener->{devices}->all;
+        if (@devices > 1) {
+            $state->adb_output(FAIL, "more than one device/emulator");
+        } elsif (@devices == 1) {
+            $state->adb_output(UNCOUNTED, "");
+        } else {
+            # No devices. Become a waiter
+            $state->{transport} = 0;
+            $listener->{device_events}{$state->{key}} = $state;
+            $state->{on_device_event} = \&waiter,
+            # Currently don't have a strategy for read. Works badly for now
+            # $state->{socket}->delete_read;
+        }
     } elsif ($command eq "host:host-features") {
         $state->adb_output(OKAY, join "," => @host_features);
     } elsif ($command =~ m{^host(-usb|-local|-serial:(.*)|):(features|get-serialno|get-state|get-devpath)\z}) {
@@ -590,7 +610,7 @@ sub adb_command {
 
         my @devices;
         if ($type eq "") {
-            @devices = $listener->{devices}->get($serial)
+            @devices = $listener->{devices}->get($serial) // ();
         } else {
             @devices = $type eq "any" && $state->{transport} ||
                 $listener->{devices}->transport($type);
@@ -741,14 +761,14 @@ sub internal {
         } else {
             $listener->device_add($serial);
             # Send result
-            $state->adb_output(OKAY, "Added");
+            $state->adb_output(OKAY, "Added '$serial'", 1);
         }
     } elsif (($serial) = $command =~ m{^device_drop:(.*)\z}s) {
         # Fake command: Drop device
         my $serial = $1;
         if (my $device = $listener->{devices}->get($serial)) {
             # Send result
-            $state->adb_output(OKAY, "Dropped");
+            $state->adb_output(OKAY, "Dropped '$serial'", 1);
             # AFTER adb_output since this can close $state
             $listener->device_drop($device);
         } else {
@@ -757,6 +777,35 @@ sub internal {
     } else {
         $command = display_string($command);
         $state->adb_output(FAIL, "unknown internal command $command");
+    }
+}
+
+# For host:track-devices
+sub tracker {
+    my ($state, $action, $device) = @_;
+
+    #if ($action eq "add") {
+    #} elsif ($action eq "change") {
+    #} elsif ($action eq "drop") {
+    #} else {
+    #    die "Unknown action '$action'";
+    #}
+    my $listener = $state->{listener};
+    my $str = $listener->{devices}->string;
+    $str = sprintf("%04X", length $str) . $str;
+    $state->output($str);
+}
+
+# For host:wait-for-any-device
+sub waiter {
+    my ($state, $action, $device) = @_;
+
+    if ($device->state eq "device" &&
+        ($action eq "change" || $action eq "add")) {
+        my $listener = $state->{listener};
+        delete $listener->{device_events}{$state->{key}};
+        $state->{on_device_event} = undef;
+        $state->adb_output(UNCOUNTED, "");
     }
 }
 
@@ -778,20 +827,14 @@ sub device_add {
     my ($listener, $serial) = @_;
 
     my $device = $listener->{devices}->add($serial) || return undef;
-    if ($device->state ne "offline") {
-        $device->offline;
-        my $str = $listener->{devices}->string;
-        $str = sprintf("%04X", length $str) . $str;
-        for my $state (values %{$listener->{trackers}}) {
-            $state->output($str);
-        }
+    $device->offline if $device->state ne "offline";
+    for my $state (values %{$listener->{device_events}}) {
+        $state->{on_device_event}->($state, "add", $device);
     }
 
     $device->online;
-    my $str = $listener->{devices}->string;
-    $str = sprintf("%04X", length $str) . $str;
-    for my $state (values %{$listener->{trackers}}) {
-        $state->output($str);
+    for my $state (values %{$listener->{device_events}}) {
+        $state->{on_device_event}->($state, "change", $device);
     }
     return $device;
 }
@@ -803,19 +846,15 @@ sub device_drop {
     # Take device offline
     if ($device->state ne "offline") {
         $device->offline;
-        my $str = $listener->{devices}->string;
-        $str = sprintf("%04X", length $str) . $str;
-        for my $state (values %{$listener->{trackers}}) {
-            $state->output($str);
+        for my $state (values %{$listener->{device_events}}) {
+            $state->{on_device_event}->($state, "change", $device);
         }
     }
 
     # Drop device
     $listener->{devices}->drop($device->{serial});
-    my $str = $listener->{devices}->string;
-    $str = sprintf("%04X", length $str) . $str;
-    for my $state (values %{$listener->{trackers}}) {
-        $state->output($str);
+    for my $state (values %{$listener->{device_events}}) {
+        $state->{on_device_event}->($state, "drop", $device);
     }
 
     # Close all acepted connections that use this device as transport
@@ -976,7 +1015,7 @@ sub transport {
 
 package main;
 event_init();
-$idle_timeout = unidle();
+$idle_timer = unidle();
 eval { main() };
 if ($@) {
     select(STDERR);

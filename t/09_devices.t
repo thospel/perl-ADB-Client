@@ -12,7 +12,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 135;
+use Test::More tests => 134;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -318,6 +318,9 @@ for my $command (@serial_commands) {
               "Can get $c from single device") || dumper(\@result);
 }
 
+#eval { $client->wait_device };
+#like($@, qr{^\Qab}, "Waiting while multiple devices is an error");
+
 # Reduce to one devices
 $client->device_drop("10.253.0.13:5555");
 
@@ -349,7 +352,8 @@ eval { $client->tport_local };
 like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
 
 # No more devices
-is($client->device_drop("52000c4748d6a283"), "Dropped", "Drop device");
+is($client->device_drop("52000c4748d6a283"), "Dropped '52000c4748d6a283'",
+   "Drop device");
 
 for my $command (@serial_commands) {
     eval { $client->$command };
@@ -374,7 +378,8 @@ like($@, qr{^\Qno emulators found at },
      "No devices for $transport");
 }
 
-is($client->device_add("10.253.0.13:5555"), "Added", "Add device");
+is($client->device_add("10.253.0.13:5555"), "Added '10.253.0.13:5555'",
+   "Add device");
 $client->kill(blocking => 0);
 
 mainloop();
@@ -564,13 +569,20 @@ is_deeply(\@tracked, [
         }
     }
 ], "Fourth event") || dumper(\@tracked);
-is($client->device_add("10.253.0.13:5555", blocking => 1),
-   "Added", "Add device");
+
+# Try to create a situation where the first device add event is already
+# written by the time the "host:track-devices" response comes back
+my @tracked2;
+# $client2->transport_usb(blocking => 0);
+$client2->devices_track(blocking => 0,
+                        callback => sub { shift; push @tracked2, [@_] });
+$client->device_add("10.253.0.13:5555", blocking => 0);
+is($client->device_add("52000c4748d6a283", blocking => 1), "Added '52000c4748d6a283'", "Add two devices");
 my $tracked = scalar $tracker->wait;
 is_deeply($tracked, { "10.253.0.13:5555" => "offline" }, "Scalar context") ||
     dumper($tracked);
-is($client->device_add("52000c4748d6a283", blocking => 1),
-   "Added", "Add device");
+#is($client->device_add("52000c4748d6a283", blocking => 1),
+#   "Added", "Add device");
 $tracker->track(sub { die "Boem" if $_[4] =~ /52000c4748d6a283/});
 eval { mainloop() };
 like($@, qr{^\QBoem at }, "Error during callback");

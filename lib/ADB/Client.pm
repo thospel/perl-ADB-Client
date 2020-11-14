@@ -181,43 +181,52 @@ __PACKAGE__->add_commands();
 
 # Convenience functions
 sub transport_usb {
-    my $client = shift;
-    return $client->_transport("usb", @_);
+    return shift->_transport("usb", @_);
 }
 
 sub transport_tcp {
-    my $client = shift;
-    return $client->_transport("tcp", @_);
+    return shift->_transport("tcp", @_);
 }
 
 sub transport_any {
-    my $client = shift;
-    return $client->_transport("any", @_);
+    return shift->_transport("any", @_);
 }
 
 sub transport_local {
-    my $client = shift;
-    return $client->_transport("local", @_);
+    return shift->_transport("local", @_);
 }
 
 sub tport_usb {
-    my $client = shift;
-    return $client->_tport("usb", @_);
+    return shift->_tport("usb", @_);
 }
 
 sub tport_tcp {
-    my $client = shift;
-    return $client->_tport("tcp", @_);
+    return shift->_tport("tcp", @_);
 }
 
 sub tport_any {
-    my $client = shift;
-    return $client->_tport("any", @_);
+    return shift->_tport("any", @_);
 }
 
 sub tport_local {
-    my $client = shift;
-    return $client->_tport("local", @_);
+    return shift->_tport("local", @_);
+}
+
+# The wait functions are mostly used to wait for a device
+sub wait_device {
+    return shift->wait("device", @_);
+}
+
+sub wait_serial_device {
+    return shift->wait_serial("device", @_);
+}
+
+sub wait_usb_device {
+    return shift->wait_usb("device", @_);
+}
+
+sub wait_local_device {
+    return shift->wait_local("device", @_);
 }
 
 1;

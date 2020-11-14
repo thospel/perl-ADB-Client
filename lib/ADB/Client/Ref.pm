@@ -14,7 +14,7 @@ use Storable qw(dclone);
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
 use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
-    qw(info caller_info dumper adb_check_response display_string
+    qw(info caller_info callers dumper adb_check_response display_string
        ip_port_from_addr clocktime_running
        FAILED BAD_ADB ASSERTION INFINITY
        $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
@@ -23,8 +23,8 @@ use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(command_check_response
                             COMMAND_NAME COMMAND FLAGS PROCESS CODE EXPECT_EOF
-                            MAYBE_EOF SERIAL COMMAND_REF CALLBACK ARGUMENTS
-                            STATE);
+                            MAYBE_EOF SERIAL TRANSPORT COMMAND_REF CALLBACK
+                            ARGUMENTS STATE);
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
@@ -55,6 +55,7 @@ use constant {
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
     VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
     KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
+    DEVICE_WAIT2=> [device_wait2=> "host:wait-for-any-device", 0, EXPECT_EOF],
 };
 
 our @COMMANDS;
@@ -65,8 +66,6 @@ our @BUILTINS = (
     MARKER,
     CONNECT,
     SPAWN,
-    VERSION,
-    KILL,
     # _close is queued close. Used for make test
     # Shouldn't be useful to a normal user since it does nothing for the
     # commands that autoclose and loses state for the ones that leave the
@@ -76,6 +75,8 @@ our @BUILTINS = (
     [_close		=> SPECIAL, \&_closer],
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
+    VERSION,
+    KILL,
     [features		=> "host:features", -1, EXPECT_EOF | SERIAL,
      [\&process_features, "filter"]],
     [host_features	=> "host:host-features", -1, EXPECT_EOF,
@@ -90,11 +91,28 @@ our @BUILTINS = (
     [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
     [_tport		=> "host:tport:%s", 8, 0, \&process_tport],
     [tport_serial	=> "host:tport:serial:%s", 8, 0, \&process_tport],
-    [remount		=> "remount:", INFINITY, EXPECT_EOF],
-    [unroot		=> "unroot:", INFINITY, EXPECT_EOF],
-    [root		=> "root:", INFINITY, EXPECT_EOF],
-    ["device_connect"	=> "host:connect:%s", -1, EXPECT_EOF],
-    ["device_disconnect"=> "host:disconnect:%s", -1, EXPECT_EOF],
+    [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
+    [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],
+    [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF],
+    [device_connect	=> "host:connect:%s", -1, EXPECT_EOF],
+    [device_disconnect	=> "host:disconnect:%s", -1, EXPECT_EOF],
+    # all the wait-for-device variants strictly have a SERIAL version
+    # But only host-serial:<serial>:wait-for-<transport> does anything special
+    # and it recognizes that serial irrespective of the <transport>
+    [wait		=> "host:wait-for-any-%s", 0, 0, [\&process_device_wait, "timeout"]],
+    [wait_serial	=> 'host-serial:%2$s:wait-for-any-%1$s', 0, 0, [\&process_device_wait, "timeout"]],
+    [wait_usb	=> "host:wait-for-usb-%s", 0, 0, [\&process_device_wait, "timeout"]],
+    [wait_local	=> "host:wait-for-local-%s", 0, 0, [\&process_device_wait, "timeout"]],
+    [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [sideload		=> "sideload:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [device_reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
+    # [device_reconnect_device	=> "reconnect", 0, TRANSPORT|EXPECT_EOF],
+    # [reconnect_offline	=> "host:reconnect-offline", 0, EXPECT_EOF],
+    # [usb	=> "usb:", 0, TRANSPORT|EXPECT_EOF],
+    # [tcpip	=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [jdwp	=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
+    # [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
+    # [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
 );
 
 my $objects = 0;
@@ -175,6 +193,7 @@ sub new {
         post_activate	=> undef,
         result		=> undef,
         starter		=> undef,
+        $DEBUG ? (callers => callers()) : (),
     }, $class;
     ++$objects;
     weaken($client_ref->{client});
@@ -273,10 +292,8 @@ sub connected {
 }
 
 sub callback_blocking {
-    my ($client_ref) = @_;
-
     croak "Already have a blocking command pending" if
-        defined $client_ref->{result};
+        defined shift->{result};
     my $loop_levels = loop_levels();
     return sub {
         my $client_ref = $ {shift()};
@@ -307,12 +324,12 @@ sub wait : method {
             die $err if
                 @{$client_ref->{commands}} &&
                 $client_ref->{commands}[0][COMMAND_REF] == FATAL;
-            $client_ref->fatal("Waiting for command without expecting result after $@");
+            $client_ref->fatal("Waiting for command without expecting result after $err");
         }
         if ($client_ref->{result}) {
             # We already had a result. In case of an error we could report it
             # here, but the thing crashing mainloop is probably more important
-            $client_ref->fatal("Result while commands after $@") if
+            $client_ref->fatal("Result while commands after $err") if
                 @{$client_ref->{commands}};
             $client_ref->close;
         } else {
@@ -412,8 +429,13 @@ sub command_get {
 
     my $command = $COMMANDS[$index] ||
         croak "No command at index '$index'";
+    my $command_name = $command->[COMMAND_NAME] ||
+        die("Assertion: No COMMAND_NAME");
+    die "No COMMAND in command '$command_name'" if !defined $command->[COMMAND];
+    croak "Invalid format in command '$command_name'" if
+        $command->[COMMAND] =~ /%(?!(?:\d+\$)?s)/a;
     return
-        $command->[COMMAND_NAME] || die("Assertion: No COMMAND_NAME"),
+        $command_name,
         $command->[COMMAND] =~ tr/%//,
         $command->[COMMAND] eq SPECIAL;
 }
@@ -641,7 +663,7 @@ sub success {
             unshift @{$client_ref->{commands}}, $command;
             ref $result eq "" ||
                 $client_ref->fatal("Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
-            $client_ref->error($result);
+            $client_ref->error($result || "Unknown error") if defined $result;
             return;
         }
     }
@@ -1491,13 +1513,28 @@ sub process_devices {
         # Notice that close doesn't actually close the socket, it just removes
         # the reference. And since we have a copy the socket remains open
         $client_ref->close;
-        @tracker = ADB::Client::Tracker->new($socket, \%devices, $client_ref->command_retired->ref, $client_ref->{block_size});
+        @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_retired->ref, $client_ref->{block_size}, \%devices);
     }
     return [\%devices, \@devices, shift, @tracker];
 }
 
 sub process_tport {
     return [unpack("q", shift)];
+}
+
+sub process_device_wait {
+    my ($devices, $command_name, $client_ref, $result) = @_;
+
+    my $command = $client_ref->command_retired;
+    $command->[COMMAND_REF] = DEVICE_WAIT2;
+    my $state = $command->[STATE];
+    $client_ref->{timeout} = timer(
+            $state->{timeout} // $client_ref->{transaction_timeout},
+            sub { $client_ref->_transaction_timed_out });
+    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+    $client_ref->{sent} = 1;
+    $client_ref->{active} = 1;
+    return undef;
 }
 
 1;

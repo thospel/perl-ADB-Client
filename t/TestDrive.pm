@@ -44,8 +44,8 @@ use ADB::Client::Command qw(EXPECT_EOF);
 # We tested in t/02_adb_client (with BAIL_OUT) that we can add these commands
 ADB::Client->add_command(["failer" => "Wee", 0, EXPECT_EOF]);
 ADB::Client->add_command(["echo" => "internal:echo:%s", -1, EXPECT_EOF]);
-ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, EXPECT_EOF]);
-ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, EXPECT_EOF]);
+ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 0]);
+ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, 0]);
 ADB::Client->add_command(["pid" => "internal:pid", -1, EXPECT_EOF]);
 ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { return [ split /\0/, shift]}]);
 

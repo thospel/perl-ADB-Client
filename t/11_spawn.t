@@ -661,7 +661,7 @@ for my $adb_socket (0, 1) {
     is($client1->kill(blocking => 1), "", "Kill new server [$adb_socket]");
     eval { $client2->kill(blocking => 1) };
     like($@,
-         qr{^Unexpected EOF while still writing "0009host:kill" to adb socket at },
+         qr{^Unexpected EOF(?: while still writing "0009host:kill" to adb socket)? at },
          "Also kills it for the other client [$adb_socket]");
 
     # Test a join with different timeouts

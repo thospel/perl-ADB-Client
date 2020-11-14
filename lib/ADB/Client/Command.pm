@@ -13,7 +13,7 @@ use Exporter::Tidy
     other	=>[
         qw(command_check_response
            COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE EXPECT_EOF
-           MAYBE_EOF SERIAL COMMAND_REF CALLBACK ARGUMENTS STATE)];
+           MAYBE_EOF SERIAL TRANSPORT COMMAND_REF CALLBACK ARGUMENTS STATE)];
 
 use constant {
     # Index in @COMMANDS element
@@ -37,7 +37,18 @@ use constant {
     # Mainly meant for host:transport which may close the connection or not
     # depending on the adb version
     MAYBE_EOF	=> 2,
-    SERIAL	=> 4,
+    # This command needs an active transport
+    TRANSPORT	=> 4,
+    # Commands like host:features need a transport. But one doesn't need to be
+    # active, it will do an implicit host:transport-any first if no transport
+    # is active. You can change the implicit transport by using variations like:
+    #    host-usb:features
+    #    host-local:features
+    #    host-serial:<serial>:features
+    # Many (all ?) host command like host:version also accept these alternate
+    # syntaxes, but typically we don't set the SERIAL flag for them since they
+    # ignore the transport given.
+    SERIAL	=> 8,
 
     # Index in ADB::Client::Command
     COMMAND_REF	=> 0,
@@ -81,6 +92,10 @@ sub ref : method {
 
 sub command_name {
     return shift->[COMMAND_REF][COMMAND_NAME];
+}
+
+sub state {
+    return shift->[STATE];
 }
 
 sub arguments {

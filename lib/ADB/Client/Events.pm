@@ -145,12 +145,13 @@ sub mainloop {
     eval {
         info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
+        my ($r, $w, $e);
         until ($unlooping[-1]) {
             my $timeout = timers_collect();
             $timeout // (%read_refs || %write_refs || %error_refs || last);
-            if ((select(my $r = $read_mask,
-                        my $w = $write_mask,
-                        my $e = $error_mask, $timeout) || (timers_run(), next)) > 0) {
+            if ((select($r = $read_mask,
+                        $w = $write_mask,
+                        $e = $error_mask, $timeout) || (timers_run(), next)) > 0) {
                 $$_ && $$_->() for
                     \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     \@write_refs{grep vec($w, $_, 1), keys %write_refs},

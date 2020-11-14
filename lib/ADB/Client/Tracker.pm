@@ -18,7 +18,7 @@ our $BLOCK_SIZE = int(2**16);
 my $objects = 0;
 
 sub new {
-    my ($class, $socket, $current, $command_ref, $block_size) = @_;
+    my ($class, $socket, $command_ref, $block_size, $current) = @_;
     ++$objects;
     return bless {
         socket		=> $socket,

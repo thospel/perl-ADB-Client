@@ -3,8 +3,6 @@ package Foo;
 use Carp;
 
 sub bar {
-    # splice(@_, 0, 1);
-    # die "Boom!";
     croak "Boom!";
 }
 
@@ -16,8 +14,6 @@ sub DESTROY { print "DESTROY" }
     my $obj  = bless [];
     eval { Foo::bar(undef, $obj)};
     print "ERR=$@";
-    # print Dumper(\@DB::args);
-    # @DB::args = ();
-    # eval { Carp::croak "zz" };
+    print Dumper(\@DB::args);
 }
 print "END";

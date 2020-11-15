@@ -1,0 +1,10 @@
+--- /usr/lib/x86_64-linux-gnu/perl-base/Carp.pm	2020-06-07 09:56:32.000000000 +0200
++++ ./Carp.pm	2020-11-15 13:04:08.024086999 +0100
+@@ -301,6 +301,7 @@
+ }
+ 
+ sub caller_info {
++    local @DB::args;
+     my $i = shift(@_) + 1;
+     my %call_info;
+     my $cgc = _cgc();

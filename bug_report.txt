@@ -1,0 +1,114 @@
+I reported it as a Carp bug, but there is some suspecious behaviour in the core
+around @DB::args going on (see later in the report).
+
+The version of Carp on my system is 1.50
+
+Consider the following program:
+========================
+#!/usr/bin/perl -l
+package Foo;
+use Carp;
+
+sub bar {
+    splice(@_, 0, 1);
+    # die "Boom!";
+    croak "Boom!";
+}
+
+package main;
+sub DESTROY { print "DESTROY" }
+
+{
+    my $obj  = bless [];
+    eval { Foo::bar(undef, $obj)};
+    print "ERR=$@";
+    # @DB::args = ();
+    # eval { Carp::croak "zz" };
+}
+print "END";
+========================
+
+It creates an obkect $obj inside a lexical scope.
+This object should stop existing at the end of the scope, so it should print
+"DESTROY". After that the program should print the last line and say "END"
+
+So we expect:
+DESTROY
+END
+
+We however get:
+END
+DESTROY
+
+The object survived until global destruction.
+
+Uncommenting any of the commented out lines will make the program work as
+expected. Also commenting the "splice" statement will make things work.
+
+What is happening here is that the "croak" will call its internal "caller_info"
+sub which will use caller() inside package DB to populate @DB::args.
+(even though "croak" and "carp" mostly shouldn't need that).
+
+So the object ends up with an extra reference in  @DB::args which makes it
+survive to the end of the program. That is why clearing @DB::args or doing
+another "croak" (which fill @DB::args with other data) fixes it. It also
+explains why "die" instead of "croak" fixes this.
+
+The case for the "splice" is less clear. perlfunc talks about "caller" inside
+DB and warns that it is possible to get hold of values that don't exist on the
+stack anymore (making you able to access freed memory). However, this doesn't
+really seem to be the cause here. Tracing the code through Carp for the failing
+and succeeding case is see EXACTLY the same code executed
+(confirmed with Devel::Cover)
+
+Also consider the following program:
+
+========================
+#!/usr/bin/perl -l
+package Foo;
+use Carp;
+
+sub bar {
+    croak "Boom!";
+}
+
+package main;
+use Data::Dumper;
+sub DESTROY { print "DESTROY" }
+
+{
+    my $obj  = bless [];
+    eval { Foo::bar(undef, $obj)};
+    print "ERR=$@";
+    # Comment out the following line to see a difference
+    print Dumper(\@DB::args);
+}
+print "END";
+========================
+
+This doesn't have the splice. So I wouldn't expect @DB::args to be contentious
+here, but it still displays the bug (END printed first).
+
+However, if you comment out the 'print Dumper(\@DB::args);' line, it suddenly
+starts working as expected. This is why I suspect this might be a perl bug
+instead of a bug in Carp. This is also the point where I stopped tracing
+things since I don't want to dive into the perl guts at this point.
+
+It is however quite easy to at least hide the problem in Carp by not visibly
+modifying @DB::args. This seems to be a minimal change to Carp.pm to paper over
+the problem:
+
+========================
+--- /usr/lib/x86_64-linux-gnu/perl-base/Carp.pm 2020-06-07 09:56:32.000000000 +0200
++++ ./Carp.pm   2020-11-15 13:04:08.024086999 +0100
+@@ -301,6 +301,7 @@
+ }
+
+ sub caller_info {
++    local @DB::args;
+     my $i = shift(@_) + 1;
+     my %call_info;
+     my $cgc = _cgc();
+========================
+
+With that all versions of the programs work as expected.

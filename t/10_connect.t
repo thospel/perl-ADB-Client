@@ -39,19 +39,19 @@ my $callback = sub {
 # Connect to a server that sends a greeting. Keep open for later
 my $client_ssh = new_ok("ADB::Client" =>
                         [host => "127.0.0.1", port => $port_ssh]);
-$result = $client_ssh->connect;
+$result = $client_ssh->_connect;
 isa_ok($result, "HASH", "Got a connection result from greeting server");
 
 # Connect again to a server that sends a greeting. Keep open for later
 my $client_ssh2 = new_ok("ADB::Client" =>
                         [host => "127.0.0.1", port => $port_ssh]);
-$result = $client_ssh2->connect;
+$result = $client_ssh2->_connect;
 isa_ok($result, "HASH", "Got a connection result from greeting server");
 
 # Connect to a server that closes the connection. Keep open for later
 my $client_closer = new_ok("ADB::Client" =>
                         [host => "127.0.0.1", port => $port_closer]);
-$result = $client_closer->connect;
+$result = $client_closer->_connect;
 isa_ok($result, "HASH", "Got a connection result from greeting server");
 
 # Do a basic connect
@@ -59,9 +59,9 @@ my $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $port, blocking => 0]);
 is_deeply(\@results, [], "No results yet");
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 $client->version(callback => $callback);
 $client->marker(callback => $callback);
@@ -159,7 +159,7 @@ $client = new_ok("ADB::Client" =>
                     [host => "0.0.0.0", port => $port, blocking => 0]);
 is_deeply(\@results, [], "No results yet");
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 $client->version(callback => $callback);
 $client->marker(callback => $callback);
@@ -188,7 +188,7 @@ is_deeply(\@results, [
 ], "Expected connection results") || dumper(\@results);
 
 # Now it's later. Check the closer and the greeter
-isa_ok($client_closer->connect, "HASH",
+isa_ok($client_closer->_connect, "HASH",
        "We will reconnect an immediate closer");
 eval { $client_closer->version };
 $err = $@;
@@ -197,7 +197,7 @@ $err = $@;
 like($err,
      qr{^Unexpected EOF while still writing "000Chost:version" to adb socket at |Unexpected EOF at },
      "But actual commands will fail with unexpected EOF");
-eval { $client_ssh->connect };
+eval { $client_ssh->_connect };
 $err = $@;
 like($err,
      qr{^Response without having sent anything: "ssh-2\.0-openssh_8.4p1 debian-2\\n" at },
@@ -217,10 +217,10 @@ $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $aport, blocking => 0,
                      transaction_timeout => $transaction_timeout]);
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 # We can connect on an already connected client
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 $client->version(callback => $callback);
 $client->marker(callback => $callback);
@@ -255,7 +255,7 @@ is_deeply(\@results, [
 $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $rport, blocking => 0]);
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 $client->version(callback => $callback);
 $client->marker(callback => $callback);
@@ -274,7 +274,7 @@ $client = new_ok("ADB::Client" =>
                     [host => $UNREACHABLE, blocking => 0,
                      connection_timeout => 0]);
 $client->marker(callback => $callback);
-$client->connect(callback => $callback);
+$client->_connect(callback => $callback);
 $client->marker(callback => $callback);
 mainloop();
 # dumper(\@results);
@@ -356,7 +356,7 @@ for my $i (0..2) {
             }
             my $result;
             if ($direct == 0) {
-                $result = eval { $client->connect() };
+                $result = eval { $client->_connect() };
                 my $err = $@;
                 if ($retry == 3) {
                     like($err, qr{^ADB server 127\.0\.0\.1 port $old_port: Connect error: },
@@ -465,7 +465,7 @@ for my $direct (0..1) {
     # direct: Immediately do a command instead of doing an explicit connect
     for my $retry (0..2) {
         if ($direct == 0) {
-            my $dummy = eval { $client->connect() };
+            my $dummy = eval { $client->_connect() };
             my $err = $@;
             like($err, qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
                  "Connection error [$direct, $retry]");
@@ -504,7 +504,7 @@ $client = new_ok("ADB::Client" =>
                   addr_info => $addr_info,
                   connection_timeout => $CONNECTION_TIMEOUT]);
 my $_addr_info = $client->_addr_info;
-$result = $client->connect(version_min => 11);
+$result = $client->_connect(version_min => 11);
 is_deeply($result,
           {%{$addr_info->[3]},
            version => 39,
@@ -544,7 +544,7 @@ for my $i (0..4) {
     delete $_addr_info->[$i]{version};
 }
 # Do a request that would fit server 1 but we are sticky on server 3
-my $dummy = eval { $client->connect(version_max => 20) };
+my $dummy = eval { $client->_connect(version_max => 20) };
 like($@, qr{^\QADB server 127.0.0.1 port $port: Version '39' is above '20' at }, "Keep looking at server 3");
 for my $i (0..4) {
     if ($i == 3) {
@@ -573,7 +573,7 @@ for my $i (0..4) {
 }
 is($client->connection_data, undef, "Not sticking to server 3 anymore");
 # Make an impossible request
-$dummy = eval { $client->connect(version_min => 11, version_max => 12) };
+$dummy = eval { $client->_connect(version_min => 11, version_max => 12) };
 like($@, qr{^ADB server 127.0.0.1 port $rport: Connect error: },
      "Return the error on the first server");
 # $_addr_info = $client->addr_info;
@@ -608,7 +608,7 @@ $client = new_ok("ADB::Client" =>
                   connection_timeout => $CONNECTION_TIMEOUT]);
 is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
-$dummy = eval { $client->connect(version_min => 0) };
+$dummy = eval { $client->_connect(version_min => 0) };
 like($@,
      qr{^ADB server 127\.0\.0\.1 port $port_closer: Unexpected EOF(?: while still writing "000Chost:version" to adb socket)? at },
      "Error from Closer");
@@ -629,7 +629,7 @@ $client = new_ok("ADB::Client" =>
                   connection_timeout => $CONNECTION_TIMEOUT]);
 is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
-$dummy = eval { $client->connect(version_min => 0) };
+$dummy = eval { $client->_connect(version_min => 0) };
 like($@,
      qr{^ADB server 127\.0\.0\.1 port $port_ssh: (?:Bad ADB status "ssh-"|\QResponse while command has not yet completed: "ssh-2.0-openssh_8.4p1 debian-2\n"\E) at },
      "Error from greeter");
@@ -650,7 +650,7 @@ $client = new_ok("ADB::Client" =>
                   connection_timeout => $CONNECTION_TIMEOUT]);
 is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
-$dummy = eval { $client->connect(version_min => 0) };
+$dummy = eval { $client->_connect(version_min => 0) };
 like($@,
      qr{^ADB server 127\.0\.0\.1 port $port_echo: Bad ADB status "000C" at },
      "Error from echo");

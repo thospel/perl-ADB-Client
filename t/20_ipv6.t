@@ -103,7 +103,7 @@ my $rport = adb_unreachable6();
 # Simple IPV6 connect
 $client = new_ok("ADB::Client" =>
                     [host => "::1", port => $port6]);
-@result = $client->connect;
+@result = $client->_connect;
 is_deeply(addr_filter(\@result), [
   {
     "bind_ip" => "::1",
@@ -119,7 +119,7 @@ is($client->version, 39, "Expected version");
 # Connect to :: is like connect to ::1
 $client = new_ok("ADB::Client" =>
                     [host => "::0", port => $port6]);
-@result = $client->connect;
+@result = $client->_connect;
 is_deeply(addr_filter(\@result), [
   {
     "bind_ip" => "::",

@@ -80,7 +80,7 @@ SKIP: {
     my $client = new_ok("ADB::Client" =>
                         [host => $example_ip, port => 80,
                          connection_timeout => 0.5, blocking => 1]);
-    eval { $client->connect() };
+    eval { $client->_connect() };
   SKIP: {
         skip $@, 1 if $@;
         skip "Huh, $example_host is local",1 unless $example_ip eq $remote_ip;
@@ -128,7 +128,7 @@ is_deeply(addr_filter(\@result), [
   }
 ], "Expected history") || dumper(addr_filter(\@result));
 my $client2 = new_ok("ADB::Client" => [port => $free_port]);
-eval { $client2->connect };
+eval { $client2->_connect };
 like($@, qr{^\QADB server 127.0.0.1 port $free_port: Connect error: },
      "Not running on 127.0.0.1");
 

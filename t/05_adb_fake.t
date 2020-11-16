@@ -103,7 +103,7 @@ for (1..2) {
 }
 
 my $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port]);
-my $result = $client->connect;
+my $result = $client->_connect;
 is_deeply(addr_filter($result), {
    "bind_ip" => "127.0.0.1",
    "bind_port" => $port,
@@ -156,7 +156,7 @@ for (1..2) {
     $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 }
 
-$result = $client->connect;
+$result = $client->_connect;
 is_deeply(addr_filter($result), {
   "bind_ip" => "127.0.0.1",
   "bind_port" => $port,
@@ -177,7 +177,7 @@ my $rport = adb_unreachable();
 $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $rport]);
 my $dummy = eval {
     local $SIG{__DIE__} = undef;
-    $client->connect;
+    $client->_connect;
 };
 my $err = $@;
 ok($err) ||
@@ -192,7 +192,7 @@ is($client->connected, 0, "Client is not connected") ||
 # Implicitely checks basic connect and that adb_fake supports multiple ports
 my $aport = adb_unacceptable();
 $client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $aport]);
-my @result = $client->connect();
+my @result = $client->_connect();
 is_deeply(addr_filter(\@result), [{
      "bind_ip" => "127.0.0.1",
      "bind_port" => $aport,

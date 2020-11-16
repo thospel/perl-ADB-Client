@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 30;
+use Test::More tests => 35;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -90,3 +90,10 @@ is($client->root,   "restarting adbd as root\n", "Can set root");
 is($client->transport_usb, "", "Connect to usb device");
 is($client->remount, qq(remount succeeded\n),
    "Can remount as root");
+
+is($client->transport_usb, "", "Connect to usb device");
+is($client->verity_enable, "", "Can enable verity");
+is($client->transport_usb, "", "Connect to usb device");
+is($client->verity_disable, "", "Can disable verity");
+eval { $client->verity_disable };
+like($@, qr{^\Qdevice offline (no transport) at}, "verity needs a transport");

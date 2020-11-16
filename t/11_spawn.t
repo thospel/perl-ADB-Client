@@ -42,7 +42,7 @@ for my $pre_connect (0, 1) {
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
                       addr_info => $addr_info, blocking => 1]);
-    $client->connect if $pre_connect;
+    $client->_connect if $pre_connect;
     @result = eval { $client->spawn() };
     is($@, "", "Spawn simply connects");
     is_deeply(\@result, [$client->connection_data], "We are connected to anything");
@@ -77,7 +77,7 @@ for my $pre_connect (0, 1) {
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
                       addr_info => $addr_info, blocking => 1]);
-    $client->connect if $pre_connect;
+    $client->_connect if $pre_connect;
     @result = eval { $client->spawn(version_min => 40) };
     like($@, qr{^\QADB server 127.0.0.1 port $port_10: Version '10' is below '40' at },
          "No server has version_min [$pre_connect]");
@@ -324,7 +324,7 @@ for my $pre_connect (0, 1) {
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
                       addr_info => $addr_info, blocking => 1]);
-    $client->connect(version_min => 15) if $pre_connect;
+    $client->_connect(version_min => 15) if $pre_connect;
     @result = eval { $client->spawn(version_min => 15) };
     is($@, "", "No error");
     ok($client->connection_data, "We are connected");
@@ -372,7 +372,7 @@ for my $pre_connect (0, 1) {
     $client = new_ok("ADB::Client" =>
                      [host => "127.0.0.1", port => $port,
                       addr_info => $addr_info, blocking => 1]);
-    $client->connect(version_min => 15) if $pre_connect;
+    $client->_connect(version_min => 15) if $pre_connect;
     @result = eval { $client->spawn(version_min => 15, kill => 1) };
     #system("netstat -nt | grep $port_10 1>&2");
     #diag("PORT: $port_10");
@@ -425,7 +425,7 @@ for my $adb_socket (0, 1) {
                          [host => "127.0.0.1", port => $port,
                           adb_socket => $adb_socket,
                           addr_info => $addr_info, blocking => 1]);
-        $client->connect if $pre_connect;
+        $client->_connect if $pre_connect;
         @result = eval { $client->spawn(version_min => 25, kill => 1) };
         is($@, "", "No error");
         ok($client->connection_data, "We are connected [$pre_connect]");
@@ -495,7 +495,7 @@ for my $adb_socket (0, 1) {
                          [host => "127.0.0.1", port => $port,
                           adb_socket => $adb_socket,
                           addr_info => $addr_info, blocking => 1]);
-        $client->connect if $pre_connect;
+        $client->_connect if $pre_connect;
         @result = eval { $client->spawn(version_min => 35, kill => 1) };
         like($@, qr{^\QADB server 127.0.0.1 port $port_10: Version '30' is below '35' at }, "Recheck after spawn failed");
         $_addr_info = $client->addr_info;
@@ -568,7 +568,7 @@ for my $adb_socket (0, 1) {
         $client = new_ok("ADB::Client" =>
                          [host => "127.0.0.1", port => $port, blocking => 1,
                           adb_socket => $adb_socket, addr_info => $addr_info]);
-        $client->connect if $pre_connect;
+        $client->_connect if $pre_connect;
         @result = eval { $client->spawn(kill => 1) };
         is($@, "", "Spawn after killing spree [$pre_connect]");
         is_deeply(\@result, [$client->connection_data],

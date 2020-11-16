@@ -26,7 +26,7 @@ my $port = adb_start();
 my $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $port]);
 is($client->version(), 39, "Expected Version");
-ok($client->connect(), "Can connect");
+ok($client->_connect(), "Can connect");
 eval { $client->fatal("Bullet") };
 like($@, qr{^Fatal: Assertion: Bullet at }, "Expected fatal error");
 for my $i (1..2) {

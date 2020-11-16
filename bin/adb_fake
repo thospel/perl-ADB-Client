@@ -690,6 +690,12 @@ sub adb_command {
         } else {
             $state->adb_output(UNCOUNTED, "Not running as root. Try \"adb root\" first.\n");
         }
+    } elsif ($command eq "enable-verity:" || $command eq "disable-verity:") {
+        if (!$state->{transport}) {
+            $state->adb_output(FAIL, "device offline (no transport)");
+        } else {
+            $state->adb_output(UNCOUNTED, "");
+        }
     } elsif ($command =~ m{^internal:(.*)\z}s) {
         # Non standard adb commands for testing
         $state->internal($1);

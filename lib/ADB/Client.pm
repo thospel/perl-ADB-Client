@@ -38,10 +38,12 @@ sub ref_class {
 
 sub new {
     my $class = shift;
+
     my $client = \my $client_ref;
-    $client_ref = $class->ref_class->new($client, @_);
+    my $ref_class = ref $class eq "" ? $class->ref_class : $class->client_ref;
+    $client_ref = $ref_class->new($client, @_);
     ++$objects;
-    return bless $client, $class;
+    return bless $client, ref $class eq "" ? $class : ref($class);;
 }
 
 sub DESTROY {
@@ -227,6 +229,10 @@ sub wait_usb_device {
 
 sub wait_local_device {
     return shift->wait_local("device", @_);
+}
+
+sub restart {
+    return shift->reboot("");
 }
 
 1;

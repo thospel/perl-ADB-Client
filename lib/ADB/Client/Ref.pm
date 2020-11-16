@@ -51,7 +51,7 @@ our $SPAWN_TIMEOUT = 10;
 use constant {
     FATAL	=> [_fatal	=> SPECIAL, \&_fatal_run],
     MARKER	=> [marker	=> SPECIAL, \&_marker],
-    CONNECT	=> [connect	=> SPECIAL, \&_connect_start],
+    CONNECT	=> [_connect	=> SPECIAL, \&_connect_start],
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
     VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
     KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
@@ -94,8 +94,8 @@ our @BUILTINS = (
     [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
     [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],
     [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF],
-    [device_connect	=> "host:connect:%s", -1, EXPECT_EOF],
-    [device_disconnect	=> "host:disconnect:%s", -1, EXPECT_EOF],
+    [connect		=> "host:connect:%s", -1, EXPECT_EOF],
+    [disconnect		=> "host:disconnect:%s", -1, EXPECT_EOF],
     # all the wait-for-device variants strictly have a SERIAL version
     # But only host-serial:<serial>:wait-for-<transport> does anything special
     # and it recognizes that serial irrespective of the <transport>
@@ -107,16 +107,31 @@ our @BUILTINS = (
      [\&process_device_wait, "timeout"]],
     [wait_local		=> "host:wait-for-local-%s", 0, MAYBE_MORE,
      [\&process_device_wait, "timeout"]],
+    [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
+    [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
     [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
+    # The details of these commented out commands were not thoroughly tested
     # [sideload		=> "sideload:%s", 0, TRANSPORT|EXPECT_EOF],
-    # [device_reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
-    # [device_reconnect_device	=> "reconnect", 0, TRANSPORT|EXPECT_EOF],
+    # [sideload_host	=> "sideload:%s:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
+    # [reconnect_device	=> "reconnect", 0, TRANSPORT|EXPECT_EOF],
     # [reconnect_offline	=> "host:reconnect-offline", 0, EXPECT_EOF],
     # [usb	=> "usb:", 0, TRANSPORT|EXPECT_EOF],
     # [tcpip	=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
     # [jdwp	=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
-    # [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
-    # [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
+    # [forward_list	=> "host:list-forward", 0, EXPECT_EOF],
+    # [forward	=> "host:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
+    # [forward_norebind	=> "host:forward:norebind:%s;%s", 0, TRANSPORT|EXPECT_EOF],
+    # [forward_kill	=> "host:killforward:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [forward_kill_all	=> "host:killforward-all", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse_list	=> "reverse:list-forward", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse	=> "host:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse_norebind	=> "reverse:forward:norebind:%s;%s", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse_kill	=> "reverse:killforward:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|EXPECT_EOF],
+    # [mdns_check	=> "host:mdns:check", 0, EXPECT_EOF],
+    # [mdns_services	=> "host:mdns:services", 0, EXPECT_EOF],
+    # [pair		=> 'host:pait:%2$s:%1$s', 0, EXPECT_EOF],
 );
 
 my $objects = 0;
@@ -137,8 +152,8 @@ sub new {
     my ($class, $client, %arguments) = @_;
 
     my $model = delete $arguments{model};
-    ref $class eq "" ||
-        return ref($class)->new($client, model => $model // $class, %arguments);
+    return ref($class)->new($client, model => $model // $class->client, %arguments) if
+        ref $class ne "";
     if (defined $model) {
         $model = $model->client_ref || croak "Model without client_ref";
         for my $name (
@@ -554,7 +569,7 @@ sub _forget {
     $client_ref->success;
 }
 
-sub connect : method {
+sub _connect : method {
     my ($client_ref, $arguments, $callback, $index) = @_;
 
     my $command_ref = $COMMANDS[$index] ||
@@ -1487,8 +1502,13 @@ sub process_devices {
     my $long = $command_name eq "host:devices-l";
     my (@devices, %devices);
   DEVICE:
-    while ($devices =~ s{^(\S+)[^\S\n]+(device|no device|offline)(?:[^\S\n]+(\S.*\S))?\n}{}) {
+    while ($devices =~ s{^(\S+)[^\S\n]+(\S+|no device)(?:[^\S\n]+(\S.*\S))?\n}{}a) {
         my ($serial, $state, $description) = ($1, $2, $3);
+        # Possible states seem to be:
+        # offline, bootloader device host recovery rescue sideload
+        # unauthorized authorizing connecting unknown
+        # And UsbNoPermissionsShortHelpText() is: no permissions; [<url>])
+        # We will fail to parse if that last one can really happen
         die "Multiple devices with serial number $serial" if $devices{$serial};
         push @devices, $serial;
         if ($long) {

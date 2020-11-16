@@ -132,9 +132,9 @@ like($@, qr{^\Qmore than one device/emulator at},
 is($client->wait_usb_device, "", "Can wait unique usb device");
 is($client->wait_local_device, "", "Can wait unique local device");
 
-is($client->device_disconnect("10.253.0.13"), "disconnected 10.253.0.13",
+is($client->disconnect("10.253.0.13"), "disconnected 10.253.0.13",
    "Disconnect device");
-eval { $client->device_disconnect("10.253.0.13") };
+eval { $client->disconnect("10.253.0.13") };
 like($@, qr{^\Qno such device '10.253.0.13:5555'},
      "Cannot do a double disconnect");
 
@@ -159,9 +159,9 @@ is($client->wait_usb_device, "", "Can wait for still unique usb device");
 # Not something you van see, but checked with strace
 # Pre-connect $client2 so that the wait almost certainly starts before
 # the device gets connected
-$client2->connect(blocking => 1);
+$client2->_connect(blocking => 1);
 # diag("strace trigger");
-$client->device_connect("10.253.0.13", blocking => 0);
+$client->connect("10.253.0.13", blocking => 0);
 is(@result3, 0, "No local device yet");
 is($client2->wait_local_device(blocking => 1), "",
    "Can wait for soon unique local device");
@@ -175,15 +175,15 @@ is_deeply(\@result3, [[undef, ""]], "Finished wait for local device") ||
 @result4 = ();
 $client4->wait_serial_device("10.253.0.11:1234", callback => $callback4);
 
-eval { $client->device_connect("10.253.0.13:5555") };
+eval { $client->connect("10.253.0.13:5555") };
 like($@, qr{^\Qalready connected to 10.253.0.13:5555 at },
      "Cannot do a double connect");
 
-eval { $client->device_disconnect("52000c4748d6a283") };
+eval { $client->disconnect("52000c4748d6a283") };
 like($@, qr{^\Qno such device '52000c4748d6a283:5555' at},
      "Cannot disconnect an usb device");
 
-eval { $client->device_connect("10.253.0.8") };
+eval { $client->connect("10.253.0.8") };
 like($@, qr{^\Qfailed to connect to '10.253.0.8:5555': Connection refused at },
      "Cannot connect to something unreachable");
 
@@ -202,7 +202,7 @@ is_deeply(\@result, [
 ], "Expected devices result") || dumper(\@result);
 
 is(@result4, 0, "Still not seen 10.253.0.11:1234");
-is($client->device_connect("10.253.0.11:1234"), "connected to 10.253.0.11:1234",
+is($client->connect("10.253.0.11:1234"), "connected to 10.253.0.11:1234",
    "Connect new local device");
 is($client4->version(blocking => 1), 10, "Trigger a wait on client4");
 is_deeply(\@result4, [[undef, ""]], "Wait for 10.253.0.11:1234 is over");
@@ -659,7 +659,7 @@ is($client->wait_device(blocking => 1), "", "Can wait for first device");
 # Try to create a situation where the first device add event is already
 # written by the time the "host:track-devices" response comes back
 # Pre-connect $client
-$client->connect;
+$client->_connect;
 my @tracked2;
 $client2->devices_track(blocking => 0,
                         callback => sub { shift; push @tracked2, [@_] });

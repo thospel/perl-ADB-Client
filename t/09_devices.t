@@ -12,7 +12,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 160;
+use Test::More tests => 190;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -127,8 +127,15 @@ is_deeply(\@result, [
           "Expected devices long result") || dumper(\@result);
 
 eval { $client->wait_device };
-like($@, qr{^\Qmore than one device/emulator at},
+like($@, qr{^\Qmore than one device/emulator at },
      "Waiting while multiple devices is an error");
+eval { $client->wait_id_device };
+like($@, qr{^\QMissing id at },
+     "transport_id must be a natural number");
+eval { $client->wait_id_device(-2) };
+like($@, qr{^\QId must be a natural number at },
+     "transport_id must be a natural number");
+is($client->wait_id_device(2), "", "Can wait trasport id device");
 is($client->wait_usb_device, "", "Can wait unique usb device");
 is($client->wait_local_device, "", "Can wait unique local device");
 
@@ -171,6 +178,10 @@ mainloop();
 is_deeply(\@result3, [[undef, ""]], "Finished wait for local device") ||
     dumper(\@result3);
 
+eval { $client4->wait_serial };
+like($@, qr{^\QMissing serial at }, "Must give a serial");
+eval { $client4->wait_serial_device };
+like($@, qr{^\QMissing serial at }, "Must give a serial");
 # Start a new wait
 @result4 = ();
 $client4->wait_serial_device("10.253.0.11:1234", callback => $callback4);
@@ -201,7 +212,7 @@ is_deeply(\@result, [
   "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Expected devices result") || dumper(\@result);
 
-is(@result4, 0, "Still not seen 10.253.0.11:1234");
+is(@result4, 0, "Still not seen 10.253.0.11:1234") || dumper(\@result4);
 is($client->connect("10.253.0.11:1234"), "connected to 10.253.0.11:1234",
    "Connect new local device");
 is($client4->version(blocking => 1), 10, "Trigger a wait on client4");
@@ -262,6 +273,11 @@ is_deeply(\@result, [
     10,
   ]
 ], "Expected track-devices and version output") || dumper(\@result);
+
+# Also start waiting for an usb drop
+@result4 = ();
+$client4->wait_usb("disconnect", callback => $callback4);
+
 my @tracked;
 $tracker->track(sub { shift; push @tracked, [@_] });
 eval { $tracker->track(sub {}) };
@@ -417,9 +433,15 @@ is($client->tport_usb, 2, "Can tport usb");
 eval { $client->tport_local };
 like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
 
-# No more devices
+is(@result4, 0, "usb still not disconnected");
 is($client->device_drop("52000c4748d6a283"), "Dropped '52000c4748d6a283'",
    "Drop device");
+# No more devices
+is($client4->version(blocking => 1), 10, "Force client4 into a result");
+is_deeply(\@result4, [[undef, "" ]], "USB device disconnected") ||
+    dumper(\@result4);
+
+is($client->wait_usb("disconnect"), "", "no device is always disconnected");
 
 for my $command (@serial_commands) {
     eval { $client->$command };
@@ -656,6 +678,9 @@ is_deeply(\@tracked, [
 $client2->device_add("10.253.0.13:5555", blocking => 0);
 is($client->wait_device(blocking => 1), "", "Can wait for first device");
 
+is($client->wait_local("disconnect", blocking => 1), "",
+   "local device is always disconnected");
+
 # Try to create a situation where the first device add event is already
 # written by the time the "host:track-devices" response comes back
 # Pre-connect $client
@@ -678,3 +703,52 @@ is_deeply($tracked, { "10.253.0.13:5555" => "offline" }, "Scalar context") ||
     dumper($tracked);
 is($client3->version(blocking => 1), 10, "Trigger wait on client3");
 is_deeply(\@result3, [[undef, ""]], "And now we have out usb device");
+
+# Reboot/restart tests and waiting for unusual states (I dont think they exist)
+# First double check current staste
+$client = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port_10]);
+@result = $client->devices;
+is_deeply(\@result, [
+    {
+        "10.253.0.13:5555" => "device",
+        "52000c4748d6a283" => "device"
+    },
+    ["10.253.0.13:5555", "52000c4748d6a283"],
+    "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
+], "Expected devices result") || dumper(\@result);
+
+is($client->wait("disconnect"), "",
+   "local device is always disconnected");
+is($client->wait_local("disconnect"), "",
+   "local device is always disconnected");
+is($client->wait_serial("10.253.0.13:5555", "disconnect"), "",
+   "local device is always disconnected");
+is($client->wait_serial("Boem", "disconnect"), "",
+   "nonsense device is always disconnected");
+is($client->wait_id(int(1e5), "disconnect"), "",
+   "nonsense transport id is always disconnected");
+
+my $transport_id = $client->tport_usb;
+like($transport_id, qr{^\d+\z}a, "Connect to usb device");
+# Start waiting on a specific device
+$client4 = new_ok("ADB::Client" => [host => "127.0.0.1",
+                                    port => $port_10, blocking => 0]);
+@result4 = ();
+# Give client4 a head start in the race
+$client4->_connect(blocking => 1);
+$client4->wait_id($transport_id, "disconnect", callback => $callback4);
+is($client3->version(blocking => 1), 10, "Trigger wait on client3");
+is(@result4, 0, "transport_id event didn't trigger yet");
+# Now restart the the usb device
+is($client->restart, "", "Can reboot");
+is($client->state_usb, "device", "Still a device");
+is($client4->version(blocking => 1), 10, "Force a result for client4");
+is_deeply(\@result4, [[undef, ""]], "The usb device disconnected");
+
+is($client->transport_usb, "", "Connect to usb device");
+eval { $client->reboot };
+like($@, qr{^\QToo few arguments at }, "Cannot reboot without arguments");
+
+is($client->transport_usb, "", "Connect to usb device");
+is($client->reboot("recovery"), "", "Can reboot");
+is($client->state_usb, "recovery", "Now in recovery");

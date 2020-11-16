@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 35;
+use Test::More tests => 36;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -79,15 +79,19 @@ is($client->remount, qq(Not running as root. Try "adb root" first.\n),
    "Cannot remount as non-root");
 is($client->transport_usb, "", "Connect to usb device");
 is($client->root,   "restarting adbd as root\n", "Can set root");
-is($client->transport_usb, "", "Connect to usb device");
+my $transport_id = $client->tport_usb;
+like($transport_id, qr{^\d+\z}a, "Connect to usb device");
 is($client->root,   "adbd is already running as root\n", "Can set root");
-is($client->transport_usb, "", "Connect to usb device");
+is($client->transport_id($transport_id), "", "Connect to usb device");
 is($client->unroot, "restarting adbd as non root\n", "Can set root");
-is($client->transport_usb, "", "Connect to usb device");
+$transport_id = $client->tport_usb;
+like($transport_id, qr{^\d+\z}a, "Connect to usb device");
 is($client->unroot, "adbd not running as root\n", "Can set root");
-is($client->transport_usb, "", "Connect to usb device");
+is($client->tport_id($transport_id), $transport_id, "Connect to usb device");
 is($client->root,   "restarting adbd as root\n", "Can set root");
-is($client->transport_usb, "", "Connect to usb device");
+my $transport_id2 = $client->tport_usb;
+like($transport_id2, qr{^\d+\z}a, "Connect to usb device");
+cmp_ok($transport_id2, "!=", $transport_id, "root changes transport");
 is($client->remount, qq(remount succeeded\n),
    "Can remount as root");
 

@@ -198,6 +198,20 @@ sub transport_local {
     return shift->_transport("local", @_);
 }
 
+sub transport_serial {
+    my $client = shift;
+    my $serial = shift || croak "Missing serial";
+    return $client->_transport_serial($serial, "any", @_);
+}
+
+sub transport_id {
+    my $client = shift;
+    my $id = shift // croak "Missing id";
+    $id =~ /^\s*([0-9]+)\s*$/ || croak "id must be a natural number";
+    $id = int($1);
+    return $client->_transport_id($id, "any", @_);
+}
+
 sub tport_usb {
     return shift->_tport("usb", @_);
 }
@@ -214,25 +228,82 @@ sub tport_local {
     return shift->_tport("local", @_);
 }
 
+# Both of these work:
+# host-serial:0715f712da553032:tport:this_does_not_matter
+# host:tport:serial:0715f712da553032
+sub tport_serial {
+    my $client = shift;
+    my $serial = shift || croak "Missing serial";
+    return $client->_tport_serial($serial, "any", @_);
+}
+
+# Only this works: host-transport-id:346:tport:this_does_not_matter
+# This fails: host:tport:transport-id:346
+sub tport_id {
+    my $client = shift;
+    my $id = shift // croak "Missing id";
+    $id =~ /^\s*([0-9]+)\s*$/ || croak "id must be a natural number";
+    $id = int($1);
+    return $client->_tport_id($id, "any", @_);
+}
+
+sub wait : method {
+    return shift->_wait("any", @_);
+}
+
+sub wait_serial {
+    my $client = shift;
+    my $serial = shift || croak "Missing serial";
+    return $client->_wait_serial($serial, "any", @_);
+}
+
+sub wait_id {
+    my $client = shift;
+    my $id = shift // croak "Missing id";
+    $id =~ /^\s*([0-9]+)\s*$/ || croak "id must be a natural number";
+    $id = int($1);
+    return $client->_wait_id($id, "any", @_);
+}
+
+sub wait_usb {
+    return shift->_wait("usb", @_);
+}
+
+sub wait_local {
+    return shift->_wait("local", @_);
+}
+
 # The wait functions are mostly used to wait for a device
+
 sub wait_device {
-    return shift->wait("device", @_);
+    return shift->_wait("any", "device", @_);
 }
 
 sub wait_serial_device {
-    return shift->wait_serial("device", @_);
+    my $client = shift;
+    my $serial = shift || croak "Missing serial";
+    return $client->_wait_serial($serial, "any", "device", @_);
+}
+
+sub wait_id_device {
+    my $client = shift;
+    my $id = shift // croak "Missing id";
+    $id =~ /^\s*([0-9]+)\s*$/ || croak "Id must be a natural number";
+    $id = int($1);
+    return $client->_wait_id($id, "any", "device", @_);
 }
 
 sub wait_usb_device {
-    return shift->wait_usb("device", @_);
+    return shift->_wait("usb", "device", @_);
 }
 
 sub wait_local_device {
-    return shift->wait_local("device", @_);
+    return shift->_wait("local", "device", @_);
 }
 
 sub restart {
-    return shift->reboot("");
+    my $client = shift;
+    return $client->reboot("", @_);
 }
 
 1;

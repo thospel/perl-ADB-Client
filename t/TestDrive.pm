@@ -149,7 +149,9 @@ sub adb_start {
     $pid = do {
         local $SIG{__WARN__} = sub {};
         # open($adb_out = undef, "-|", $adb_fake)
-        open($adb_out = undef, "-|", $^X, $adb_fake, $blib ? "--blib" : ()) ||
+        open($adb_out = undef, "-|", $^X, $adb_fake,
+             $blib ? "--blib" : (),
+             $ENV{ADB_CLIENT_TEST_VERBOSE} ? "-v" : ()) ||
             Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");
     };
     my $line = <$adb_out> //

@@ -87,10 +87,8 @@ our @BUILTINS = (
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [devices_track	=> "host:track-devices", -1, MAYBE_MORE, \&process_devices],
-    [_transport		=> "host:transport-%s", 0, MAYBE_EOF],
-    [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
-    [_tport		=> "host:tport:%s", 8, 0, \&process_tport],
-    [tport_serial	=> "host:tport:serial:%s", 8, 0, \&process_tport],
+    [_transport		=> "host:transport-%s", 0, SERIAL|MAYBE_EOF],
+    [_tport		=> "host:tport:%s", 8, SERIAL, \&process_tport],
     [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
     [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],
     [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF],
@@ -99,14 +97,8 @@ our @BUILTINS = (
     # all the wait-for-device variants strictly have a SERIAL version
     # But only host-serial:<serial>:wait-for-<transport> does anything special
     # and it recognizes that serial irrespective of the <transport>
-    [wait		=> "host:wait-for-any-%s", 0, MAYBE_MORE,
-     [\&process_device_wait, "timeout"]],
-    [wait_serial	=> 'host-serial:%2$s:wait-for-any-%1$s', 0, MAYBE_MORE,
-     [\&process_device_wait, "timeout"]],
-    [wait_usb		=> "host:wait-for-usb-%s", 0, MAYBE_MORE,
-     [\&process_device_wait, "timeout"]],
-    [wait_local		=> "host:wait-for-local-%s", 0, MAYBE_MORE,
-     [\&process_device_wait, "timeout"]],
+    [_wait		=> "host:wait-for-%s-%s", 0, SERIAL|MAYBE_MORE,
+     [\&process_wait, "timeout"]],
     [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
     [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
     [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
@@ -131,7 +123,7 @@ our @BUILTINS = (
     # [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|EXPECT_EOF],
     # [mdns_check	=> "host:mdns:check", 0, EXPECT_EOF],
     # [mdns_services	=> "host:mdns:services", 0, EXPECT_EOF],
-    # [pair		=> 'host:pait:%2$s:%1$s', 0, EXPECT_EOF],
+    # [pair		=> 'host:pair:%2$s:%1$s', 0, EXPECT_EOF],
 );
 
 my $objects = 0;
@@ -418,12 +410,13 @@ sub commands_add {
             #  host-usb:features
             #  host-local:features
             #  host-serial:52000c4748d6a283:features
-            for my $prefix (qw(usb local serial:%s)) {
+            for my $prefix (qw(usb local serial:%s transport-id:%d)) {
                 my $ref = [@$command_ref];
                 $ref->[COMMAND] =~ s/:/-$prefix:/ ||
                     croak "No : in command '$ref->[COMMAND_NAME]'";
                 my $suffix = $prefix;
-                $suffix =~ s/:.*//;
+                $suffix =~ s/:.*//;	# Change transport-id:%s to transport-id
+                $suffix =~ s/.*-//;	# Change transport-id to id
                 $ref->[COMMAND_NAME] .= "_" . $suffix;
                 $class->command_add($client_class, $ref);
             }
@@ -451,8 +444,8 @@ sub command_get {
     my $command_name = $command->[COMMAND_NAME] ||
         die("Assertion: No COMMAND_NAME");
     die "No COMMAND in command '$command_name'" if !defined $command->[COMMAND];
-    croak "Invalid format in command '$command_name'" if
-        $command->[COMMAND] =~ /%(?!(?:\d+\$)?s)/a;
+    croak "Invalid format in command '$command_name': $command->[COMMAND]" if
+        $command->[COMMAND] =~ /%(?!(?:\d+\$)?[sd])/a;
     return
         $command_name,
         $command->[COMMAND] =~ tr/%//,
@@ -1548,7 +1541,7 @@ sub process_tport {
     return [unpack("q", shift)];
 }
 
-sub process_device_wait {
+sub process_wait {
     my ($devices, $command_name, $client_ref, $result) = @_;
 
     my $command = $client_ref->command_retired;

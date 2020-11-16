@@ -30,15 +30,15 @@ use IO::Socket::IP qw();
 use Getopt::Long 2.24 qw(:config bundling);
 
 use ADB::Client::Events qw(mainloop event_init);
-use ADB::Client::Utils qw(string_from_value);
-
-my $host = "127.0.0.1";
-my $port = 5037;
+use ADB::Client::Utils qw(string_from_value $ADB_HOST $ADB_PORT);
 
 die "Could not parse your command line. Try $0 -h\n" unless
-    GetOptions("host|h=s"	=> \$host,
-               "port|p=s"	=> \$port,
+    GetOptions("host|h|H=s"	=> \my $host,
+               "port|p|P=s"	=> \my $port,
            );
+die "$Script doesn't take arguments\n" if @ARGV;
+$host //= $ADB_HOST;
+$port //= $ADB_PORT;
 
 my $socket = IO::Socket::IP->new(
     PeerHost => $host,

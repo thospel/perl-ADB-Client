@@ -21,7 +21,7 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 448;
+use Test::More tests => 455;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -267,6 +267,7 @@ my $client = new_ok("ADB::Client", [port => $port]);
 # Cause a die during the mainloop of a blocking command
 # See if we properly recover
 is($client->version, 39, "Sanity check. We can run");
+is($client->discard("Some text"), "discarded", "Can run discard comand");
 my $client2 = new_ok("ADB::Client", [port => $port, blocking => 0]);
 $client2->marker(callback => sub {
     # While we are here, check the tests for queueing while blocking

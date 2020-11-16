@@ -294,7 +294,7 @@ sub adb_check_response {
     my $len = length $data->{in};
 
     if ($len - $len_added < 4) {
-        # status bytes were added ($data->{in} was shorter than 4 bytes)
+        # status bytes were added ($data->{in} used to be shorter than 4 bytes)
         my $plen = $len < 4 ? $len : 4;
         my $prefix = substr($data->{in}, 0, $plen);
         if ($prefix ne substr(OKAY, 0, $plen) &&

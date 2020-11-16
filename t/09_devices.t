@@ -12,7 +12,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 134;
+use Test::More tests => 139;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -318,11 +318,14 @@ for my $command (@serial_commands) {
               "Can get $c from single device") || dumper(\@result);
 }
 
-#eval { $client->wait_device };
-#like($@, qr{^\Qab}, "Waiting while multiple devices is an error");
+eval { $client->wait_device };
+like($@, qr{^\Qmore than one device/emulator at},
+     "Waiting while multiple devices is an error");
 
 # Reduce to one devices
 $client->device_drop("10.253.0.13:5555");
+
+is($client->wait_device, "", "We have a device");
 
 eval { $client->transport_serial("10.253.0.13:5555") };
 like($@, qr{^\Qdevice '10.253.0.13:5555' not found at},
@@ -482,6 +485,8 @@ is_deeply(\@tracked, [[
 eval { $tracker->untrack };
 like($@, qr{^Not tracking at }, "Cannot undo a finished tracker");
 eval { $tracker->track };
+like($@, qr{^No callback at }, "Cannot track without callback");
+eval { $tracker->track(sub {}) };
 like($@, qr{^Socket closed at }, "Cannot track a finished tracker");
 
 # Restart killed service
@@ -570,19 +575,31 @@ is_deeply(\@tracked, [
     }
 ], "Fourth event") || dumper(\@tracked);
 
+# We are now without devices again
+
+# Notice that $client is non-blocking and already connected
+# $client2 is blocking and not connected.
+# So this test should be very likely to have $client blocked waiting for a
+# device (I confirmed with strace that this actually tests something)
+$client2->device_add("10.253.0.13:5555", blocking => 0);
+is($client->wait_device(blocking => 1), "", "Can wait for first device");
+
 # Try to create a situation where the first device add event is already
 # written by the time the "host:track-devices" response comes back
+# Pre-connect $client
+$client->connect;
 my @tracked2;
-# $client2->transport_usb(blocking => 0);
 $client2->devices_track(blocking => 0,
                         callback => sub { shift; push @tracked2, [@_] });
-$client->device_add("10.253.0.13:5555", blocking => 0);
-is($client->device_add("52000c4748d6a283", blocking => 1), "Added '52000c4748d6a283'", "Add two devices");
+# Spam a lot of changes. We hope to attach an answer to the devices_track answer
+for my $i (1..3) {
+    $client->device_drop("10.253.0.13:5555");
+    $client->device_add("10.253.0.13:5555");
+}
+is($client->device_add("52000c4748d6a283", blocking => 1),
+   "Added '52000c4748d6a283'", "Add two devices in a really convoluted way");
+is(@tracked2, 1, "Have one result from the callback");
+is($tracked2[0][0], undef, "No error from devices_track");
 my $tracked = scalar $tracker->wait;
 is_deeply($tracked, { "10.253.0.13:5555" => "offline" }, "Scalar context") ||
     dumper($tracked);
-#is($client->device_add("52000c4748d6a283", blocking => 1),
-#   "Added", "Add device");
-$tracker->track(sub { die "Boem" if $_[4] =~ /52000c4748d6a283/});
-eval { mainloop() };
-like($@, qr{^\QBoem at }, "Error during callback");

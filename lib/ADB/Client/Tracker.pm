@@ -18,11 +18,11 @@ our $BLOCK_SIZE = int(2**16);
 my $objects = 0;
 
 sub new {
-    my ($class, $socket, $command_ref, $block_size, $current) = @_;
+    my ($class, $socket, $command_ref, $block_size, $current, $in) = @_;
     ++$objects;
     return bless {
         socket		=> $socket,
-        in		=> "",
+        in		=> $in,
         result		=> undef,
         current		=> {%$current},
         command_ref	=> $command_ref,
@@ -33,7 +33,8 @@ sub new {
 }
 
 sub track {
-    my ($tracker, $callback) = @_;
+    my $tracker = shift;
+    my $callback = shift || croak "No callback";
 
     croak "Already tracking" if $tracker->{callback};
     croak "Socket closed" if !$tracker->{socket};
@@ -57,6 +58,10 @@ sub untrack {
     } else {
         $tracker->{socket}->delete_read;
     }
+}
+
+sub is_tracking {
+    return !!shift->{callback};
 }
 
 sub error {
@@ -128,7 +133,7 @@ sub _process {
             $tracker->{socket} = undef;
             die $err;
         }
-        $tracker->{callback} || return
+        $tracker->is_tracking || return
     }
 }
 

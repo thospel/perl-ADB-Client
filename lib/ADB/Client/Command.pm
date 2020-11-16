@@ -12,8 +12,8 @@ use ADB::Client::Utils qw(adb_check_response display_string info $DEBUG $QUIET);
 use Exporter::Tidy
     other	=>[
         qw(command_check_response
-           COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE EXPECT_EOF
-           MAYBE_EOF SERIAL TRANSPORT COMMAND_REF CALLBACK ARGUMENTS STATE)];
+           COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE CALLBACK ARGUMENTS
+           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT COMMAND_REF STATE)];
 
 use constant {
     # Index in @COMMANDS element
@@ -31,14 +31,18 @@ use constant {
     # FLAGS values:
     # After OKAY we still expect the connection to be closed
     EXPECT_EOF	=> 1,
+    # After the expected number of bytes more bytes may follow even though we
+    # didn't send a new command.
+    # Should never appear in combination with EXPECT_EOF
+    MAYBE_MORE	=> 2,
     # FAIL may or may not close the connection
     # Currently not relevant since we always close the connection ourselves
-    # if we see a FAIL
-    # Mainly meant for host:transport which may close the connection or not
+    # when we see a FAIL
+    # Mainly describes host:transport which may close the connection or not
     # depending on the adb version
-    MAYBE_EOF	=> 2,
+    MAYBE_EOF	=> 4,
     # This command needs an active transport
-    TRANSPORT	=> 4,
+    TRANSPORT	=> 8,
     # Commands like host:features need a transport. But one doesn't need to be
     # active, it will do an implicit host:transport-any first if no transport
     # is active. You can change the implicit transport by using variations like:
@@ -48,7 +52,7 @@ use constant {
     # Many (all ?) host command like host:version also accept these alternate
     # syntaxes, but typically we don't set the SERIAL flag for them since they
     # ignore the transport given.
-    SERIAL	=> 8,
+    SERIAL	=> 16,
 
     # Index in ADB::Client::Command
     COMMAND_REF	=> 0,

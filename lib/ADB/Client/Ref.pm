@@ -14,7 +14,7 @@ use Storable qw(dclone);
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
 use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
-    qw(info caller_info callers dumper adb_check_response display_string
+    qw(info caller_info callers dumper display_string
        ip_port_from_addr clocktime_running
        FAILED BAD_ADB ASSERTION INFINITY
        $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
@@ -22,9 +22,9 @@ use ADB::Client::Utils
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(command_check_response
-                            COMMAND_NAME COMMAND FLAGS PROCESS CODE EXPECT_EOF
-                            MAYBE_EOF SERIAL TRANSPORT COMMAND_REF CALLBACK
-                            ARGUMENTS STATE);
+                            COMMAND_NAME COMMAND FLAGS PROCESS CODE
+                            EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL
+                            TRANSPORT COMMAND_REF CALLBACK ARGUMENTS STATE);
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
@@ -60,7 +60,7 @@ use constant {
 
 our @COMMANDS;
 our @BUILTINS = (
-    # command, number of result bytes, expect close
+    # command, number of result bytes (-1: read count), expect close
     # See the index in command array constants
     FATAL,
     MARKER,
@@ -86,7 +86,7 @@ our @BUILTINS = (
     [device_path	=> "host:get-devpath", -1, EXPECT_EOF | SERIAL],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
-    [devices_track	=> "host:track-devices", -1, 0, \&process_devices],
+    [devices_track	=> "host:track-devices", -1, MAYBE_MORE, \&process_devices],
     [_transport		=> "host:transport-%s", 0, MAYBE_EOF],
     [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
     [_tport		=> "host:tport:%s", 8, 0, \&process_tport],
@@ -99,10 +99,14 @@ our @BUILTINS = (
     # all the wait-for-device variants strictly have a SERIAL version
     # But only host-serial:<serial>:wait-for-<transport> does anything special
     # and it recognizes that serial irrespective of the <transport>
-    [wait		=> "host:wait-for-any-%s", 0, 0, [\&process_device_wait, "timeout"]],
-    [wait_serial	=> 'host-serial:%2$s:wait-for-any-%1$s', 0, 0, [\&process_device_wait, "timeout"]],
-    [wait_usb	=> "host:wait-for-usb-%s", 0, 0, [\&process_device_wait, "timeout"]],
-    [wait_local	=> "host:wait-for-local-%s", 0, 0, [\&process_device_wait, "timeout"]],
+    [wait		=> "host:wait-for-any-%s", 0, MAYBE_MORE,
+     [\&process_device_wait, "timeout"]],
+    [wait_serial	=> 'host-serial:%2$s:wait-for-any-%1$s', 0, MAYBE_MORE,
+     [\&process_device_wait, "timeout"]],
+    [wait_usb		=> "host:wait-for-usb-%s", 0, MAYBE_MORE,
+     [\&process_device_wait, "timeout"]],
+    [wait_local		=> "host:wait-for-local-%s", 0, MAYBE_MORE,
+     [\&process_device_wait, "timeout"]],
     [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
     # [sideload		=> "sideload:%s", 0, TRANSPORT|EXPECT_EOF],
     # [device_reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
@@ -1417,13 +1421,13 @@ sub _reader {
 
     my ($error, $str) = command_check_response($client_ref, $rc, $command_ref) or return;
     return $client_ref->error($str) if $error;
-    if ($client_ref->{in} ne "") {
+    if ($client_ref->{in} ne "" && !($command_ref->[FLAGS] & MAYBE_MORE)) {
         $str = display_string($client_ref->{in});
         $client_ref->error("Spurious response bytes: $str");
         return;
     }
-    $client_ref->{sent} = 0;
 
+    $client_ref->{sent} = 0;
     # Success
     if ($command_ref->[FLAGS] & EXPECT_EOF) {
         # Delay until actual EOF
@@ -1437,6 +1441,7 @@ sub _reader {
     # Drop transaction timeout
     $client_ref->{timeout} = undef;
     # That should have been the only pending activity
+    # (We already checked that out = "")
     $client_ref->{active} = 0;
 
     $client_ref->success($str);
@@ -1513,7 +1518,8 @@ sub process_devices {
         # Notice that close doesn't actually close the socket, it just removes
         # the reference. And since we have a copy the socket remains open
         $client_ref->close;
-        @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_retired->ref, $client_ref->{block_size}, \%devices);
+        @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_retired->ref, $client_ref->{block_size}, \%devices, $client_ref->{in});
+        $client_ref->{in} = "";
     }
     return [\%devices, \@devices, shift, @tracker];
 }
@@ -1527,10 +1533,24 @@ sub process_device_wait {
 
     my $command = $client_ref->command_retired;
     $command->[COMMAND_REF] = DEVICE_WAIT2;
+
+    if ($client_ref->{in} ne "" and
+        my ($error, $str) = command_check_response(
+            $client_ref, length $client_ref->{in}, DEVICE_WAIT2)) {
+        # Oh, we already got the result of the wait!
+        return $str if $error;
+        if ($client_ref->{in} ne "") {
+            $str = display_string($client_ref->{in});
+            return "Spurious response bytes: $str";
+        }
+        $client_ref->{expect_eof} = \$str;
+        # Wait for EOF
+    }
+    # need to wait for more bytes (typically when the device gets connected)
     my $state = $command->[STATE];
     $client_ref->{timeout} = timer(
-            $state->{timeout} // $client_ref->{transaction_timeout},
-            sub { $client_ref->_transaction_timed_out });
+        $state->{timeout} // $client_ref->{transaction_timeout},
+        sub { $client_ref->_transaction_timed_out });
     $client_ref->{socket}->add_read(sub { $client_ref->_reader });
     $client_ref->{sent} = 1;
     $client_ref->{active} = 1;

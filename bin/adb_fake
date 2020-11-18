@@ -580,7 +580,6 @@ sub transport_type_name {
     my ($type, $many) = @_;
 
     return $many ? "devices/emulators" : "device/emulator" if $type eq "any";
-    return $many ? "devices/emulators" : "device/emulator" if $type eq "tcp";
     return $many ? "devices"           : "device"          if $type eq "usb";
     return $many ? "emulators"         : "emulator"        if $type eq "local";
     die "Unknown transport type '$type'";
@@ -714,7 +713,7 @@ sub command_host {
         $state->{wait_serial} = $serial;
         # Currently don't have a strategy for read. Works badly for now
         # $state->{socket}->delete_read;
-    } elsif ($command =~ m{^(transport|tport):(any|usb|tcp|local|serial:(.*))}) {
+    } elsif ($command =~ m{^(transport|tport):(any|usb|local|serial:(.*))}) {
         # host-local:tport:usb gets you usb
         # host-usb:tport:local gets you local
         # host-serial:0715f712da553032:tport:<anything> gets you that usb serial
@@ -1190,8 +1189,6 @@ sub transport {
         return $devices->get($serial) // ();
     } elsif ($type eq "any" || $type eq "") {
         return $device if $device;
-        return $devices->all;
-    } elsif ($type eq "tcp") {
         return $devices->all;
     } elsif ($type eq "usb") {
         return grep $_->usb => $devices->all;

@@ -12,7 +12,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 190;
+use Test::More tests => 184;
 use TestDrive qw(adb_start adb_version dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -314,17 +314,9 @@ eval { $client->transport_any };
 like($@, qr{^\Qmore than one device/emulator at },
      "Multiple devices for transport any");
 
-eval { $client->transport_tcp };
-like($@, qr{^\Qmore than one device/emulator at},
-     "Multiple devices for transport tcp");
-
 eval { $client->tport_any };
 like($@, qr{^\Qmore than one device/emulator at },
      "Multiple devices for tport any");
-
-eval { $client->tport_tcp };
-like($@, qr{^\Qmore than one device/emulator at},
-     "Multiple devices for tport tcp");
 
 for my $command (@serial_commands) {
     is($client->transport_usb, "", "Can transport usb");
@@ -422,13 +414,11 @@ for my $command (@serial_commands) {
 }
 
 is($client->transport_any, "", "Can transport any");
-is($client->transport_tcp, "", "Can transport tcp");
 is($client->transport_usb, "", "Can transport usb");
 eval { $client->transport_local };
 like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
 
 is($client->tport_any, 2, "Can tport any");
-is($client->tport_tcp, 2, "Can tport tcp");
 is($client->tport_usb, 2, "Can tport usb");
 eval { $client->tport_local };
 like($@, qr{^\Qno emulators found at }, "Dropped the networked device");
@@ -448,7 +438,7 @@ for my $command (@serial_commands) {
     like($@, qr{^no devices/emulators found at }, "Cannot get $command without devices");
 }
 
-for my $transport (qw(transport_any transport_tcp tport_any tport_tcp)) {
+for my $transport (qw(transport_any tport_any)) {
 eval { $client->$transport };
 like($@, qr{^\Qno devices/emulators found at },
      "No devices for $transport");

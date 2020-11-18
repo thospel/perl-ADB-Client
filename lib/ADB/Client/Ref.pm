@@ -88,6 +88,11 @@ our @BUILTINS = (
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
     [devices_track	=> "host:track-devices", -1, MAYBE_MORE, \&process_devices],
     [_transport		=> "host:transport-%s", 0, SERIAL|MAYBE_EOF],
+    # Both of these work:
+    # host-serial:0715f712da553032:transport-this_does_not_matter
+    # host:transport:0715f712da553032
+    # Make the second one available. It is less ambiguous for serials with :
+    [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
     [_tport		=> "host:tport:%s", 8, SERIAL, \&process_tport],
     [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
     [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],

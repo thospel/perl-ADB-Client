@@ -186,22 +186,12 @@ sub transport_usb {
     return shift->_transport("usb", @_);
 }
 
-sub transport_tcp {
-    return shift->_transport("tcp", @_);
-}
-
 sub transport_any {
     return shift->_transport("any", @_);
 }
 
 sub transport_local {
     return shift->_transport("local", @_);
-}
-
-sub transport_serial {
-    my $client = shift;
-    my $serial = shift || croak "Missing serial";
-    return $client->_transport_serial($serial, "any", @_);
 }
 
 sub transport_id {
@@ -216,10 +206,6 @@ sub tport_usb {
     return shift->_tport("usb", @_);
 }
 
-sub tport_tcp {
-    return shift->_tport("tcp", @_);
-}
-
 sub tport_any {
     return shift->_tport("any", @_);
 }
@@ -231,14 +217,15 @@ sub tport_local {
 # Both of these work:
 # host-serial:0715f712da553032:tport:this_does_not_matter
 # host:tport:serial:0715f712da553032
+# Pick the second one since it is less ambiguous when parsing serials with :
 sub tport_serial {
     my $client = shift;
     my $serial = shift || croak "Missing serial";
-    return $client->_tport_serial($serial, "any", @_);
+    return $client->_tport("serial:$serial", @_);
 }
 
 # Only this works: host-transport-id:346:tport:this_does_not_matter
-# This fails: host:tport:transport-id:346
+# This doesn't exist: host:tport:transport-id:346
 sub tport_id {
     my $client = shift;
     my $id = shift // croak "Missing id";

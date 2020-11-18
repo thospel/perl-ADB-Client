@@ -21,7 +21,7 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 545;
+use Test::More tests => 551;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -68,8 +68,20 @@ use TestDrive qw(adb_start adb_unreachable dumper
 use ADB::Client qw(mainloop event_init unloop timer immediate);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
-                          realtime_running clocktime_running);
+                          realtime_running clocktime_running get_home);
 use ADB::Client::Command qw(EXPECT_EOF);
+
+ok(get_home(), "get_home returns something");
+$ENV{HOME} = "/foo";
+is(get_home(), "/foo", "can set HOME environment variable");
+$ENV{HOME} = "/foo/";
+is(get_home(), "/foo", "get_home removes trailing /");
+$ENV{HOME} = "/";
+is(get_home(), "/", "get_home does not removes trailing /");
+delete $ENV{HOME};
+my $home = get_home();
+ok($home, "get_home still returns something");
+is($ENV{HOME}, $home, "HOME environment variable gets set");
 
 my $port  = adb_start();
 my $rport = adb_unreachable();

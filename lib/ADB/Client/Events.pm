@@ -131,7 +131,7 @@ sub delete_error(*) {
 }
 
 sub unloop {
-    my $loop_levels = shift;
+    my $loop_levels = shift // -1;
     $unlooping[$loop_levels] = shift || 1;
 }
 

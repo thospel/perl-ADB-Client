@@ -29,6 +29,8 @@ WriteMakefile
      PREREQ_PM		=> {
          "LWP"			=> "5.46",
          "Exporter::Tidy"	=> "0.06",
+         # You probably also want a good implementation like Term::ReadLine::Gnu
+         "Term::ReadLine"	=> "0.0",
          # "IO::Socket::IP"	=> "0.38",
      },
      ABSTRACT		=> 'Download a novel from the web and convert it to epub',

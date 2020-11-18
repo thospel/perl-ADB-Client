@@ -5,6 +5,7 @@ use warnings;
 our $VERSION = '1.000';
 
 use Data::Dumper;
+use File::Spec;
 use Time::Local qw(timegm);
 use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
 use Errno qw(ENOTCONN EPROTONOSUPPORT);
@@ -21,7 +22,7 @@ use Exporter::Tidy
     other	=>[qw(addr_info adb_addr_info info caller_info callers dumper
                       string_from_value display_string adb_check_response
                       realtime clocktime realtime_running clocktime_running
-                      ip_port_from_addr addr_from_ip_port is_listening
+                      ip_port_from_addr addr_from_ip_port is_listening get_home
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
                       $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
@@ -76,6 +77,58 @@ sub realtime_running {
 
 sub clocktime_running {
     return clock_gettime($CLOCK_TYPE) - $BASE_CLOCKTIME;
+}
+
+our $me;
+if ($^O eq "MSWin32") {
+    require Win32;
+    $me = Win32::LoginName();
+} else {
+    if (my $user = $ENV{LOGNAME}) {
+        if (defined(my $uid = getpwnam($user))) {
+            $me = $user if $> == $uid;
+        }
+    }
+    $me ||= getpwuid $>;
+}
+die "Can't determine who I am" if !$me;
+# We can basically trust $me since it came from a real system request
+# Still, let's filter some weird characters
+die "Unacceptable userid '$me'" if $me eq "." || $me eq "..";
+$me =~ /^([0-9A-Za-z_.-]+)\z/ || die "Weird characters in userid '$me'";
+# Seems ok. Untaint
+$me = $1;	## no critic (UselessNoCritic CaptureWithoutTest)
+
+# Determine HOME directory
+sub get_home() {
+    my $home = $ENV{HOME};
+    if (!$home) {
+        if ($^O eq "MSWin32") {
+            croak "Cannot determine the home directory since user '$me' has neither the 'HOME' nor the 'UserProfile' environment variable" if !$ENV{UserProfile};
+            $home = $ENV{UserProfile};
+        } else {
+            my @user_props = getpwuid($>) or
+                croak "Could not get userinfo for '$>'";
+            $home = $user_props[7] || croak "User $> has no home";
+        }
+    }
+    $home =~ tr{\\}{/} if $^O eq "MSWin32";
+    $home =~ s{/+\z}{};
+    $home = "/" if $home eq "";
+
+    # Due to the way the previous tests are done we know $home is not empty
+    # Check and untaint
+    ## no critic (UselessNoCritic CaptureWithoutTest)
+    $home =~ m{^([\x20-\x7f]+)\z} || do {
+        $home =~ m{([^\x20-\x7f])};
+        croak sprintf("HOME variable '%s' contains unacceptable character '%s' (\\x%02x)", $home, $1, ord($1));
+    };
+    $home = $1;
+    File::Spec->file_name_is_absolute($home) ||
+        croak "Home directory '$home' is not absolute";
+    # Downgrade failure should be impossible
+    utf8::downgrade($home);
+    return $ENV{HOME} = $home;
 }
 
 sub addr_info {

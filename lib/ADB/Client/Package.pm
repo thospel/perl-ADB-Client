@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "027";
-$release_time = 1605691531;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "028";
+$release_time = 1605695699;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -30,6 +30,9 @@ $release_time = 1605691531;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   'bin/adb_tester' => {
+    '1.000' => '1.000'
+  },
+  'bin/adb_tracker' => {
     '1.000' => '1.000'
   },
   'lib/ADB/Client.pm' => {
@@ -108,6 +111,9 @@ $release_time = 1605691531;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/21_non_loopback.t' => {
+    '1.000' => '1.000'
+  },
+  't/80_syntax.t' => {
     '1.000' => '1.000'
   },
   't/90_real_adb.t' => {

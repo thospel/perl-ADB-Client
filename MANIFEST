@@ -5,6 +5,7 @@ Makefile.PL
 README
 bin/adb_fake
 bin/adb_tester
+bin/adb_tracker
 lib/ADB/Client.pm
 lib/ADB/Client/Command.pm
 lib/ADB/Client/Events.pm
@@ -31,6 +32,7 @@ t/11_spawn.t
 t/12_spawn_socket.t
 t/20_ipv6.t
 t/21_non_loopback.t
+t/80_syntax.t
 t/90_real_adb.t
 t/98_fatal.t
 t/99_internals.t

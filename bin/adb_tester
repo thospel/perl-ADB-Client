@@ -51,6 +51,7 @@ my $IN  = $term->IN  || die "No IN";
 my $OUT = $term->OUT || die "No OUT";
 $term->event_loop(\&mainloop);
 $term->read_history($history_file);
+# $term->stuff_char(10);
 
 my $socket = IO::Socket::IP->new(
     PeerHost => $host,
@@ -150,3 +151,11 @@ while (1) {
     command_process();
 }
 $term->write_history($history_file);
+
+END {
+    local $?;
+    $term->rl_deprep_terminal() if $term;
+    #delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+    #$ENV{PATH}="/usr/bin:/bin";
+    #system("stty", "sane");
+}

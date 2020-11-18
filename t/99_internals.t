@@ -21,7 +21,7 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 551;
+use Test::More tests => 635;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules

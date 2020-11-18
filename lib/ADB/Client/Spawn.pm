@@ -214,7 +214,7 @@ sub _spawn {
                     $ENV{ANDROID_ADB_LOG_PATH} = "/proc/$$/fd/$log_fd";
                 }
             }
-            local $SIG{__WARN__} = sub {};
+            no warnings "exec";
             exec(@adb) || die "$^E\n";
         };
         my $err = $@ || "Assertion: Missing error";

@@ -63,12 +63,14 @@ my $IDLE_TIMEOUT = 10;
 $| = 1;
 
 my $Listen = "tcp:localhost:5037";
+
 my @argv_old = @ARGV;
 die "Could not parse your command line. Try $0 -h\n" unless
     GetOptions("a!"		=> \my $all,
                "L=s"		=> \$Listen,
                "reply-fd=o"	=> \my $reply_fd,
                "acceptfd=o"	=> \my $accept_fd,
+               "version|V=o"	=> \my $adb_version,
                # Non standard options
                "verbose|v!"	=> \my $verbose,
                "timeout|t=o"	=> \my $idle_timeout,
@@ -106,9 +108,9 @@ my ($finish, $idle_timer, %listeners, %specials, @sockets);
 
 our $BLOCK_SIZE = 65536;
 # Default ADB version for plain adb_fake
-our $ADB_VERSION = 39;
+our $ADB_VERSION = $adb_version || 39;
 # Default ADB version for adb_fake with arguments (called like real adb)
-our $ADB_VERSION2 = 30;
+our $ADB_VERSION2 = $adb_version || 30;
 our $TIMEOUT	= 2;
 
 sub acceptable {
@@ -225,6 +227,7 @@ sub daemon {
     open(STDIN, "<", NULL) ||
         die "Could not open '" . NULL . "' as STDIN: $^E";
 
+    # use ANDROID_ADB_LOG_PATH bin/adb_fake ... to keep STDERR
     if (my $log_path = $ENV{ANDROID_ADB_LOG_PATH} // NULL) {
         open(my $fh, ">", $log_path) || die "open($log_path): $^E\n";
         open(STDERR, ">&", $fh) || die "Cannot dup to STDERR: $^E";
@@ -253,8 +256,9 @@ sub daemon {
         IPV6 ? "::" :
         "0.0.0.0";
     $sleeper = timer($sleep, sub {
-        add_listener(LISTENER, $ADB_VERSION2, $ip, $port);
-        print($reply "OK\n") || die "Could not write to fd $reply_fd: $^E";
+        my $p = add_listener(LISTENER, $ADB_VERSION2, $ip, $port);
+        my $OK = $port ? "OK" : "OK $p";
+        print($reply "$OK\n") || die "Could not write to fd $reply_fd: $^E";
         close($reply) || die "Could not close fd $reply_fd: $^E";
     });
     mainloop();
@@ -490,6 +494,9 @@ sub new {
         write_timeout	=> $TIMEOUT,
 
         transport	=> 0,
+        forward		=> {},
+        # Maybe reverse should be on the device ?
+        reverse		=> {},
     }, $class;
 }
 
@@ -608,6 +615,18 @@ sub adb_command {
     }
 }
 
+my %command_serial = (
+    features		=> \&command_features,
+    "get-serialno"	=> \&command_get_serialno,
+    "get-state"		=> \&command_get_state,
+    "get-devpath"	=> \&command_get_devpath,
+    "forward:"		=> \&command_forward,
+);
+my $command_serial_regex =join("|",
+                               map(quotemeta($_) . ($_ =~ /:\z/ ? '' : '\z'),
+                                   sort keys %command_serial));
+$command_serial_regex = qr{^($command_serial_regex)(.*)\z};
+
 sub command_host {
     my ($state, $type, $id, $serial, $command) = @_;
 
@@ -633,7 +652,40 @@ sub command_host {
         $state->{on_read} = \&adb_close;
     } elsif ($command eq "host-features") {
         $state->adb_output(OKAY, join "," => @host_features);
-    } elsif ($command =~ m{^(?:features|get-serialno|get-state|get-devpath)\z}) {
+    } elsif ($command =~ m{^connect:(.*?)(?::(\d+))?\z}as) {
+        my $host = $1;
+        my $port = $2 || 5555;
+        # Real ADB does name resolution
+        my $serial = "$host:$port";
+        # For the real adb if it could make the connection but not talk the
+        # device it is added in state "offline".
+        # I didn't bother to implement an example of that.
+        if ($listener->{devices}->get($serial)) {
+            $state->adb_output(FAIL, "already connected to $serial");
+        } elsif ($listener->device_add($serial)) {
+            $state->adb_output(OKAY, "connected to $serial");
+        } else {
+            # Several kinds of other connect and resolution errors are possible
+            $state->adb_output(FAIL, "failed to connect to '$serial': Connection refused");
+        }
+    } elsif ($command =~ m{^disconnect:((.*?)(?::(\d+))?)\z}as) {
+        my $name = $1;
+        my $host = $2;
+        my $port = $3 || 5555;
+        # Real ADB does name resolution
+        my $serial = "$host:$port";
+        if (my $device = $listener->{devices}->get($serial)) {
+            $state->adb_output(OKAY, "disconnected $name");
+            # AFTER adb_output since this can close $state
+            $device->drop;
+        } else {
+            $state->adb_output(FAIL, "no such device '$serial'");
+        }
+    } elsif ($command =~ /$command_serial_regex/o) {
+        my $sub_command = $1;
+        my $arguments   = $2;
+        my $code = $command_serial{$sub_command} ||
+            die "Assertion: Could not find command_serial{$sub_command}";
         #$listener->{devices}->dumper;
         my @devices = $listener->{devices}->transport($type, $id, $serial, $state->{transport});
         if (@devices == 1) {
@@ -641,18 +693,7 @@ sub command_host {
                 my $offline = $devices[0]->state;
                 $state->adb_output(FAIL, "device $offline");
             } else {
-                my $device = $devices[0];
-                if ($command eq "features") {
-                    $state->adb_output(OKAY, $device->features_string);
-                } elsif ($command eq "get-devpath") {
-                    $state->adb_output(OKAY, $device->usb // "unknown");
-                } elsif ($command eq "get-serialno") {
-                    $state->adb_output(OKAY, $device->serial);
-                } elsif ($command eq "get-state") {
-                    $state->adb_output(OKAY, $device->state);
-                } else {
-                    die "Assertion: Unhandled command '$command'";
-                }
+                $code->($state, $devices[0], $arguments, $sub_command);
             }
         } elsif (@devices) {
             my $name = transport_type_name($type, 0);
@@ -664,6 +705,25 @@ sub command_host {
         } else {
             my $name = transport_type_name($type, 1);
             $state->adb_output(FAIL, "no $name found");
+        }
+    } elsif ($command eq "list-forward") {
+        my $out = "";
+        my $forwards = $listener->{forwards};
+        for my $from (sort keys %$forwards) {
+            $out .= "$forwards->{$from}[0] $from $forwards->{$from}[1]\n";
+        }
+        $state->adb_output(OKAY, $out);
+    } elsif ($command eq "killforward-all") {
+        %{$listener->{forwards}} = ();
+        $state->adb_output(UNCOUNTED, "OKAY");
+    } elsif ($command =~ m{^killforward:(.*)}) {
+        # The real host:killforward demands a transport
+        my $from = $1;
+        my $forwards = $listener->{forwards};
+        if (defined $forwards->{from}) {
+            $state->adb_output(UNCOUNTED, "OKAY");
+        } else {
+            $state->adb_output(FAIL, "listener '$from' not found");
         }
     } elsif ($command =~ m{^wait-for-(any|usb|local)-(device|recovery|rescue|sideload|bootloader|disconnect)\z}) {
         my $type  = $1 || $type;
@@ -747,37 +807,66 @@ sub command_host {
             my $name = transport_type_name($type, 1);
             $state->adb_output(FAIL, "no $name found", 1);
         }
-    } elsif ($command =~ m{^connect:(.*?)(?::(\d+))?\z}as) {
-        my $host = $1;
-        my $port = $2 || 5555;
-        # Real ADB does name resolution
-        my $serial = "$host:$port";
-        # For the real adb if it could make the connection but not talk the
-        # device it is added in state "offline".
-        # I didn't bother to implement an example of that.
-        if ($listener->{devices}->get($serial)) {
-            $state->adb_output(FAIL, "already connected to $serial");
-        } elsif ($listener->device_add($serial)) {
-            $state->adb_output(OKAY, "connected to $serial");
-        } else {
-            # Several kinds of other connect and resolution errors are possible
-            $state->adb_output(FAIL, "failed to connect to '$serial': Connection refused");
-        }
-    } elsif ($command =~ m{^disconnect:((.*?)(?::(\d+))?)\z}as) {
-        my $name = $1;
-        my $host = $2;
-        my $port = $3 || 5555;
-        # Real ADB does name resolution
-        my $serial = "$host:$port";
-        if (my $device = $listener->{devices}->get($serial)) {
-            $state->adb_output(OKAY, "disconnected $name");
-            # AFTER adb_output since this can close $state
-            $device->drop;
-        } else {
-            $state->adb_output(FAIL, "no such device '$serial'");
-        }
     } else {
         $state->adb_output(FAIL, "unknown host service '$command'");
+    }
+}
+
+sub command_features {
+    my ($state, $device) = @_;
+
+    $state->adb_output(OKAY, $device->features_string);
+}
+
+sub command_get_devpath {
+    my ($state, $device) = @_;
+    $state->adb_output(OKAY, $device->usb // "unknown");
+}
+
+sub command_get_serialno {
+    my ($state, $device) = @_;
+    $state->adb_output(OKAY, $device->serial);
+}
+
+sub command_get_state {
+    my ($state, $device) = @_;
+    $state->adb_output(OKAY, $device->state);
+}
+
+sub command_forward {
+    my ($state, $device, $arguments) = @_;
+
+    my $listener = $state->{listener};
+    my $serial = $device->serial;
+    my $no_rebind = $arguments =~ s/^norebind://;
+    if (my ($from, $to) = $arguments =~ /^([^;]+);([^;]+)\z/) {
+        if ($from =~ /^(?:(?:tcp|jdwp|acceptfd):(\d+)|(?:localabstract|localreserved|localfilesystem|dev):(.*))\z/a) {
+            # I haven't actualy investigated any of these except tcp:<port>
+            # So the output format for the other case is likely nonsense
+            my $port = $+ || 1024 + int rand(2**16-1024);
+            if ($port < 1024) {
+                $state->adb_output(FAIL, "cannot bind listener: Permission denied");
+            } else {
+                $from = "tcp:$port" if !$+;
+                if (exists $listener->{forwards}{$from}) {
+                    if ($no_rebind) {
+                        $state->adb_output(FAIL, "cannot rebind existing socket");
+                        return;
+                    }
+                    $state->adb_output(UNCOUNTED, "OKAY");
+                } else {
+                    $state->adb_output(UNCOUNTED, "", 1);
+                    $state->adb_output(OKAY, $port);
+                }
+                $listener->{forwards}{$from} = [$serial, $to];
+            }
+        } else {
+            # The real adb outputs nothing
+            # $state->adb_output(FAIL, "");
+            $state->adb_output(FAIL, "bad from: $from");
+        }
+    } else {
+        $state->adb_output(FAIL, "bad forward: $arguments");
     }
 }
 
@@ -982,6 +1071,14 @@ sub devices_init {
     $listener->{devices} = $devices;
 }
 
+sub forwards_drop {
+    my ($listener, $serial) = @_;
+
+    for my $from (sort keys %{$listener->{forwards}}) {
+        delete $listener->{forwards}{$from} if $listener->{forwards}{$from}[0] eq $serial;
+    }
+}
+
 package Device;
 use Carp;
 use Scalar::Util qw(weaken);
@@ -1085,6 +1182,12 @@ sub drop {
     $device->{devices}->drop($device);
 }
 
+sub forwards_drop {
+    my ($device) = @_;
+
+    $device->listener->forwards_drop($device->serial);
+}
+
 sub string {
     my ($device) = @_;
 
@@ -1129,6 +1232,10 @@ sub add {
 
 sub drop {
     my ($devices, $device) = @_;
+
+    # Drop all forwards for this device.
+    # Probably we should already do this if the device goes offline
+    $device->forwards_drop;
 
     my $serial = $device->serial;
     delete $devices->{devices}{$serial} || croak "Unknown serial '$serial'";

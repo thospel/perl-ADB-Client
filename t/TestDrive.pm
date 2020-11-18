@@ -33,6 +33,7 @@ BEGIN {
     $ENV{ADB_FAKE_ERROR} = "";
     $ENV{ADB_FAKE_SLEEP} = 0;
     delete $ENV{ANDROID_ADB_LOG_PATH};
+    # delete @ENV{grep /^ANDROID_/, sort keys %ENV};
 }
 
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
@@ -53,7 +54,7 @@ ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { retur
 use Exporter::Tidy
     other =>
     [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects $adb_fake
-        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE unalarm
+        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE unalarm adb_run
         adb_start adb_stop adb_unacceptable adb_unreachable adb_unreachable6
         adb_closer adb_echo adb_echo6 adb_version adb_version6 adb_blackhole
         addr_filter collect_stderr collected_stderr uncollect_stderr dumper)];
@@ -143,11 +144,26 @@ sub collected_stderr {
     return $old;
 }
 
+# Run the system's adb command
+sub adb_run {
+    my $out;
+    my $pid = do {
+        no warnings "exec";
+        open(my $fh, "-|", $ADB, @_) || die "Cannot start $ADB: $^E";
+        local $/;
+        $out = <$fh>;
+        close($fh);
+        Test::More::is($?, 0, "$ADB @_ succeeds");
+    };
+    return $out;
+}
+
+# Run our own fake ADB server
 sub adb_start {
     my $blib = grep abs_path($_) eq "$base_dir/blib/lib", @INC;
 
     $pid = do {
-        local $SIG{__WARN__} = sub {};
+        no warnings "exec";
         # open($adb_out = undef, "-|", $adb_fake)
         open($adb_out = undef, "-|", $^X, $adb_fake,
              $blib ? "--blib" : (),
@@ -172,7 +188,7 @@ sub adb_start {
         Test::More::BAIL_OUT("Unexpected EOF from fake adb server control");
     $line =~ /^adb_fake [1-9][0-9]*\.[0-9]{3}\n\z/ ||
         Test::More::BAIL_OUT("Unexpected EOF from greeting fake adb server control: $line");
-    return adb_version();
+    return adb_version(@_);
 }
 
 sub adb_stop {

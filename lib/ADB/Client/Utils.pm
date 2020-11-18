@@ -24,7 +24,7 @@ use Exporter::Tidy
                       realtime clocktime realtime_running clocktime_running
                       ip_port_from_addr addr_from_ip_port is_listening get_home
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
-                      $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT
+                      $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT $ADB_SERIAL
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
                       DISPLAY_MAX IPV6)];
 
@@ -49,6 +49,7 @@ our ($DEBUG, $VERBOSE, $QUIET);
 our $ADB_CLIENT_ENV = $ENV{ADB_CLIENT_ENV} // 1 || undef;
 our $ADB_HOST	= $ADB_CLIENT_ENV && $ENV{ANDROID_ADB_SERVER_ADDRESS} // "127.0.0.1";
 our $ADB_PORT	= $ADB_CLIENT_ENV && $ENV{ANDROID_ADB_SERVER_PORT} // 5037;
+our $ADB_SERIAL	= $ADB_CLIENT_ENV && $ENV{ANDROID_SERIAL} || undef;
 
 our $CLOCK_TYPE;
 our $CLOCK_TYPE_NAME =

@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 90_real_adb.t'
+# `make test'. After `make install' it should work as `perl 90_real_adbd.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 
@@ -14,27 +14,36 @@ use lib $Bin;
 use IO::Socket::IP qw();
 
 use Test::More;
-my $adb;
+my ($adb, $host, $port);
 BEGIN {
     $adb = $ENV{ADB_CLIENT_TEST_REAL};
     if (!$adb) {
         plan skip_all => "By default no tests are done using the real ADB server. If you want to run this please set the environment variable ADB_CLIENT_TEST_REAL to the name of your adb binary (probably 'adb') before doing 'make test'. Notice that this will start the real ADB server and leave it running even after the test finishes";
         exit;
     }
-    open(my $fh, "-|", $adb, "start-server") || do {
-        plan skip_all => "Cannot start '$adb': $^E";
-        exit;
-    };
-    my $out = do { local $/; <$fh> };
-    diag($out) if $out ne "";
-    close($fh);
-    if ($?) {
-        plan skip_all => "Unexpected exit code $? from '$adb start-server'";
-        return;
+    delete $ENV{ANDROID_ADB_LOG_PATH};
+    # Intentionally leave ANDROID_ADB_SERVER_ADDRESS, ANDROID_ADB_SERVER_PORT
+    {
+        # If ANDROID_ADB_SERVER_ADDRESS isn't localhost or unset this will
+        # probably fail
+        no warnings "exec";
+        open(my $fh, "-|", $adb, "start-server") || do {
+            plan skip_all => "Cannot start '$adb': $^E";
+            exit;
+        };
+        my $out = do { local $/; <$fh> };
+        diag($out) if $out ne "";
+        close($fh);
+        if ($?) {
+            plan skip_all => "Unexpected exit code $? from '$adb start-server'";
+            return;
+        }
     }
+    $host = $ENV{ANDROID_ADB_SERVER_ADDRESS} // "127.0.0.1";
+    $port = $ENV{ANDROID_ADB_SERVER_PORT} // 5037;
     my $socket = IO::Socket::IP->new(
-        PeerHost => "127.0.0.1",
-        PeerPort => 5037);
+        PeerHost => $host,
+        PeerPort => $port);
     if (!$socket) {
         plan skip_all => "Cannot connect to 127.0.0.1:5037 even after '$adb start-server': $@";
         exit;
@@ -43,15 +52,18 @@ BEGIN {
 }
 
 use TestDrive qw(dumper);
-use ADB::Client qw($ADB);
+use ADB::Client qw($ADB $ADB_HOST $ADB_PORT);
 
 # Use the real server
 $ADB = $adb;
+$ADB_HOST = $host;
+$ADB_PORT = $port;
 
 # Connect to the real server
 my $client = new_ok("ADB::Client");
 my $version = $client->version;
 ok($version, "adb version $version");
+# diag("Your ADB server has version $version");
 ok($client->devices, "Can fetch devices");
 
 # See if we can start servers by ourselves

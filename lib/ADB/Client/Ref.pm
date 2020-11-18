@@ -113,16 +113,21 @@ our @BUILTINS = (
     # [reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
     # [reconnect_device	=> "reconnect", 0, TRANSPORT|EXPECT_EOF],
     # [reconnect_offline	=> "host:reconnect-offline", 0, EXPECT_EOF],
-    # [usb	=> "usb:", 0, TRANSPORT|EXPECT_EOF],
-    # [tcpip	=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
-    # [jdwp	=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
-    # [forward_list	=> "host:list-forward", 0, EXPECT_EOF],
-    # [forward	=> "host:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
-    # [forward_norebind	=> "host:forward:norebind:%s;%s", 0, TRANSPORT|EXPECT_EOF],
-    # [forward_kill	=> "host:killforward:%s", 0, TRANSPORT|EXPECT_EOF],
-    # [forward_kill_all	=> "host:killforward-all", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse_list	=> "reverse:list-forward", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse	=> "host:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
+    # [usb		=> "usb:", 0, TRANSPORT|EXPECT_EOF],
+    # [tcpip		=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
+    # [jdwp		=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
+    [forward_list	=> "host:list-forward", -1, EXPECT_EOF, \&process_forward_list],
+    # These return double OKAY with a possible counted value from the second
+    [forward		=> "host:forward:%s;%s", INFINITY, EXPECT_EOF|SERIAL, \&process_forward],
+    [forward_norebind	=> "host:forward:norebind:%s;%s", INFINITY, EXPECT_EOF|SERIAL, \&process_forward],
+    # host:killforward fails if you don't select a device. Which is silly since
+    # the adb server know on which device which forward lives and indeed the
+    # kill actually still works even if you give the serial of some other
+    # device. So it shouldn't NEED TRANSPORT, but it does.
+    [forward_kill	=> "host:killforward:%s", INFINITY, TRANSPORT|EXPECT_EOF],
+    [forward_kill_all	=> "host:killforward-all", INFINITY, EXPECT_EOF],
+    [reverse_list	=> "reverse:list-forward", 0, TRANSPORT|EXPECT_EOF],
+    # [reverse	=> "reverse:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
     # [reverse_norebind	=> "reverse:forward:norebind:%s;%s", 0, TRANSPORT|EXPECT_EOF],
     # [reverse_kill	=> "reverse:killforward:%s", 0, TRANSPORT|EXPECT_EOF],
     # [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|EXPECT_EOF],
@@ -1573,6 +1578,33 @@ sub process_wait {
     $client_ref->{sent} = 1;
     $client_ref->{active} = 1;
     return undef;
+}
+
+sub process_forward_list {
+    my ($forwards) = @_;
+
+    my %forwards;
+    for (split /\n/, $forwards) {
+        my ($serial, $from, $to) = /^(\S+)\s+(\S+)\s+(.*\S)\s*\z/ or
+            die "Invalid forward line '$_'";
+        die "Duplicate from '$from'" if exists $forwards{$from};
+        $forwards{$from} = {
+            serial => $serial,
+            to     => $to,
+        };
+    }
+    return [\%forwards];
+}
+
+sub process_forward {
+    my ($forward) = @_;
+
+    return [""] if $forward eq "OKAY";
+    my %data = ( in => $forward );
+    my ($error, $str) = ADB::Client::Utils::adb_check_response(\%data, length $forward, -1, EXPECT_EOF) or die "Incomplete response '$forward'";
+    return $str if $error;
+    $data{in} eq "" || die "Still input left";
+    return [$str];
 }
 
 1;

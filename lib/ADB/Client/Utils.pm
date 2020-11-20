@@ -129,7 +129,9 @@ sub get_home() {
         croak "Home directory '$home' is not absolute";
     # Downgrade failure should be impossible
     utf8::downgrade($home);
-    return $ENV{HOME} = $home;
+    $ENV{HOME} = $home;
+    # utf8::decode($home);
+    return $home;
 }
 
 sub addr_info {
@@ -385,7 +387,6 @@ sub adb_check_response {
             if ($nr == INFINITY) {
                 substr($data->{in}, 0, 4, "");
                 my $response = substr($data->{in}, 0, $len-4, "");
-                utf8::decode($response);
                 return SUCCEEDED, $response;
             } else {
                 my $response = display_string($data->{in});
@@ -402,7 +403,6 @@ sub adb_check_response {
         }
         substr($data->{in}, 0, 4, "");
         my $response = substr($data->{in}, 0, $nr, "");
-        utf8::decode($response);
         return SUCCEEDED, $response;
     }
 
@@ -455,7 +455,6 @@ sub adb_check_response {
         };
     substr($data->{in}, 0, 8, "");
     my $response = substr($data->{in}, 0, $more, "");
-    utf8::decode($response);
     return $status, $response;
 }
 

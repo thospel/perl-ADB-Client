@@ -5,7 +5,7 @@ use warnings;
 our $VERSION = '1.000';
 
 use Carp;
-# our @CARP_NOT = qw(ADB::Client::Ref);
+our @CARP_NOT = qw(ADB::Client::Ref);
 
 use ADB::Client::Utils qw(adb_check_response display_string info $DEBUG $QUIET);
 
@@ -13,7 +13,7 @@ use Exporter::Tidy
     other	=>[
         qw(command_check_response
            SPECIAL COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
-           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT)];
+           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT UTF8_IN UTF8_OUT)];
 
 use constant {
     # Index in @COMMANDS element
@@ -53,6 +53,8 @@ use constant {
     # syntaxes, but typically we don't set the SERIAL flag for them since they
     # ignore the transport given.
     SERIAL	=> 16,
+    UTF8_IN	=> 32,
+    UTF8_OUT	=> 64,
 
     EMPTY_ARGUMENTS	=> [],
 
@@ -80,7 +82,12 @@ sub command_ref : method {
 
     if ($command_ref->[COMMAND] ne SPECIAL) {
         my $out = sprintf($command_ref->[COMMAND], @_);
-        utf8::encode($out);
+        if ($command_ref->[FLAGS] & UTF8_OUT) {
+            utf8::encode($out);
+        } elsif (!utf8::downgrade($out, 1)) {
+            $out = display_string($out);
+            croak "Argument cannot be converted to native 8 bit encoding";
+        }
         if (length $out >= 2**16) {
             $out = display_string($out);
             croak "Command too long: $out";
@@ -108,8 +115,11 @@ sub out {
 sub command_check_response {
     my ($data, $len_added, $command_ref) = @_;
 
-    return adb_check_response($data, $len_added, $command_ref->[NR_RESULTS],
-                              $command_ref->[FLAGS] & EXPECT_EOF);
+    my ($error, $str) =
+        adb_check_response($data, $len_added, $command_ref->[NR_RESULTS],
+                           $command_ref->[FLAGS] & EXPECT_EOF) or return;
+    utf8::decode($str) if !$error && $command_ref->[FLAGS] & UTF8_IN;
+    return $error, $str;
 }
 
 sub objects {

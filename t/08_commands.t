@@ -13,7 +13,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 36;
+use Test::More tests => 37;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -31,6 +31,9 @@ my $str = "Abcde";
 is($client->echo($str), $str, "Special characters and utf8");
 $str = " abc\nd\r\tf zg\x{123}z\0z ";
 is($client->echo($str), $str, "Special characters and utf8");
+eval { $client->connect($str) };
+like($@, qr{^\QArgument cannot be converted to native 8 bit encoding at },
+     "But by default no utf8");
 
 @result = $client->host_features;
 is_deeply(\@result, [

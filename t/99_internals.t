@@ -21,7 +21,7 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 635;
+use Test::More tests => 639;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -69,7 +69,7 @@ use ADB::Client qw(mainloop event_init unloop timer immediate);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
                           realtime_running clocktime_running get_home);
-use ADB::Client::Command qw(EXPECT_EOF);
+use ADB::Client::Command qw(EXPECT_EOF SERIAL);
 
 ok(get_home(), "get_home returns something");
 $ENV{HOME} = "/foo";
@@ -321,6 +321,17 @@ like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a 
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
 
+eval {
+    local @ADB::Client::Ref::BUILTINS = [foo => "foo", -1, SERIAL];
+    ADB::Client->add_commands;
+};
+like($@, qr{^No : in command 'foo' at },
+     "Cannot create a serial command without :");
+
+eval { ADB::Client->add_command(["foo"]) };
+like($@, qr{^No COMMAND in command 'foo' at },
+     "Cannot create a normal command without actually having an ADB command");
+
 # Try an out of order wait
 $client2->marker(callback => sub {
     eval { $client->client_ref->wait };
@@ -390,10 +401,10 @@ while (1) {
 }
 cmp_ok($index, ">", 0, "Discovered at least one command");
 
-# Try a way too long command
-eval { ADB::Client::Command->new([])->ref([version0 => "Foo:%s", -1, 1], "a" x 1e5) };
-like($@, qr{^Command too long: "Foo:a+"\.\.\. at },
-     "Too long command for ADB::Client::Command");
+# Try Command with odd number of arguments
+eval { ADB::Client::Command->new("Wee") };
+like($@, qr{^Odd nuber of arguments at },
+     "ADB::Client::Command->new takes an even number of arguments");
 
 # Try some bad ADB::Client->new
 eval { ADB::Client->new(undef) };
@@ -487,6 +498,7 @@ is($client->port, 5037, "Port was set");
 }
 eval { $client->client_ref->_resolve() };
 like($@, qr{^Fatal: Assertion: No command at }, "Resolve without commands");
+my $fatal_ref = $client->client_ref->{commands}[0]->command_ref;
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
@@ -510,8 +522,12 @@ cmp_ok($result, "==", $hash, "Bad addr_info");
 isa_ok($retired, "ADB::Client::Command", "Can get command");
 is_deeply($retired->arguments, { host => "Waffle" },
           "Arguments are in the old command");
-isa_ok($retired->ref, "ARRAY", "Commandref is an ARRAY reference");
+my $command_ref = $retired->command_ref;
+isa_ok($command_ref, "ARRAY", "Commandref is an ARRAY reference");
+cmp_ok($command_ref, "!=", $fatal_ref, "Command ref is not FATAL");
 is($retired->command_name, "resolve", "Can get command name");
+$retired->command_ref($fatal_ref);
+is($retired->command_ref, $fatal_ref, "Command ref is now FATAL");
 $retired = undef;
 
 eval { $client->client_ref->error("Boem") };

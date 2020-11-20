@@ -12,8 +12,8 @@ use ADB::Client::Utils qw(adb_check_response display_string info $DEBUG $QUIET);
 use Exporter::Tidy
     other	=>[
         qw(command_check_response
-           COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE CALLBACK ARGUMENTS
-           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT COMMAND_REF STATE)];
+           SPECIAL COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
+           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT)];
 
 use constant {
     # Index in @COMMANDS element
@@ -54,25 +54,19 @@ use constant {
     # ignore the transport given.
     SERIAL	=> 16,
 
-    # Index in ADB::Client::Command
-    COMMAND_REF	=> 0,
-    CALLBACK	=> 1,
-    # possibly unify ARGUMENTS and STATE
-    ARGUMENTS	=> 2,
-    STATE	=> 3,
-
     EMPTY_ARGUMENTS	=> [],
+
+    SPECIAL	=> "",
 };
 
 my $objects = 0;
 
+# Need to call command_ref to complete this object
 sub new {
-    my ($class, $command_ref, $callback, $state, $arguments) = @_;
+    @_ % 2 == 1 || croak "Odd nuber of arguments";
+    my ($class, %object) = @_;
     ++$objects;
-    return bless [$command_ref,
-                  $callback,
-                  $arguments || EMPTY_ARGUMENTS,
-                  $state // ()], $class;
+    return bless \%object, $class;
 }
 
 sub DESTROY {
@@ -80,30 +74,35 @@ sub DESTROY {
     info("DESTROY @_") if $DEBUG;
 }
 
-sub ref : method {
+sub command_ref : method {
     my $command = shift;
-    my $command_ref = shift // return $command->[COMMAND_REF];
+    my $command_ref = shift // return $command->{COMMAND_REF};
 
-    my $out = sprintf($command_ref->[COMMAND], @_);
-    utf8::encode($out);
-    if (length $out >= 2**16) {
-        $out = display_string($out);
-        croak "Command too long: $out";
+    if ($command_ref->[COMMAND] ne SPECIAL) {
+        my $out = sprintf($command_ref->[COMMAND], @_);
+        utf8::encode($out);
+        if (length $out >= 2**16) {
+            $out = display_string($out);
+            croak "Command too long: $out";
+        }
+        $command->{OUT} = sprintf("%04X", length $out) . $out;
     }
-    $command->[COMMAND_REF] = $command_ref;
-    $command->[ARGUMENTS] = sprintf("%04X", length $out) . $out;
-}
-
-sub command_name {
-    return shift->[COMMAND_REF][COMMAND_NAME];
-}
-
-sub state {
-    return shift->[STATE];
+    $command->{COMMAND_REF} = $command_ref;
 }
 
 sub arguments {
-    return shift->[ARGUMENTS];
+    return shift->{ARGUMENTS} if @_ <= 1;
+
+    my ($command, $arguments) = @_;
+    $command->{ARGUMENTS} = $arguments;
+}
+
+sub command_name {
+    return shift->{COMMAND_REF}[COMMAND_NAME];
+}
+
+sub out {
+    return shift->{OUT};
 }
 
 sub command_check_response {

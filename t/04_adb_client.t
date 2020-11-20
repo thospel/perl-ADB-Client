@@ -14,6 +14,9 @@ use Test::More tests => 38;
 use Scalar::Util qw(weaken);
 
 BEGIN {
+    $ENV{ADB_CLIENT_ENV} = 0;
+    # delete @ENV{grep /^ANDROID_/, sort keys %ENV};
+
     use_ok("ADB::Client",
            qw(mainloop event_init unloop loop_levels timer immediate
               string_from_value

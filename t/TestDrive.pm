@@ -29,7 +29,7 @@ BEGIN {
 
     croak "Loaded ADB::Client::Utils before TestDrive" if $INC{"ADB/Client/Utils.pm"};
     # Ignore environment variables already set before calling "make test"
-    $ENV{ADB_CLIENT_ENV} = 0;
+    # $ENV{ADB_CLIENT_ENV} = 1;
     $ENV{ADB_FAKE_ERROR} = "";
     $ENV{ADB_FAKE_SLEEP} = 0;
     delete $ENV{ANDROID_ADB_LOG_PATH};
@@ -55,16 +55,21 @@ ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { retur
 use Exporter::Tidy
     other =>
     [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects $adb_fake
-        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE unalarm adb_run
-        adb_start adb_stop adb_unacceptable adb_unreachable adb_unreachable6
-        adb_closer adb_echo adb_echo6 adb_version adb_version6 adb_blackhole
-        addr_filter collect_stderr collected_stderr uncollect_stderr dumper)];
+        $developer $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
+        $tests_driver
+        unalarm adb_run adb_server adb_start adb_stop adb_unacceptable
+        adb_unreachable adb_unreachable6 adb_closer adb_echo adb_echo6
+        adb_version adb_version6 adb_blackhole addr_filter collect_stderr
+        collected_stderr uncollect_stderr dumper)];
 
 $SIG{INT} = sub {
     Test::More::diag("Caught signal INT");
     Test::More::fail("Signal");
     exit 1;
 };
+
+# How many tests using this module adds
+our $tests_driver = 7;
 
 $Bin = abs_path($Bin);
 $Bin =~ s{/+\z}{};
@@ -80,6 +85,7 @@ my $ECONNREFUSED = $! = ECONNREFUSED;
 my $ETIMEDOUT    = $! = ETIMEDOUT;
 my $ENOENT       = $! = ENOENT;
 
+our $developer = $ENV{ADB_CLIENT_TEST_DEVELOPER} && $ENV{ADB_CLIENT_TEST_REAL};
 our $TRANSACTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_TRANSACTION_TIMEOUT} || 0.5;
 our $CONNECTION_TIMEOUT = $ENV{ADB_CLIENT_TEST_CONNECTION_TIMEOUT} // undef;
 # 192.0.2.0/24 is assigned to TEST-NET-1
@@ -145,7 +151,7 @@ sub collected_stderr {
     return $old;
 }
 
-# Run the system's adb command
+# Run the system's adb command (assumes $ADB is already set to system adb)
 sub adb_run {
     my $out;
     my $pid = do {
@@ -157,6 +163,21 @@ sub adb_run {
         Test::More::is($?, 0, "$ADB @_ succeeds");
     };
     return $out;
+}
+
+# Run the system's adbd server
+sub adb_server {
+    local $ADB = $ENV{ADB_CLIENT_TEST_REAL};
+    open(my $fh, "-|", $ADB, "start-server") || die "Cannot start '$ADB': $^E";
+    my $out = do { local $/; <$fh> };
+    $out eq "" ||
+        Test::More::diag("Unexpected output from $ADB start-server: $out");
+    close($fh);
+    die "Unexpected exit code $? from '$ADB start-server'" if $?;
+    my $version = ADB::Client->version;
+    # Reminder that we run the system adbd
+    Test::More::diag("Your ADB server has version $version");
+    return $version;
 }
 
 # Run our own fake ADB server

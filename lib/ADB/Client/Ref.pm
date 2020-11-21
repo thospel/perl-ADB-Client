@@ -709,7 +709,10 @@ sub success {
     }
     local $client_ref->{post_activate} = 1;
     $command->{CALLBACK}->($client_ref->{client}, undef, @$result);
-    $client_ref->activate if $client_ref->{post_activate};
+    if ($client_ref->{post_activate}) {
+        $client_ref->{post_activate} = 0;
+        $client_ref->activate;
+    }
     # Make sure not to return anything
     return;
 }
@@ -719,7 +722,7 @@ sub success {
 sub activate {
     my ($client_ref, $top_level) = @_;
 
-    return if $client_ref->{active} || !@{$client_ref->{commands}};
+    return if $client_ref->{active} || !@{$client_ref->{commands}} || $client_ref->{post_activate};
 
     for (1) {
         my $command_ref = $client_ref->{commands}[0]->command_ref;

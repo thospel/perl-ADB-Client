@@ -62,7 +62,7 @@ $ADB = $adb;
 my $client = new_ok("ADB::Client" => [host => $host, port => $port]);
 my $version = $client->version;
 ok($version, "adb version $version");
-# diag("Your ADB server has version $version");
+diag("Your ADB server has version $version");
 
 $port = adb_start($version);
 $ADB_HOST = $ENV{ANDROID_ADB_SERVER_ADDRESS} = "127.0.0.1";

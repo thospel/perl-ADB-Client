@@ -271,7 +271,7 @@ like($results[1][1], qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
 # Connect to something that shouldn't answer
 @results = ();
 $client = new_ok("ADB::Client" =>
-                    [host => $UNREACHABLE, blocking => 0,
+                    [host => $UNREACHABLE, port => 5037, blocking => 0,
                      connection_timeout => 0]);
 $client->marker(callback => $callback);
 $client->_connect(callback => $callback);

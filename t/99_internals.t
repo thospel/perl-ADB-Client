@@ -61,6 +61,7 @@ END {
         dumper(\@info_events);
 }
 
+BEGIN { $ENV{ADB_CLIENT_ENV} = 0 };
 use TestDrive qw(adb_start adb_unreachable dumper
                  collect_stderr collected_stderr uncollect_stderr
                  %expect_objects);

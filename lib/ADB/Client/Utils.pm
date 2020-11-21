@@ -23,6 +23,7 @@ use Exporter::Tidy
                       string_from_value display_string adb_check_response
                       realtime clocktime realtime_running clocktime_running
                       ip_port_from_addr addr_from_ip_port is_listening get_home
+                      $me
                       $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
                       $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT $ADB_SERIAL
                       OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY

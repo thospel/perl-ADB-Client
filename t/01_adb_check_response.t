@@ -16,10 +16,13 @@ use Test::More tests => 434;
 
 BEGIN {
     use_ok("ADB::Client::Utils",
-           qw(adb_check_response display_string DISPLAY_MAX
+           qw(adb_check_response display_string DISPLAY_MAX $me
               SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY OKAY FAIL)) ||
         BAIL_OUT("Cannot even import adb_check_response from ADB::Client::Utils");
 }
+
+my $name = (getpwnam($me))[6];
+diag("Reminder: Set environment variables ADB_CLIENT_TEST_DEVELOPER and ADB_CLIENT_TEST_REAL for some tests against the real ADB server") if $name eq "Ton Hospel";
 
 my $long_string = "ABC\nde\"zz\0fg\th\x{c1}zwarf\tha" . "-" x DISPLAY_MAX;
 my @args;

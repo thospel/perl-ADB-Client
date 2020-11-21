@@ -48,7 +48,7 @@ BEGIN {
         plan skip_all => "Cannot connect to 127.0.0.1:5037 even after '$adb start-server': $@";
         exit;
     }
-    plan tests => 17;
+    plan tests => 19;
 }
 
 use TestDrive qw(dumper);
@@ -63,8 +63,15 @@ $ADB_PORT = $port;
 my $client = new_ok("ADB::Client");
 my $version = $client->version;
 ok($version, "adb version $version");
-# diag("Your ADB server has version $version");
+diag("Your ADB server has version $version");
 ok($client->devices, "Can fetch devices");
+ok($client->forward_list, "Can get list of forwards");
+# ok($client->reverse_list, "Can get list of reverse forwards");
+SKIP: {
+    skip "ADB server $version does not support wait", 1 if $version < 41;
+    is($client->wait_serial("fhjfes", "disconnect"), "",
+       "Can wait for non-existent device");
+}
 
 # See if we can start servers by ourselves
 my $s = IO::Socket::IP->new(

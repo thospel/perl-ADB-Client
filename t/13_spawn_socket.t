@@ -14,11 +14,26 @@ use lib $Bin;
 use Socket qw(AF_INET SOCK_STREAM IPPROTO_TCP);
 use IO::Socket::IP qw();
 
-use Test::More tests => 38;
+my $tests;
+BEGIN { $tests = 38 }
+use Test::More tests => $tests;
 
-use TestDrive qw(addr_filter dumper);
+use TestDrive qw(addr_filter dumper adb_server $developer $tests_driver);
 
 use ADB::Client qw(mainloop $ADB);
+
+if ($developer) {
+    my $version = adb_server();
+    if ($version < 41) {
+      SKIP: {
+            diag("ADB server version $version does not suppoer acceptfd. Need at least version 41");
+            skip "ADB server version $version does not suppoer acceptfd. Need at least version 41", $tests-$tests_driver;
+        }
+        exit;
+    }
+    # Need to set $ADB since we are going to spawn things
+    $ADB = $ENV{ADB_CLIENT_TEST_REAL};
+}
 
 my ($spawns, $spawns0, $spawns1, $argv, $connection_data);
 
@@ -55,10 +70,13 @@ is_deeply(addr_filter($connection_data), {
 }, "Expected history") || dumper(addr_filter($connection_data));
 is(ref $connection_data->{bind_addr}, "", "Plain bind_addr");
 is_deeply(\@result, [[undef, $connection_data]], "Callback returns connection_data") || dumper(\@result, $connection_data);
-$argv = join(" ", $client->argv(blocking => 1));
-like($argv,
-     qr{^-L acceptfd:\d+ fork-server server --reply-fd \d+\z}a,
-     "Expected commandline");
+SKIP: {
+    skip "Real ADB server does not support internal:argv", 1 if $developer;
+    $argv = join(" ", $client->argv(blocking => 1));
+    like($argv,
+         qr{^-L acceptfd:\d+ fork-server server --reply-fd \d+\z}a,
+         "Expected commandline");
+}
 is($client->kill(blocking => 1), "", "Kill what we just started");
 
 # Blocking
@@ -82,10 +100,14 @@ is_deeply(addr_filter($connection_data), {
   "pid" => 1
 }, "Expected history") || dumper(addr_filter($connection_data));
 is(ref $connection_data->{bind_addr}, "", "Plain bind_addr");
-$argv = join(" ", $client->argv);
-like($argv,
-     qr{^-L acceptfd:\d+ fork-server server --reply-fd \d+\z}a,
-     "Expected commandline");
+SKIP: {
+    skip "Real ADB server does not support internal:argv", 1 if $developer;
+
+    $argv = join(" ", $client->argv);
+    like($argv,
+         qr{^-L acceptfd:\d+ fork-server server --reply-fd \d+\z}a,
+         "Expected commandline");
+}
 is($client->kill, "", "Kill what we just started");
 
 # Some errors

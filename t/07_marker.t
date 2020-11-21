@@ -12,24 +12,34 @@ our $VERSION = "1.000";
 use FindBin qw($Bin);
 use lib $Bin;
 use Test::More tests => 22;
-use TestDrive qw(adb_start);
+use TestDrive qw(adb_start adb_server $developer);
 use Storable qw(dclone);
 
 # We already checked loading in 04_adb_client.t
-use ADB::Client qw(mainloop);
+use ADB::Client qw(mainloop $ADB_HOST $ADB_PORT);
 
 $SIG{__DIE__} = sub {
     BAIL_OUT("Unexpected exception: @_");
 };
 
-my $port = adb_start();
+my $version = 39;
+SKIP : {
+    if ($developer) {
+        $version = adb_server();
+        skip "Developer mode doesn't start a fake adb server", 5;
+    }
+    my $port_10 = adb_start($version);
+
+    $ADB_HOST = "127.0.0.1";
+    $ADB_PORT = $port_10;
+}
+
 # $port = 5037;
 
 my @results;
 my $callback = sub { shift; push @results, dclone(\@_) };
 
-my $client = new_ok("ADB::Client" =>
-                    [host => "127.0.0.1", port => $port, blocking => 0]);
+my $client = new_ok("ADB::Client" => [blocking => 0]);
 
 $client->marker(callback => $callback);
 $client->version(callback => $callback);
@@ -43,17 +53,16 @@ is_deeply(\@results, [], "Nothing started yet") ||
 mainloop();
 is_deeply(\@results, [
   [ undef ],
-  [ undef, 39 ],
+  [ undef, $version ],
   [ undef ],
-  [ undef, 39 ],
+  [ undef, $version ],
   [ undef ],
   [ "device offline (no transport)" ]
 ], "Proper sequencing") ||
     BAIL_OUT("Improper sequencing");
 
 
-$client = new_ok("ADB::Client" =>
-                 [host => "127.0.0.1", port => $port]);
+$client = new_ok("ADB::Client");
 @results = ();
 $client->marker(blocking => 0, callback => $callback);
 $client->version(blocking => 0, callback => $callback);
@@ -79,10 +88,10 @@ like($err, qr{^\QA previous command in the queue failed at },
     BAIL_OUT("Unexpected marker error");
 is_deeply(\@results, [
   [ undef ],
-  [ undef, 39 ],
+  [ undef, $version ],
   [ undef ],
   [ undef ],
-  [ undef, 39 ],
+  [ undef, $version ],
   [ undef ],
   [ "device offline (no transport)" ]
 ], "Everything upto failer worked") ||
@@ -94,6 +103,6 @@ is($result, undef, "Proper marker result") ||
     BAIL_OUT("Improper marker result");
 is_deeply(\@results, [
   [ undef ],
-  [ undef, 39 ],
+  [ undef, $version ],
 ], "Everything upto failer worked") ||
     BAIL_OUT("Improper sequencing");

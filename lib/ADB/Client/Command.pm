@@ -13,6 +13,7 @@ use Exporter::Tidy
     other	=>[
         qw(command_check_response
            SPECIAL COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
+           PHASE1 PHASE2
            EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT UTF8_IN UTF8_OUT)];
 
 use constant {
@@ -53,8 +54,15 @@ use constant {
     # syntaxes, but typically we don't set the SERIAL flag for them since they
     # ignore the transport given.
     SERIAL	=> 16,
+    # Convert from UTF-8 after we recieve data from the ADB server
     UTF8_IN	=> 32,
+    # Convert to UTF-8 before we send arguments to the ADB server
     UTF8_OUT	=> 64,
+    # Don't set this. It's for internal use
+    PHASE1	=> 128,
+    # First we expect an OKAY and only then do the "normal" processing
+    # The stuff after the first OKAY is allowed to arrive immediately
+    PHASE2	=> 256,
 
     EMPTY_ARGUMENTS	=> [],
 
@@ -113,7 +121,7 @@ sub out {
 }
 
 sub command_check_response {
-    my ($data, $len_added, $command_ref) = @_;
+    my ($command_ref, $data, $len_added) = @_;
 
     my ($error, $str) =
         adb_check_response($data, $len_added, $command_ref->[NR_RESULTS],

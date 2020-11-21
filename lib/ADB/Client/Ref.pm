@@ -22,6 +22,7 @@ use ADB::Client::Utils
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
 use ADB::Client::Command qw(command_check_response
+                            PHASE1 PHASE2
                             SPECIAL COMMAND_NAME COMMAND FLAGS PROCESS CODE
                             EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT);
 use ADB::Client::Tracker;
@@ -53,7 +54,6 @@ use constant {
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
     VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
     KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
-    DEVICE_WAIT2=> [device_wait2=> "host:wait-for-any-device", 0, EXPECT_EOF],
 };
 
 our @COMMANDS;
@@ -100,8 +100,8 @@ our @BUILTINS = (
     # all the wait-for-device variants strictly have a SERIAL version
     # But only host-serial:<serial>:wait-for-<transport> does anything special
     # and it recognizes that serial irrespective of the <transport>
-    [_wait		=> "host:wait-for-%s-%s", 0, SERIAL|MAYBE_MORE,
-     [\&process_wait, "timeout"]],
+    [_wait		=> "host:wait-for-%s-%s", 0,
+     SERIAL|PHASE2|EXPECT_EOF],
     [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
     [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
     [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
@@ -116,8 +116,10 @@ our @BUILTINS = (
     # [jdwp		=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
     [forward_list	=> "host:list-forward", -1, EXPECT_EOF, \&process_forward_list],
     # These return double OKAY with a possible counted value from the second
-    [forward		=> "host:forward:%s;%s", INFINITY, EXPECT_EOF|SERIAL, \&process_forward],
-    [forward_norebind	=> "host:forward:norebind:%s;%s", INFINITY, EXPECT_EOF|SERIAL, \&process_forward],
+    [forward		=> "host:forward:%s;%s", INFINITY,
+     SERIAL|PHASE2|EXPECT_EOF, \&process_forward],
+    [forward_norebind	=> "host:forward:norebind:%s;%s", INFINITY,
+     SERIAL|PHASE2|EXPECT_EOF, \&process_forward],
     # host:killforward fails if you don't select a device. Which is silly since
     # the adb server know on which device which forward lives and indeed the
     # kill actually still works even if you give the serial of some other
@@ -412,32 +414,53 @@ sub wait : method {
 sub commands_add {
     my ($class, $client_class) = @_;
 
-    for my $command_ref  (@BUILTINS) {
-        if ($command_ref->[COMMAND] ne SPECIAL &&
-            ($command_ref->[FLAGS] & SERIAL)) {
-            # Instead of host:features we can also do:
-            #  host-usb:features
-            #  host-local:features
-            #  host-serial:52000c4748d6a283:features
-            for my $prefix (qw(usb local serial:%s transport-id:%d)) {
-                my $ref = [@$command_ref];
-                $ref->[COMMAND] =~ s/:/-$prefix:/ ||
-                    croak "No : in command '$ref->[COMMAND_NAME]'";
-                my $suffix = $prefix;
-                $suffix =~ s/:.*//;	# Change transport-id:%s to transport-id
-                $suffix =~ s/.*-//;	# Change transport-id to id
-                $ref->[COMMAND_NAME] .= "_" . $suffix;
-                $class->command_add($client_class, $ref);
-            }
-        }
+    for my $command_ref (@BUILTINS) {
         $class->command_add($client_class, $command_ref);
     }
 }
 
 sub command_add {
-    my ($class, $client_class, $command) = @_;
+    my ($class, $client_class, $command_ref) = @_;
 
-    push @COMMANDS, $command;
+    my $command_name = $command_ref->[COMMAND_NAME] ||
+        croak("No COMMAND_NAME");
+    $command_ref->[COMMAND] // croak "No COMMAND in command '$command_name'";
+
+    if ($command_ref->[COMMAND] ne SPECIAL) {
+        $command_ref->[FLAGS] // croak "No FLAGS in command '$command_name'";
+        if ($command_ref->[FLAGS] & SERIAL) {
+            my @command_ref = @$command_ref;
+            $command_ref[FLAGS] &= ~SERIAL;
+            # Instead of host:features we can also do:
+            #  host-usb:features
+            #  host-local:features
+            #  host-serial:52000c4748d6a283:features
+            for my $prefix (qw(usb local serial:%s transport-id:%d)) {
+                my $ref = [@command_ref];
+                $ref->[COMMAND] =~ s/:/-$prefix:/ ||
+                    croak "No : in command '$ref->[COMMAND_NAME]'";
+                my $suffix = $prefix;
+                $suffix =~ s/:.*//; # Change transport-id:%s to transport-id
+                $suffix =~ s/.*-//; # Change transport-id to id
+                $ref->[COMMAND_NAME] .= "_" . $suffix;
+                $class->command_add($client_class, $ref);
+            }
+            $command_ref = \@command_ref;
+        }
+        if ($command_ref->[FLAGS] & PHASE2) {
+            # We currently have no code to avoid having to fake "success"
+            # if we immediately get the whole answer (see process_phase1).
+            # Having EXPECT_EOF allows us to delegate this to normal EOF
+            # processing
+            $command_ref->[FLAGS] & EXPECT_EOF or
+                croak "TWHO_PHASE without EXPECT_EOF";
+            my $ref = $command_ref;
+            $command_ref = [$command_name, $command_ref->[COMMAND], 0,
+                            MAYBE_MORE|PHASE1, sub { process_phase1($ref, @_) }];
+        }
+    }
+
+    push @COMMANDS, $command_ref;
     eval { $client_class->_add_command($#COMMANDS) };
     if ($@) {
         pop @COMMANDS;
@@ -448,17 +471,17 @@ sub command_add {
 sub command_get {
     my ($class, $index) = @_;
 
-    my $command = $COMMANDS[$index] ||
+    my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
-    my $command_name = $command->[COMMAND_NAME] ||
-        die("Assertion: No COMMAND_NAME");
-    die "No COMMAND in command '$command_name'" if !defined $command->[COMMAND];
-    croak "Invalid format in command '$command_name': $command->[COMMAND]" if
-        $command->[COMMAND] =~ /%(?!(?:\d+\$)?[sd])/a;
-    return
-        $command_name,
-        $command->[COMMAND] =~ tr/%//,
-        $command->[COMMAND] eq SPECIAL;
+    # We already checked these in command_add
+    my $command_name = $command_ref->[COMMAND_NAME] ||
+        die "Assertion: No COMMAND_NAME";
+    my $command = $command_ref->[COMMAND] //
+        die "Assertion: No COMMAND in command '$command_name'";
+
+    $command !~ /%(?!(?:\d+\$)?[sd])/a ||
+        croak "Invalid format in command '$command_name': $command";
+    return $command_name, $command =~ tr/%//, $command eq SPECIAL;
 }
 
 sub command_simple {
@@ -467,6 +490,8 @@ sub command_simple {
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
     my $command = ADB::Client::Command->new(CALLBACK => $callback);
+    $command->{transaction_timeout2} = delete $arguments->{transaction_timeout2}
+        if $command_ref->[FLAGS] & PHASE1;
 
     if (ref $command_ref->[PROCESS] eq "ARRAY") {
         my $keys = $command_ref->[PROCESS];
@@ -475,6 +500,7 @@ sub command_simple {
             $command->{$key} = delete $arguments->{$key} if exists $arguments->{$key};
         }
     }
+
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
     croak "Already have a blocking command pending" if defined $client_ref->{result};
@@ -1370,7 +1396,7 @@ sub _reader {
                 $client_ref->success($$str);
             } elsif ($command) {
                 my $command_ref = $command->{COMMAND_REF};
-                my ($error, $str) = command_check_response($client_ref, 0, $command_ref);
+                my ($error, $str) = command_check_response($command_ref, $client_ref, 0);
                 return $client_ref->error($str) if $error;
                 if ($client_ref->{in} ne "") {
                     $str = display_string($client_ref->{in});
@@ -1419,7 +1445,7 @@ sub _reader {
         return;
     }
 
-    my ($error, $str) = command_check_response($client_ref, $rc, $command_ref) or return;
+    my ($error, $str) = command_check_response($command_ref, $client_ref, $rc) or return;
     return $client_ref->error($str) if $error;
     if ($client_ref->{in} ne "" && !($command_ref->[FLAGS] & MAYBE_MORE)) {
         $str = display_string($client_ref->{in});
@@ -1533,16 +1559,17 @@ sub process_tport {
     return [unpack("q", shift)];
 }
 
-sub process_wait {
-    my ($devices, $command_name, $client_ref, $result) = @_;
+sub process_phase1 {
+    my ($command_ref_orig, $devices, $command_name, $client_ref, $result) = @_;
 
     my $command = $client_ref->command_retired;
-    $command->{COMMAND_REF} = DEVICE_WAIT2;
+    $command->{COMMAND_REF} = $command_ref_orig;
 
     if ($client_ref->{in} ne "" and
-        my ($error, $str) = command_check_response(
-            $client_ref, length $client_ref->{in}, DEVICE_WAIT2)) {
-        # Oh, we already got the result of the wait!
+        my ($error, $str) =
+        command_check_response($command_ref_orig,
+                               $client_ref, length $client_ref->{in})) {
+        # Oh, we already got the second phase result
         return $str if $error;
         if ($client_ref->{in} ne "") {
             $str = display_string($client_ref->{in});
@@ -1553,7 +1580,7 @@ sub process_wait {
     }
     # need to wait for more bytes (typically when the device gets connected)
     $client_ref->{timeout} = timer(
-        $command->{timeout} // $client_ref->{transaction_timeout},
+        $command->{transaction_timeout2} // $client_ref->{transaction_timeout},
         sub { $client_ref->_transaction_timed_out });
     $client_ref->{socket}->add_read(sub { $client_ref->_reader });
     $client_ref->{sent} = 1;
@@ -1580,9 +1607,9 @@ sub process_forward_list {
 sub process_forward {
     my ($forward) = @_;
 
-    return [""] if $forward eq "OKAY";
-    my %data = ( in => $forward );
-    my ($error, $str) = ADB::Client::Utils::adb_check_response(\%data, length $forward, -1, EXPECT_EOF) or die "Incomplete response '$forward'";
+    return [""] if $forward eq "";
+    my %data = ( in => "OKAY$forward" );
+    my ($error, $str) = ADB::Client::Utils::adb_check_response(\%data, length $forward, -1, EXPECT_EOF) or die "Incomplete response 'OKAY$forward'";
     return $str if $error;
     $data{in} eq "" || die "Still input left";
     return [$str];

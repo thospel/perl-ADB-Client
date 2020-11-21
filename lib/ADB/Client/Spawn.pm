@@ -47,6 +47,7 @@ my $kills = {
     TERM	=> 0,
     KILL	=> 0,
 };
+my $id = "A";
 my (%starters, $ended);
 
 sub delete {
@@ -108,7 +109,8 @@ sub close : method {
     if (!defined $msg[0]) {
         # Success
         if ($starter->{pid_adb}) {
-            push @msg, $starter->{pid_adb};
+            # Tricksy. This inserts $starter->{pid_adb} before the last element
+            push @msg, $starter->{pid_adb}, pop @msg;
         } else {
             @msg = "Assertion: adb started without pid";
         }
@@ -243,7 +245,7 @@ sub _spawn {
 sub join {
     my ($class, $client_ref, $bind_addr) = @_;
 
-    # info("Spawn::join($class, $client_ref, $ip, $port)") if $DEBUG;
+    # info("Spawn::join($class, $client_ref, $bind_addr)") if $DEBUG;
 
     $client_ref->fatal("Already spawning an ADB server") if
         $client_ref->{starter};
@@ -279,6 +281,7 @@ sub join {
     }
 
     my $key = "$ip:$port";
+    $key .= ":" . $id++ if $port == 0;
     my $starter = $starters{$key};
     if ($starter) {
         $client_ref->{adb} eq $starter->{adb} ||
@@ -399,9 +402,14 @@ sub _reader_log {
         } else {
             if ($starter->{killed}) {
                 $starter->close("Killed unresponsive '$starter->{adb}' with SIG$$starter->{killed}");
+            } elsif ($starter->{port} == 0 &&
+                     $starter->{in} =~ /^OK ([1-9][0-9]*)\n\z/) {
+                $starter->{port} = $1;
+                warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
+                $starter->close(undef, $starter->{port});
             } elsif ($starter->{in} eq OK) {
                 warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
-                $starter->close(undef);
+                $starter->close(undef, $starter->{port});
             } else {
                 # _nok always does a delete
                 $starter->_nok();
@@ -428,9 +436,14 @@ sub _reader {
         # EOF
         if ($starter->{killed}) {
             $starter->close("Killed unresponsive '$starter->{adb}' with SIG$starter->{killed}");
+        } elsif ($starter->{port} == 0 &&
+                 $starter->{in} =~ /^OK ([1-9][0-9]*)\n\z/) {
+            $starter->{port} = $1;
+            warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
+            $starter->close(undef, $starter->{port});
         } elsif ($starter->{in} eq OK) {
             warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
-            $starter->close(undef);
+            $starter->close(undef, $starter->{port});
         } elsif ($starter->{log_rd}) {
             $starter->{rd}->delete_read;
             $starter->{rd} = undef;

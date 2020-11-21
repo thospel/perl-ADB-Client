@@ -22,7 +22,7 @@ BEGIN {
 }
 
 my $name = (getpwnam($me))[6];
-diag("Reminder: Set environment variables ADB_CLIENT_TEST_DEVELOPER and ADB_CLIENT_TEST_REAL for some tests against the real ADB server") if $name eq "Ton Hospel";
+diag("Reminder: Set environment variables ADB_CLIENT_TEST_DEVELOPER and ADB_CLIENT_TEST_REAL for some tests against the real ADB server") if !$ENV{ADB_CLIENT_TEST_DEVELOPER} && $name eq "Ton Hospel";
 
 my $long_string = "ABC\nde\"zz\0fg\th\x{c1}zwarf\tha" . "-" x DISPLAY_MAX;
 my @args;

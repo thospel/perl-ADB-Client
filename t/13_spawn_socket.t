@@ -40,6 +40,7 @@ my ($spawns, $spawns0, $spawns1, $argv, $connection_data);
 my $socket = IO::Socket::IP->new(
     LocalHost	=> "127.0.0.1",
     LocalPort	=> 0,
+    ReuseAddr	=> 1,
     Listen	=> 5) || die "Could not create listening socket: $@";
 
 # Non blocking

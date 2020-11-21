@@ -592,6 +592,153 @@ sub transport_type_name {
     die "Unknown transport type '$type'";
 }
 
+my %command_transporter = (
+    "root"			=> \&command_root,
+    "unroot"			=> \&command_unroot,
+    "reboot:"			=> \&command_reboot,
+    "enable-verity"		=> \&command_empty,
+    "disable-verity"		=> \&command_empty,
+    "remount"			=> \&command_remount,
+    "reverse:forward:"		=> \&command_reverse,
+    "reverse:list-forward"	=> \&command_reverse_list,
+    "reverse:killforward:"	=> \&command_reverse_kill,
+    "reverse:killforward-all"	=> \&command_reverse_kill_all,
+);
+my $command_transporter_regex =
+    join("|", map(quotemeta($_) . ($_ =~ /:\z/ ? '' :
+                                   $_ =~ /:/ ? '\z' :
+                                   '(?=:\z)'),
+                  sort keys %command_transporter));
+$command_transporter_regex = qr{^($command_transporter_regex)(.*)\z};
+
+sub command_reboot {
+    my ($state, $device, $type) = @_;
+
+    # Real devices dont care. They reboot for every argument
+    if ($type =~ /^(?:bootloader|recovery|sideload|sideload-auto-reboot|)\z/) {
+        # We could now waste a bit of time before coming back
+        # No need to be so realistic though
+        $state->adb_output(UNCOUNTED, "");
+        $state->{transport} = 0;
+        $device->reconnect($type || "device");
+    } else {
+        $state->adb_output(FAIL, "Unknown reboot type");
+    }
+}
+
+sub command_root {
+    my ($state, $device) = @_;
+    if ($device->root) {
+        $state->adb_output(UNCOUNTED, "adbd is already running as root\n");
+    } else {
+        $state->adb_output(UNCOUNTED, "restarting adbd as root\n");
+        $state->{transport} = 0;
+        $device = $device->reconnect;
+        $device->root(1);
+    }
+}
+
+sub command_unroot {
+    my ($state, $device) = @_;
+
+    if ($device->root) {
+        $state->adb_output(UNCOUNTED, "restarting adbd as non root\n");
+        $state->{transport} = 0;
+        # Reconnect will create a new device without root
+        $device->reconnect;
+    } else {
+        $state->adb_output(UNCOUNTED, "adbd not running as root\n");
+    }
+}
+
+sub command_empty {
+    my ($state) = @_;
+
+    $state->adb_output(UNCOUNTED, "");
+}
+
+sub command_remount {
+    my ($state, $device) = @_;
+
+    if ($device->root) {
+        $state->adb_output(UNCOUNTED, "remount succeeded\n");
+    } else {
+        $state->adb_output(UNCOUNTED, "Not running as root. Try \"adb root\" first.\n");
+    }
+}
+
+sub command_reverse_list {
+    my ($state, $device) = @_;
+
+    my $listener = $state->{listener};
+    my $serial = $device->serial;
+
+    my $out = "";
+    my $reverses = $listener->{reverse}{$serial} || {};
+    for my $from (sort keys %$reverses) {
+        $out .= "(reverse) $from $reverses->{$from}\n";
+    }
+    $state->adb_output(OKAY, $out);
+}
+
+sub command_reverse {
+    my ($state, $device, $arguments) = @_;
+
+    my $listener = $state->{listener};
+    my $serial = $device->serial;
+    my $no_rebind = $arguments =~ s/^norebind://;
+    if (my ($from, $to) = $arguments =~ /^([^;]+);([^;]+)\z/) {
+        if ($from =~ /^(?:tcp:(\d+)|(?:localabstract|localreserved|localfilesystem):(.*))\z/a) {
+            # I haven't actualy investigated any of these except tcp:<port>
+            # So the output format for the other case is likely nonsense
+            my $port = $+ || 1024 + int rand(2**16-1024);
+            if ($port < 1024) {
+                $state->adb_output(FAIL, "cannot bind listener: Permission denied");
+            } else {
+                $from = "tcp:$port" if !$+;
+                if (exists $listener->{reverse}{$serial}{$from}) {
+                    if ($no_rebind) {
+                        $state->adb_output(FAIL, "cannot rebind existing socket");
+                        return;
+                    }
+                    $state->adb_output(UNCOUNTED, "OKAY");
+                } else {
+                    $state->adb_output(UNCOUNTED, "", 1);
+                    $state->adb_output(OKAY, $port);
+                }
+                $listener->{reverse}{$serial}{$from} = $to;
+            }
+        } else {
+            $state->adb_output(FAIL, "cannot bind listener: unknown socket specification:$from");
+        }
+    } else {
+        $state->adb_output(FAIL, "bad forward: $arguments");
+    }
+}
+
+sub command_reverse_kill {
+    my ($state, $device, $from) = @_;
+
+    my $listener = $state->{listener};
+    my $serial = $device->serial;
+    my $reverses = $listener->{reverse};
+    if (delete $reverses->{$serial}{$from}) {
+        delete $reverses->{$serial} if !%{$reverses->{$serial}};
+        $state->adb_output(UNCOUNTED, "OKAY");
+    } else {
+        $state->adb_output(FAIL, "listener '$from' not found");
+    }
+}
+
+sub command_reverse_kill_all {
+    my ($state, $device) = @_;
+
+    my $listener = $state->{listener};
+    my $serial = $device->serial;
+    delete $listener->{reverse}{$serial};
+    $state->adb_output(UNCOUNTED, "OKAY");
+}
+
 sub adb_command {
     my ($state, $command) = @_;
     info("Command (%s) <\t'%s'", $state->{id}, $command) if $verbose;
@@ -609,7 +756,15 @@ sub adb_command {
         $state->command_internal($1);
     } elsif ($state->{transport}) {
         # Have transport
-        $state->command_transporter($command);
+        if ($command =~ /$command_transporter_regex/o) {
+            my $sub_command = $1;
+            my $arguments   = $2;
+            my $code = $command_transporter{$sub_command} ||
+                die "Assertion: Could not find command_transport{$sub_command}";
+            $code->($state, $state->{transport}, $arguments, $sub_command);
+        } else {
+            $state->adb_output(FAIL, "closed");
+        }
     } else {
         $state->adb_output(FAIL, "device offline (no transport)");
     }
@@ -708,19 +863,19 @@ sub command_host {
         }
     } elsif ($command eq "list-forward") {
         my $out = "";
-        my $forwards = $listener->{forwards};
+        my $forwards = $listener->{forward};
         for my $from (sort keys %$forwards) {
             $out .= "$forwards->{$from}[0] $from $forwards->{$from}[1]\n";
         }
         $state->adb_output(OKAY, $out);
     } elsif ($command eq "killforward-all") {
-        %{$listener->{forwards}} = ();
+        %{$listener->{forward}} = ();
         $state->adb_output(UNCOUNTED, "OKAY");
     } elsif ($command =~ m{^killforward:(.*)}) {
         # The real host:killforward demands a transport
         my $from = $1;
-        my $forwards = $listener->{forwards};
-        if (defined $forwards->{from}) {
+        my $forwards = $listener->{forward};
+        if (delete $forwards->{$from}) {
             $state->adb_output(UNCOUNTED, "OKAY");
         } else {
             $state->adb_output(FAIL, "listener '$from' not found");
@@ -848,7 +1003,7 @@ sub command_forward {
                 $state->adb_output(FAIL, "cannot bind listener: Permission denied");
             } else {
                 $from = "tcp:$port" if !$+;
-                if (exists $listener->{forwards}{$from}) {
+                if (exists $listener->{forward}{$from}) {
                     if ($no_rebind) {
                         $state->adb_output(FAIL, "cannot rebind existing socket");
                         return;
@@ -858,7 +1013,7 @@ sub command_forward {
                     $state->adb_output(UNCOUNTED, "", 1);
                     $state->adb_output(OKAY, $port);
                 }
-                $listener->{forwards}{$from} = [$serial, $to];
+                $listener->{forward}{$from} = [$serial, $to];
             }
         } else {
             # The real adb outputs nothing
@@ -867,54 +1022,6 @@ sub command_forward {
         }
     } else {
         $state->adb_output(FAIL, "bad forward: $arguments");
-    }
-}
-
-sub command_transporter {
-    my ($state, $command) = @_;
-
-    my $device = $state->{transport};
-    my $listener = $state->{listener};
-    if ($command =~ /^reboot:(.*)\z/) {
-        my $type = $1;
-        # Real devices dont care. They reboot for every argument
-        if ($type =~ /^(?:bootloader|recovery|sideload|sideload-auto-reboot|)\z/) {
-            # We could now waste a bit of time before coming back
-            # No need to be so realistic though
-            $state->adb_output(UNCOUNTED, "");
-            $state->{transport} = 0;
-            $device->reconnect($type || "device");
-        } else {
-            $state->adb_output(FAIL, "Unknown reboot type");
-        }
-    } elsif ($command eq "root:") {
-        if ($device->root) {
-            $state->adb_output(UNCOUNTED, "adbd is already running as root\n");
-        } else {
-            $state->adb_output(UNCOUNTED, "restarting adbd as root\n");
-            $state->{transport} = 0;
-            $device = $device->reconnect;
-            $device->root(1);
-        }
-    } elsif ($command eq "unroot:") {
-        if ($device->root) {
-            $state->adb_output(UNCOUNTED, "restarting adbd as non root\n");
-            $state->{transport} = 0;
-            # Reconnect will create a new device without root
-            $device->reconnect;
-        } else {
-            $state->adb_output(UNCOUNTED, "adbd not running as root\n");
-        }
-    } elsif ($command eq "enable-verity:" || $command eq "disable-verity:") {
-        $state->adb_output(UNCOUNTED, "");
-    } elsif ($command eq "remount:") {
-        if ($device->root) {
-            $state->adb_output(UNCOUNTED, "remount succeeded\n");
-        } else {
-            $state->adb_output(UNCOUNTED, "Not running as root. Try \"adb root\" first.\n");
-        }
-    } else {
-        $state->adb_output(FAIL, "closed");
     }
 }
 
@@ -1071,12 +1178,18 @@ sub devices_init {
     $listener->{devices} = $devices;
 }
 
-sub forwards_drop {
+sub forward_drop {
     my ($listener, $serial) = @_;
 
-    for my $from (sort keys %{$listener->{forwards}}) {
-        delete $listener->{forwards}{$from} if $listener->{forwards}{$from}[0] eq $serial;
+    for my $from (sort keys %{$listener->{forward}}) {
+        delete $listener->{forward}{$from} if $listener->{forward}{$from}[0] eq $serial;
     }
+}
+
+sub reverse_drop {
+    my ($listener, $serial) = @_;
+
+    delete $listener->{reverse}{$serial};
 }
 
 package Device;
@@ -1182,10 +1295,16 @@ sub drop {
     $device->{devices}->drop($device);
 }
 
-sub forwards_drop {
+sub forward_drop {
     my ($device) = @_;
 
-    $device->listener->forwards_drop($device->serial);
+    $device->listener->forward_drop($device->serial);
+}
+
+sub reverse_drop {
+    my ($device) = @_;
+
+    $device->listener->reverse_drop($device->serial);
 }
 
 sub string {
@@ -1235,7 +1354,8 @@ sub drop {
 
     # Drop all forwards for this device.
     # Probably we should already do this if the device goes offline
-    $device->forwards_drop;
+    $device->forward_drop;
+    $device->reverse_drop;
 
     my $serial = $device->serial;
     delete $devices->{devices}{$serial} || croak "Unknown serial '$serial'";
@@ -1322,6 +1442,6 @@ if ($@) {
     select(STDERR);
     $| = 1;
     print $@;
-    _exit(255);
+    exit(255);
 }
-_exit(0);
+exit(0);

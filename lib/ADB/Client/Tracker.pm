@@ -6,6 +6,7 @@ our $VERSION = '1.000';
 
 use Scalar::Util qw(weaken);
 use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
+use Storable qw(dclone);
 use Carp;
 our @CARP_NOT = qw(ADB::Client::Ref);
 
@@ -110,21 +111,20 @@ sub _process {
                 $tracker->error(ref $result eq "" && $result);
                 return;
             }
-            my (%add, %change);
-            my %new_devices = %{$result->[0]};
-            while (my ($serial, $new_state) = each %new_devices) {
+            my %change;
+            my $new_devices = dclone($result->[0]);
+            while (my ($serial, $new_state) = each %$new_devices) {
                 if (my $old_state = delete $tracker->{current}{$serial}) {
                     $change{$serial} = [$old_state, $new_state] if $old_state ne $new_state;
                 } else {
-                    $add{$serial} = $new_state;
+                    $change{$serial} = ["", $new_state];
                 }
             }
-            push @$result, {
-                %add ? (add	=> \%add) : (),
-                %{$tracker->{current}} ? (delete => $tracker->{current}) : (),
-                %change ? (change	=> \%change) : (),
-            };
-            $tracker->{current} = \%new_devices;
+            while (my ($serial, $old_state) = each %{$tracker->{current}}) {
+                $change{$serial} = [$old_state, ""];
+            }
+            $tracker->{current} = $new_devices;
+            push @$result, \%change;
         }
         eval { $tracker->{callback}->($tracker, undef, @$result) };
         if ($@) {

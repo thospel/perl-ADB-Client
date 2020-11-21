@@ -112,15 +112,19 @@ $SIG{__WARN__} = sub {
 };
 
 END {
-    local $?;
     if ($old_stderr) {
         Test::More::diag("STDERR was still redirected");
         uncollect_stderr();
     }
-    adb_stop();
-    Test::More::is($warnings, 0, "No warnings");
-    for my $class (@object_classes) {
-        Test::More::is($class->objects, $expect_objects{$class}, "Cleaned up all $class objects");
+    {
+        local $?;
+        adb_stop();
+    }
+    if ($? == 0) {
+        Test::More::is($warnings, 0, "No warnings");
+        for my $class (@object_classes) {
+            Test::More::is($class->objects, $expect_objects{$class}, "Cleaned up all $class objects");
+        }
     }
 }
 
@@ -187,7 +191,11 @@ sub adb_start {
     $pid = do {
         no warnings "exec";
         # open($adb_out = undef, "-|", $adb_fake)
-        open($adb_out = undef, "-|", $^X, $adb_fake,
+        open($adb_out = undef, "-|", $^X,
+             # Also cover adb_fake so I can easily see for which commands not
+             # all ways of using them have a test
+             $INC{"Devel/Cover.pm"} ? "-MDevel::Cover=-silent,1" : (),
+             $adb_fake,
              $blib ? "--blib" : (),
              $ENV{ADB_CLIENT_TEST_VERBOSE} ? "-v" : ()) ||
             Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");

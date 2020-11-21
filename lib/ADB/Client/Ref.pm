@@ -114,23 +114,28 @@ our @BUILTINS = (
     # [usb		=> "usb:", 0, TRANSPORT|EXPECT_EOF],
     # [tcpip		=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
     # [jdwp		=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
-    [forward_list	=> "host:list-forward", -1, EXPECT_EOF, \&process_forward_list],
+    [forward_list	=> "host:list-forward", -1, EXPECT_EOF,
+     \&process_forward_list],
     # These return double OKAY with a possible counted value from the second
     [forward		=> "host:forward:%s;%s", INFINITY,
      SERIAL|PHASE2|EXPECT_EOF, \&process_forward],
     [forward_norebind	=> "host:forward:norebind:%s;%s", INFINITY,
      SERIAL|PHASE2|EXPECT_EOF, \&process_forward],
     # host:killforward fails if you don't select a device. Which is silly since
-    # the adb server know on which device which forward lives and indeed the
+    # the adb server knows on which device which forward lives and indeed the
     # kill actually still works even if you give the serial of some other
     # device. So it shouldn't NEED TRANSPORT, but it does.
-    [forward_kill	=> "host:killforward:%s", INFINITY, TRANSPORT|EXPECT_EOF],
-    [forward_kill_all	=> "host:killforward-all", INFINITY, EXPECT_EOF],
-    [reverse_list	=> "reverse:list-forward", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse	=> "reverse:forward:%s;%s", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse_norebind	=> "reverse:forward:norebind:%s;%s", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse_kill	=> "reverse:killforward:%s", 0, TRANSPORT|EXPECT_EOF],
-    # [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|EXPECT_EOF],
+    [forward_kill	=> "host:killforward:%s", 0, TRANSPORT|SERIAL|PHASE2|EXPECT_EOF],
+    [forward_kill_all	=> "host:killforward-all", 0, PHASE2|EXPECT_EOF],
+    [reverse_list	=> "reverse:list-forward", -1, TRANSPORT|EXPECT_EOF,
+     \&process_reverse_list],
+    [reverse	=> "reverse:forward:%s;%s", INFINITY,
+     TRANSPORT|PHASE2|EXPECT_EOF,
+     \&process_forward],
+    [reverse_norebind	=> "reverse:forward:norebind:%s;%s", INFINITY,
+     TRANSPORT|PHASE2|EXPECT_EOF],
+    [reverse_kill	=> "reverse:killforward:%s", 0, TRANSPORT|PHASE2|EXPECT_EOF],
+    [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|PHASE2|EXPECT_EOF],
     # [mdns_check	=> "host:mdns:check", 0, EXPECT_EOF],
     # [mdns_services	=> "host:mdns:services", 0, EXPECT_EOF],
     # [pair		=> 'host:pair:%2$s:%1$s', 0, EXPECT_EOF],
@@ -1514,7 +1519,8 @@ sub process_devices {
     my ($devices, $command_name, $client_ref) = @_;
 
     my $long = $command_name eq "host:devices-l";
-    my (@devices, %devices);
+    # my @devices;
+    my %devices;
   DEVICE:
     while ($devices =~ s{^(\S+)[^\S\n]+(\S+|no device)(?:[^\S\n]+(\S.*\S))?\n}{}a) {
         my ($serial, $state, $description) = ($1, $2, $3);
@@ -1524,7 +1530,7 @@ sub process_devices {
         # And UsbNoPermissionsShortHelpText() is: no permissions; [<url>])
         # We will fail to parse if that last one can really happen
         die "Multiple devices with serial number $serial" if $devices{$serial};
-        push @devices, $serial;
+        # push @devices, $serial;
         if ($long) {
             my %description = (state => $state);
             my @description = split(" ", $description);
@@ -1555,7 +1561,8 @@ sub process_devices {
         @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_retired->command_ref, $client_ref->{block_size}, \%devices, $client_ref->{in});
         $client_ref->{in} = "";
     }
-    return [\%devices, \@devices, shift, @tracker];
+    # return [\%devices, \@devices, shift, @tracker];
+    return [\%devices, @tracker];
 }
 
 sub process_tport {
@@ -1616,6 +1623,19 @@ sub process_forward {
     return $str if $error;
     $data{in} eq "" || die "Still input left";
     return [$str];
+}
+
+sub process_reverse_list {
+    my ($reverses) = @_;
+
+    my %reverses;
+    for (split /\n/, $reverses) {
+        my ($from, $to) = /^\S+\s+(\S+)\s+(.*\S)\s*\z/ or
+            die "Invalid reverse line '$_'";
+        die "Duplicate from '$from'" if exists $reverses{$from};
+        $reverses{$from} = $to;
+    }
+    return [\%reverses];
 }
 
 1;

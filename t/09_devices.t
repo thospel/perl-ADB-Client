@@ -98,8 +98,6 @@ is_deeply(\@result, [
         "10.253.0.13:5555" => "device",
         "52000c4748d6a283" => "device"
     },
-    ["10.253.0.13:5555", "52000c4748d6a283"],
-    "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Expected devices result");
 
 # Test host:devices-l
@@ -121,10 +119,7 @@ is_deeply(\@result, [
             "transport_id" => 2,
             "usb" => "1-1.2"
         }
-    },
-    ["10.253.0.13:5555", "52000c4748d6a283"],
-    "10.253.0.13:5555\tdevice\tproduct:zerofltexx model:SM_G920F device:zeroflte transport_id:1\n52000c4748d6a283\tdevice\tusb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx transport_id:2\n"],
-          "Expected devices long result") || dumper(\@result);
+    }], "Expected devices long result") || dumper(\@result);
 
 eval { $client->wait_device };
 like($@, qr{^\Qmore than one device/emulator at },
@@ -153,10 +148,6 @@ is_deeply(\@result, [
   {
     "52000c4748d6a283" => "device"
   },
-  [
-    "52000c4748d6a283"
-  ],
-  "52000c4748d6a283\tdevice\n"
 ], "Expected devices result") || dumper(\@result);
 
 is(@result3, 0, "No local device yet");
@@ -205,11 +196,6 @@ is_deeply(\@result, [
     "10.253.0.13:5555" => "device",
     "52000c4748d6a283" => "device"
   },
-  [
-    "10.253.0.13:5555",
-    "52000c4748d6a283"
-  ],
-  "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Expected devices result") || dumper(\@result);
 
 is(@result4, 0, "Still not seen 10.253.0.11:1234") || dumper(\@result4);
@@ -234,11 +220,6 @@ is_deeply(\@result, [
     "10.253.0.13:5555" => "device",
     "52000c4748d6a283" => "device"
   },
-  [
-    "10.253.0.13:5555",
-    "52000c4748d6a283"
-  ],
-  "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Expected devices") || dumper(\@result);
 
 my $callback = sub {
@@ -250,8 +231,8 @@ $client2->version(callback => $callback);
 is(@result, 0, "Nothing queued yet");
 mainloop();
 is(@result, 2, "Executed 2 commands");
-is(@{$result[0]}, 6, "devices_track returns 4 things");
-my $tracker = delete $result[0][5];
+is(@{$result[0]}, 4, "devices_track returns 4 things");
+my $tracker = delete $result[0][3];
 isa_ok($tracker, "ADB::Client::Tracker", "Expected tracker type");
 is_deeply(\@result, [
   [
@@ -261,11 +242,6 @@ is_deeply(\@result, [
       "10.253.0.13:5555" => "device",
       "52000c4748d6a283" => "device"
     },
-    [
-      "10.253.0.13:5555",
-      "52000c4748d6a283"
-    ],
-    "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
   ],
   [
     0,
@@ -467,92 +443,27 @@ is_deeply(\@tracked, [[
         "10.253.0.13:5555" => "offline",
         "52000c4748d6a283" => "device"
     },
-    [
-        "10.253.0.13:5555",
-        "52000c4748d6a283"
-    ],
-    "10.253.0.13:5555\toffline\n52000c4748d6a283\tdevice\n",
-    {
-        "change" => {
-            "10.253.0.13:5555" => [
-                "device",
-                "offline"
-            ]
-        },
-    }
+    { "10.253.0.13:5555" => [ "device", "offline" ] }
 ], [
     undef,
-    {
-        "52000c4748d6a283" => "device"
-    },
-    [
-        "52000c4748d6a283"
-    ],
-    "52000c4748d6a283\tdevice\n",
-    {
-        "delete" => {
-            "10.253.0.13:5555" => "offline"
-        }
-    }
+    { "52000c4748d6a283" => "device" },
+    { "10.253.0.13:5555" => ["offline", ""] }
 ], [
     undef,
-    {
-        "52000c4748d6a283" => "offline"
-    },
-    [
-        "52000c4748d6a283"
-    ],
-    "52000c4748d6a283\toffline\n",
-    {
-        "change" => {
-            "52000c4748d6a283" => [
-                "device",
-                "offline"
-            ]
-        },
-    }
+    { "52000c4748d6a283" => "offline" },
+    { "52000c4748d6a283" => [ "device", "offline" ] }
 ], [
     undef,
-    {
-    },
-    [],
-    "",
-    {
-        "delete" => {
-            "52000c4748d6a283" => "offline"
-        }
-    }
+    { },
+    { "52000c4748d6a283" => ["offline", ""], }
+], [
+   undef,
+    { "10.253.0.13:5555" => "offline" },
+    { "10.253.0.13:5555" => ["", "offline"], }
 ], [
     undef,
-    {
-        "10.253.0.13:5555" => "offline"
-    },
-    [
-        "10.253.0.13:5555"
-    ],
-    "10.253.0.13:5555\toffline\n",
-    {
-        "add" => {
-            "10.253.0.13:5555" => "offline"
-        }
-    }
-], [
-    undef,
-    {
-        "10.253.0.13:5555" => "device"
-    },
-    [
-        "10.253.0.13:5555"
-    ],
-    "10.253.0.13:5555\tdevice\n",
-    {
-        "change" => {
-            "10.253.0.13:5555" => [
-                "offline",
-                "device"
-            ]
-        }
-    }
+    { "10.253.0.13:5555" => "device" },
+    { "10.253.0.13:5555" => [ "offline", "device" ] }
 ], [
     "EOF",
     1
@@ -572,18 +483,13 @@ $client3 = new_ok("ADB::Client" => [host => "127.0.0.1",
 # Now try blocking devices_track
 $client2 = new_ok("ADB::Client" => [host => "127.0.0.1", port => $port_10]);
 @result = $client2->devices_track;
-is(@result, 4, "Expect 4 results");
-$tracker = delete $result[3];
+is(@result, 2, "Expect 2 results");
+$tracker = delete $result[1];
 is_deeply(\@result, [
   {
     "10.253.0.13:5555" => "device",
     "52000c4748d6a283" => "device"
   },
-  [
-    "10.253.0.13:5555",
-    "52000c4748d6a283"
-  ],
-  "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Our devices are back on the new server") || dumper(\@result);
 isa_ok($tracker, "ADB::Client::Tracker", "Expected tracker type");
 # Tracking testing is a bit tricky since we need something to change the
@@ -601,46 +507,19 @@ is_deeply(\@tracked, [
         "10.253.0.13:5555" => "offline",
         "52000c4748d6a283" => "device"
     },
-    [
-        "10.253.0.13:5555",
-        "52000c4748d6a283"
-    ],
-    "10.253.0.13:5555\toffline\n52000c4748d6a283\tdevice\n",
-    {
-        "change" => {
-            "10.253.0.13:5555" => [
-                "device",
-                "offline"
-            ]
-        },
-    }
+    { "10.253.0.13:5555" => [ "device", "offline" ] }
 ], "First event") || dumper(\@tracked);
 
 @tracked = $tracker->wait;
 is_deeply(\@tracked, [
     { "52000c4748d6a283" => "device" },
-    [ "52000c4748d6a283" ],
-    "52000c4748d6a283\tdevice\n",
-    {
-        "delete" => {
-            "10.253.0.13:5555" => "offline"
-        }
-    }
+    { "10.253.0.13:5555" => ["offline", ""] }
 ], "Second event") || dumper(\@tracked);
 
 @tracked = $tracker->wait;
 is_deeply(\@tracked, [
     { "52000c4748d6a283" => "offline" },
-    [ "52000c4748d6a283" ],
-    "52000c4748d6a283\toffline\n",
-    {
-        "change" => {
-            "52000c4748d6a283" => [
-                "device",
-                "offline"
-            ]
-        },
-    }
+    { "52000c4748d6a283" => [ "device", "offline" ] },
 ], "Third event") || dumper(\@tracked);
 # Now we are sure 52000c4748d6a283 is offline start waiting for an usb device
 # diag("strace trigger");
@@ -650,13 +529,7 @@ $client3->wait_usb_device(callback => $callback3);
 @tracked = $tracker->wait;
 is_deeply(\@tracked, [
     {},
-    [],
-    "",
-    {
-        "delete" => {
-            "52000c4748d6a283" => "offline"
-        }
-    }
+    { "52000c4748d6a283" => ["offline", ""] }
 ], "Fourth event") || dumper(\@tracked);
 
 # We are now without devices again
@@ -703,8 +576,6 @@ is_deeply(\@result, [
         "10.253.0.13:5555" => "device",
         "52000c4748d6a283" => "device"
     },
-    ["10.253.0.13:5555", "52000c4748d6a283"],
-    "10.253.0.13:5555\tdevice\n52000c4748d6a283\tdevice\n"
 ], "Expected devices result") || dumper(\@result);
 
 is($client->wait("disconnect"), "",

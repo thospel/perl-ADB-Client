@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 21_non_loopback.t'
+# `make test'. After `make install' it should work as `perl 41_non_loopback.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 

@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "035";
-$release_time = 1606053901;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "036";
+$release_time = 1606258037;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -110,10 +110,13 @@ $release_time = 1606053901;	## no critic (UselessNoCritic MagicNumbers)
   't/13_spawn_socket.t' => {
     '1.000' => '1.000'
   },
-  't/20_ipv6.t' => {
+  't/20_sync.t' => {
     '1.000' => '1.000'
   },
-  't/21_non_loopback.t' => {
+  't/40_ipv6.t' => {
+    '1.000' => '1.000'
+  },
+  't/41_non_loopback.t' => {
     '1.000' => '1.000'
   },
   't/80_syntax.t' => {
@@ -132,6 +135,18 @@ $release_time = 1606053901;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/TestDrive.pm' => {
+    '1.000' => '1.000'
+  },
+  't/sdcard/adb_client_test/dir/bar' => {
+    '1.000' => '1.000'
+  },
+  't/sdcard/adb_client_test/empty' => {
+    '1.000' => '1.000'
+  },
+  't/sdcard/adb_client_test/foo' => {
+    '1.000' => '1.000'
+  },
+  't/sdcard/adb_client_test/fóòጡ' => {
     '1.000' => '1.000'
   },
   'version_check' => {

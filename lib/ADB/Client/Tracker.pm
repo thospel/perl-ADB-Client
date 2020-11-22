@@ -138,13 +138,13 @@ sub _process {
 }
 
 sub _reader {
-    my ($tracker) = @_;
+    my ($tracker, $probe) = @_;
 
     my $rc = sysread($tracker->{socket}, my $buffer, $tracker->{block_size});
     if ($rc) {
         $tracker->{in} .= $buffer;
-        $tracker->_process;
-        return;
+        $tracker->_process unless $probe;
+        return $rc;
     }
     if (defined $rc || $! == ECONNRESET) {
         # EOF
@@ -155,10 +155,20 @@ sub _reader {
         } else {
             $tracker->error("EOF", $eof);
         }
-        return;
+        return 0;
     }
-    return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
+    return undef if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK || $probe;
     $tracker->error("Unexpected error reading from socket: $^E");
+}
+
+sub is_empty {
+    my ($tracker, $probe) = @_;
+
+    if ($probe) {
+        return 0 if $tracker->{in} ne "";
+        $tracker->_reader(1);
+    }
+    return $tracker->{in} eq "" ? 1 : 0;
 }
 
 sub wait : method {

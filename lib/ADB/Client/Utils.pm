@@ -8,26 +8,30 @@ use Data::Dumper;
 use File::Spec;
 use Time::Local qw(timegm);
 use Time::HiRes qw(clock_gettime CLOCK_REALTIME CLOCK_MONOTONIC);
-use Errno qw(ENOTCONN EPROTONOSUPPORT);
+use Errno qw(ENOTCONN EPROTONOSUPPORT ENOPROTOOPT);
 use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
               inet_pton inet_aton sockaddr_family pack_sockaddr_in
               pack_sockaddr_in6
               SOCK_STREAM IPPROTO_TCP IPPROTO_UDP AF_INET AF_INET6 SOCK_DGRAM
               SOL_SOCKET SO_ACCEPTCONN);
+use Scalar::Util qw(dualvar);
 our $SO_ACCEPTCONN = eval { SO_ACCEPTCONN };
 use Carp;
 our @CARP_NOT = qw(ADB::Client::Ref);
 
 use Exporter::Tidy
-    other	=>[qw(addr_info adb_addr_info info caller_info callers dumper
-                      string_from_value display_string adb_check_response
-                      realtime clocktime realtime_running clocktime_running
-                      ip_port_from_addr addr_from_ip_port is_listening get_home
-                      $me
-                      $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
-                      $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT $ADB_SERIAL
-                      OKAY FAIL SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
-                      DISPLAY_MAX IPV6)];
+    other =>[qw(addr_info adb_addr_info info caller_info callers dumper
+                string_from_value display_string adb_check_response realtime
+                clocktime realtime_running clocktime_running ip_port_from_addr
+                addr_from_ip_port is_listening get_home errno_native time_to_adb
+                time_from_adb
+                _native adb_file_type_from_mode adb_permissions_from_mode
+                $me %errno_adb %errno_native %adb_mode_from_file_type
+                %adb_file_type_from_mode
+                $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
+                $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT $ADB_SERIAL
+                ADB_FILE_TYPE_MASK ADB_PERMISSION_MASK OKAY FAIL SUCCEEDED
+                FAILED BAD_ADB ASSERTION INFINITY DISPLAY_MAX EPOCH0 IPV6)];
 
 use constant {
     # Code assumes OKAY and FAIL both have length 4, so you can't change this
@@ -39,6 +43,7 @@ use constant {
     BAD_ADB		=> 2,
     ASSERTION		=> 3,
     INFINITY		=> 9**9**9,
+    EPOCH0		=> Time::Local::timegm(0,0,0,1,0,1970),
     IPV6		=>
     socket(my $s, AF_INET6, SOCK_STREAM, IPPROTO_TCP) ? 1 :
     $! == EPROTONOSUPPORT ? 0 :
@@ -79,6 +84,14 @@ sub realtime_running {
 
 sub clocktime_running {
     return clock_gettime($CLOCK_TYPE) - $BASE_CLOCKTIME;
+}
+
+sub time_to_adb {
+    return shift() - EPOCH0;
+}
+
+sub time_from_adb {
+    return shift() + EPOCH0;
 }
 
 our $me;
@@ -457,6 +470,71 @@ sub adb_check_response {
     substr($data->{in}, 0, 8, "");
     my $response = substr($data->{in}, 0, $more, "");
     return $status, $response;
+}
+
+# These are the android errno numbers and texts.
+# They are the same as on linux
+our %_errno_adb = (
+    EACCES	=> [13, "Permission denied"],
+    EEXIST	=> [17, "File exists"],
+    EFAULT	=> [14, "Bad address"],
+    EFBIG	=> [27, "File too large"],
+    EINTR	=> [4, "Interrupted system call"],
+    EINVAL	=> [22, "Invalid argument"],
+    EIO		=> [5, "Input/output error"],
+    EISDIR	=> [21, "Is a directory"],
+    ELOOP	=> [40, "Too many levels of symbolic links"],
+    EMFILE	=> [24, "Too many open files"],
+    ENAMETOOLONG=> [36, "File name too long"],
+    ENFILE	=> [23, "Too many open files in system"],
+    ENOENT	=> [2, "No such file or directory"],
+    ENOMEM	=> [12, "Cannot allocate memory"],
+    ENOPROTOOPT	=> [92, "Protocol not available"],
+    ENOSPC	=> [28, "No space left on device"],
+    ENOTDIR	=> [20, "Not a directory"],
+    EOVERFLOW	=> [75, "Value too large for defined data type"],
+    EPERM	=> [1, "Operation not permitted"],
+    EROFS	=> [30, "Read-only file system"],
+    ETXTBSY	=> [26, "Text file busy"],
+);
+
+our %errno_native = our %errno_adb = (0 => dualvar(0, ""));
+while (my ($key, $value) = each %_errno_adb) {
+    my $code = Errno->can($key) || die "Unknown errno $key";
+    my $err = local $! = eval { Errno->$key } || ENOPROTOOPT;
+    $errno_adb{$value->[0]} = dualvar($value->[0], $value->[1]);
+    $errno_native{$value->[0]} = local $! = $code->();
+}
+
+sub errno_native {
+    return $errno_native{0+shift};
+}
+
+use constant {
+    ADB_FILE_TYPE_MASK  => 0170000,
+    ADB_PERMISSION_MASK	=> 07777,
+};
+
+our %adb_mode_from_file_type = (
+    SOCK	=> 0140000,
+    LNK		=> 0120000,
+    REG		=> 0100000,
+    BLK		=> 0060000,
+    DIR		=> 0040000,
+    CHR		=> 0020000,
+    FIFO	=> 0010000,
+);
+
+our %adb_file_type_from_mode = reverse %adb_mode_from_file_type;
+
+sub adb_file_type_from_mode {
+    my $mode = shift // croak "Undefined mode";
+    return $adb_file_type_from_mode{$mode & ADB_FILE_TYPE_MASK} //
+        croak sprintf "Cannot get file_type from %o", $mode;
+}
+
+sub adb_permissions_from_mode {
+    return shift() & ADB_PERMISSION_MASK;
 }
 
 1;

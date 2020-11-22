@@ -7,20 +7,19 @@ our $VERSION = '1.000';
 use Carp;
 our @CARP_NOT = qw(ADB::Client::Ref);
 
-use ADB::Client::Utils qw(adb_check_response display_string info $DEBUG $QUIET);
+use ADB::Client::Utils qw(display_string info $DEBUG $QUIET);
 
 use Exporter::Tidy
     other	=>[
-        qw(command_check_response
-           SPECIAL COMMAND_NAME COMMAND NR_RESULTS FLAGS PROCESS CODE
-           PHASE1 PHASE2
+        qw(SPECIAL COMMAND_NAME COMMAND NR_BYTES FLAGS PROCESS CODE
+           PHASE1 PHASE2 SYNC PACKED_OUT SEND ROOT
            EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT UTF8_IN UTF8_OUT)];
 
 use constant {
     # Index in @COMMANDS element
     COMMAND_NAME	=> 0,
     COMMAND	=> 1,
-    NR_RESULTS	=> 2,
+    NR_BYTES	=> 2,
     FLAGS	=> 3,
     PROCESS	=> 4,
     # CODE is used for SPECIAL commands
@@ -63,6 +62,14 @@ use constant {
     # First we expect an OKAY and only then do the "normal" processing
     # The stuff after the first OKAY is allowed to arrive immediately
     PHASE2	=> 256,
+    # This command needs an active sync
+    SYNC	=> 512,
+    # This sends packed
+    PACKED_OUT	=> 1024,
+    # Special handling for send_v1
+    SEND	=> 2048,
+    # Needs ROOT (should only appear with TRANSPORT (or SYNC))
+    ROOT	=> 4096,
 
     EMPTY_ARGUMENTS	=> [],
 
@@ -89,18 +96,44 @@ sub command_ref : method {
     my $command_ref = shift // return $command->{COMMAND_REF};
 
     if ($command_ref->[COMMAND] ne SPECIAL) {
-        my $out = sprintf($command_ref->[COMMAND], @_);
-        if ($command_ref->[FLAGS] & UTF8_OUT) {
-            utf8::encode($out);
-        } elsif (!utf8::downgrade($out, 1)) {
-            $out = display_string($out);
-            croak "Argument cannot be converted to native 8 bit encoding";
+        if ($command_ref->[FLAGS] & SYNC) {
+            if (@_) {
+                defined $_[0] || croak "Argument is undef";
+                if ($command_ref->[FLAGS] & UTF8_OUT) {
+                    my $out = $_[0];
+                    utf8::encode($out);
+                    $command->{OUT} = pack("a4V/a*", $command_ref->[COMMAND], $out);
+                } elsif (utf8::is_utf8($_[0])) {
+                    my $out = $_[0];
+                    if (!utf8::downgrade($out, 1)) {
+                        my $out = display_string($out);
+                        croak "Argument cannot be converted to native 8 bit encoding: $out";
+                    }
+                    $command->{OUT} = pack("a4V/a*", $command_ref->[COMMAND], $out);
+                } else {
+                    $command->{OUT} = pack("a4V/a*", $command_ref->[COMMAND], @_);
+                }
+                if (@_ > 1) {
+                    shift;
+                    $command->{ARGUMENTS} = \@_;
+                }
+            } else {
+                $command->{OUT} = pack("a4x4", $command_ref->[COMMAND]);
+            }
+        } else {
+            my $out = sprintf($command_ref->[COMMAND], @_);
+            if ($command_ref->[FLAGS] & UTF8_OUT) {
+                utf8::encode($out);
+            } elsif (!utf8::downgrade($out, 1)) {
+                $out = display_string($out);
+                croak "Argument cannot be converted to native 8 bit encoding: $out";
+            }
+            if (length $out >= 2**16) {
+                $out = display_string($out);
+                croak "Command too long: $out";
+            }
+            $command->{OUT} = sprintf("%04X", length $out) . $out;
         }
-        if (length $out >= 2**16) {
-            $out = display_string($out);
-            croak "Command too long: $out";
-        }
-        $command->{OUT} = sprintf("%04X", length $out) . $out;
     }
     $command->{COMMAND_REF} = $command_ref;
 }
@@ -118,16 +151,6 @@ sub command_name {
 
 sub out {
     return shift->{OUT};
-}
-
-sub command_check_response {
-    my ($command_ref, $data, $len_added) = @_;
-
-    my ($error, $str) =
-        adb_check_response($data, $len_added, $command_ref->[NR_RESULTS],
-                           $command_ref->[FLAGS] & EXPECT_EOF) or return;
-    utf8::decode($str) if !$error && $command_ref->[FLAGS] & UTF8_IN;
-    return $error, $str;
 }
 
 sub objects {

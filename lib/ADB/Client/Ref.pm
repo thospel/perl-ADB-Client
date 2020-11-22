@@ -14,15 +14,18 @@ use Storable qw(dclone);
 use ADB::Client::Events qw(mainloop unloop loop_levels timer immediate);
 use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
-    qw(info caller_info callers dumper display_string
-       ip_port_from_addr clocktime_running
-       FAILED BAD_ADB ASSERTION INFINITY
+    qw(info caller_info callers dumper display_string adb_check_response
+       ip_port_from_addr clocktime_running realtime adb_file_type_from_mode
+       time_from_adb time_to_adb
+       %errno_adb %adb_mode_from_file_type
+       SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
+       ADB_FILE_TYPE_MASK ADB_PERMISSION_MASK
        $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
-use ADB::Client::Command qw(command_check_response
-                            PHASE1 PHASE2
+use ADB::Client::Command qw(PHASE1 PHASE2 SYNC PACKED_OUT NR_BYTES UTF8_IN
+                            UTF8_OUT SEND ROOT
                             SPECIAL COMMAND_NAME COMMAND FLAGS PROCESS CODE
                             EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT);
 use ADB::Client::Tracker;
@@ -54,6 +57,8 @@ use constant {
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
     VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
     KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
+    # 92 is android ENOPROTOOPT
+    SYNC_ERROR	=> $errno_adb{92},
 };
 
 our @COMMANDS;
@@ -84,7 +89,8 @@ our @BUILTINS = (
     [device_path	=> "host:get-devpath", -1, EXPECT_EOF | SERIAL],
     [devices		=> "host:devices", -1, EXPECT_EOF,   \&process_devices],
     [devices_long	=> "host:devices-l", -1, EXPECT_EOF, \&process_devices],
-    [devices_track	=> "host:track-devices", -1, MAYBE_MORE, \&process_devices],
+    [devices_track	=> "host:track-devices", -1, MAYBE_MORE,
+     \&process_devices],
     [_transport		=> "host:transport-%s", 0, SERIAL|MAYBE_EOF],
     # Both of these work:
     # host-serial:0715f712da553032:transport-this_does_not_matter
@@ -92,18 +98,20 @@ our @BUILTINS = (
     # Make the second one available. It is less ambiguous for serials with :
     [transport_serial	=> "host:transport:%s", 0, MAYBE_EOF],
     [_tport		=> "host:tport:%s", 8, SERIAL, \&process_tport],
-    [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
+    [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF|ROOT],
     [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],
-    [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF],
-    [connect		=> "host:connect:%s", -1, EXPECT_EOF, \&process_connect],
+    [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF|ROOT],
+    [connect		=> "host:connect:%s", -1, EXPECT_EOF,
+     \&process_connect],
     [disconnect		=> "host:disconnect:%s", -1, EXPECT_EOF],
-    # all the wait-for-device variants strictly have a SERIAL version
-    # But only host-serial:<serial>:wait-for-<transport> does anything special
-    # and it recognizes that serial irrespective of the <transport>
+    # all the wait-for-XXX-YYY variants support a SERIAL flag.
+    # But only host-serial:<serial>:wait-for-XXX-YYY and
+    # host-transport-id:<tid>:wait-for-XXX-YYY do anything special and they
+    # recognize that serial/transport irrespective of the XXX
     [_wait		=> "host:wait-for-%s-%s", 0,
      SERIAL|PHASE2|EXPECT_EOF],
-    [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF],
-    [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF],
+    [verity_enable	=> "enable-verity:", 0, TRANSPORT|EXPECT_EOF|ROOT],
+    [verity_disable	=> "disable-verity:", 0, TRANSPORT|EXPECT_EOF|ROOT],
     [reboot		=> "reboot:%s", 0, TRANSPORT|EXPECT_EOF],
     # The details of these commented out commands were not thoroughly tested
     # [sideload		=> "sideload:%s", 0, TRANSPORT|EXPECT_EOF],
@@ -125,7 +133,8 @@ our @BUILTINS = (
     # the adb server knows on which device which forward lives and indeed the
     # kill actually still works even if you give the serial of some other
     # device. So it shouldn't NEED TRANSPORT, but it does.
-    [forward_kill	=> "host:killforward:%s", 0, TRANSPORT|SERIAL|PHASE2|EXPECT_EOF],
+    [forward_kill	=> "host:killforward:%s", 0,
+     TRANSPORT|SERIAL|PHASE2|EXPECT_EOF],
     [forward_kill_all	=> "host:killforward-all", 0, PHASE2|EXPECT_EOF],
     [reverse_list	=> "reverse:list-forward", -1, TRANSPORT|EXPECT_EOF,
      \&process_reverse_list],
@@ -134,11 +143,29 @@ our @BUILTINS = (
      \&process_forward],
     [reverse_norebind	=> "reverse:forward:norebind:%s;%s", INFINITY,
      TRANSPORT|PHASE2|EXPECT_EOF],
-    [reverse_kill	=> "reverse:killforward:%s", 0, TRANSPORT|PHASE2|EXPECT_EOF],
-    [reverse_kill_all	=> "reverse:killforward-all", 0, TRANSPORT|PHASE2|EXPECT_EOF],
+    [reverse_kill	=> "reverse:killforward:%s", 0,
+     TRANSPORT|PHASE2|EXPECT_EOF],
+    [reverse_kill_all	=> "reverse:killforward-all", 0,
+     TRANSPORT|PHASE2|EXPECT_EOF],
+    [sync		=> "sync:", 0, TRANSPORT, \&process_sync],
     # [mdns_check	=> "host:mdns:check", 0, EXPECT_EOF],
     # [mdns_services	=> "host:mdns:services", 0, EXPECT_EOF],
     # [pair		=> 'host:pair:%2$s:%1$s', 0, EXPECT_EOF],
+    [lstat_v1		=> "STAT", 16, SYNC|UTF8_OUT, \&process_lstat_v1],
+    [stat_v2		=> "STA2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
+    [lstat_v2		=> "LST2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
+    [list_v1		=> "LIST", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE,
+     \&process_list_v1],
+    # Unimplemented, I have no device supporting list_v2
+    # [list_v2		=> "LIS2", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE],
+    [send_v1		=> "SEND", 8, SYNC|UTF8_OUT|SEND, \&process_send_v1],
+    # Unimplemented, I have no device supporting send_v2
+    # [send_v2		=> "SND2", 0, SYNC|UTF8_OUT|SEND],
+    [recv_v1		=> "RECV", 0, SYNC|UTF8_OUT|MAYBE_MORE,
+     \&process_recv_v1],
+    # Unimplemented, I have no device supporting recv_v2
+    # [recv_v2		=> "RCV2", 0, SYNC|UTF8_OUT|MAYBE_MORE],
+    [quit		=> "QUIT", 0, SYNC|EXPECT_EOF],
 );
 
 my $objects = 0;
@@ -213,6 +240,7 @@ sub new {
         #            !active => !reading (or reading => active)
         #            active && socket <=> reading || !defined in
         #            !socket => out = ""
+        sync		=> 0,
         active		=> undef,
         commands	=> [],
         command_retired	=> undef,
@@ -304,6 +332,13 @@ sub _fatal_run {
     confess "Attempt to restart a dead ADB::Client";
 }
 
+sub is_fatal {
+    my ($client_ref) = @_;
+
+    return @{$client_ref->{commands}} &&
+        $client_ref->{commands}[0]{COMMAND_REF} == FATAL;
+}
+
 sub DESTROY {
     --$objects;
     info("DESTROY @_") if $DEBUG;
@@ -342,18 +377,21 @@ sub wait : method {
     $client_ref->{result} = "";
 
     eval { mainloop() };
+
+    # Make sure $client_ref->{result} is reset to undef whatever happens later
+    my $result = $client_ref->{result};
+    $client_ref->{result} = undef;
+
     if ($@) {
         # Died out of mainloop. Could be something completely unrelated
         my $err = $@;
-        if (!defined $client_ref->{result}) {
+        if (!defined $result) {
             # Don't do fixups on fatal client_refs
             # (this die could very well be the fatality message)
-            die $err if
-                @{$client_ref->{commands}} &&
-                $client_ref->{commands}[0]{COMMAND_REF} == FATAL;
+            die $err if $client_ref->is_fatal;
             $client_ref->fatal("Waiting for command without expecting result after $err");
         }
-        if ($client_ref->{result}) {
+        if ($result) {
             # We already had a result. In case of an error we could report it
             # here, but the thing crashing mainloop is probably more important
             $client_ref->fatal("Result while commands after $err") if
@@ -369,19 +407,17 @@ sub wait : method {
                 !defined $client_ref->{commands}[0]{callback};
             $client_ref->close if !@{$client_ref->{commands}};
         }
-        $client_ref->{result} = undef;
         die $err;
     }
     if (@{$client_ref->{commands}}) {
-        if (!defined $client_ref->{result}) {
+        if (!defined $result) {
             $client_ref->fatal(
-                $client_ref->{commands}[0]{COMMAND_REF} == FATAL ?
+                $client_ref->is_fatal ?
                 "ADB::Client is dead but something caught the exception" :
                 "Waiting for command without expecting result");
         }
         $client_ref->fatal("Command still pending while we have a result") if
-            $client_ref->{result};
-        $client_ref->{result} = undef;
+            $result;
 
         # We just fell out of mainloop without setting result
         # This must mean there were non-blocking commands queued before the
@@ -389,7 +425,9 @@ sub wait : method {
         # activity for mainloop. (Or something else called unloop)
 
         # Remove the command we are waiting for since we sort of had an error
-        # and we cannot expect the user to properly recover from this
+        # and we cannot expect the user to properly recover from this.
+        # (even if there is no reason think this is the command that actually
+        # caused the error)
         pop @{$client_ref->{commands}};
         # Also remove associated autoconnect
         pop @{$client_ref->{commands}} if
@@ -401,9 +439,7 @@ sub wait : method {
         croak "A previous command in the queue failed";
     }
 
-    my $result = $client_ref->{result} ||
-        $client_ref->fatal("Exit mainloop without setting result");
-    $client_ref->{result} = undef;
+    $result || $client_ref->fatal("Exit mainloop without setting result");
     # If there are no more commands we should also not be active
     $client_ref->fatal("Active during wait") if $client_ref->{active};
 
@@ -427,13 +463,20 @@ sub commands_add {
 sub command_add {
     my ($class, $client_class, $command_ref) = @_;
 
-    my $command_name = $command_ref->[COMMAND_NAME] ||
+    ref $command_ref eq "ARRAY" ||
+        croak "Command '$command_ref' is not an ARRAY reference";
+    my @command_ref = @$command_ref;
+    my $command_name = $command_ref[COMMAND_NAME] ||
         croak("No COMMAND_NAME");
-    $command_ref->[COMMAND] // croak "No COMMAND in command '$command_name'";
+    $command_ref[COMMAND] // croak "No COMMAND in command '$command_name'";
+    if (!utf8::downgrade($command_ref[COMMAND], 1)) {
+        my $command = display_string($command_ref[COMMAND]);
+          croak "Command cannot be converted to native 8 bit encoding: $command";
+    }
 
-    if ($command_ref->[COMMAND] ne SPECIAL) {
-        $command_ref->[FLAGS] // croak "No FLAGS in command '$command_name'";
-        if ($command_ref->[FLAGS] & SERIAL) {
+    if ($command_ref[COMMAND] ne SPECIAL) {
+        $command_ref[FLAGS] // croak "No FLAGS in command '$command_name'";
+        if ($command_ref[FLAGS] & SERIAL) {
             my @command_ref = @$command_ref;
             $command_ref[FLAGS] &= ~SERIAL;
             # Instead of host:features we can also do:
@@ -441,31 +484,31 @@ sub command_add {
             #  host-local:features
             #  host-serial:52000c4748d6a283:features
             for my $prefix (qw(usb local serial:%s transport-id:%d)) {
-                my $ref = [@command_ref];
-                $ref->[COMMAND] =~ s/:/-$prefix:/ ||
-                    croak "No : in command '$ref->[COMMAND_NAME]'";
+                my $command = $command_ref[COMMAND];
+                $command =~ s/:/-$prefix:/ ||
+                    croak "No : in command '$command_name'";
+                local $command_ref[COMMAND] = $command;
                 my $suffix = $prefix;
                 $suffix =~ s/:.*//; # Change transport-id:%s to transport-id
                 $suffix =~ s/.*-//; # Change transport-id to id
-                $ref->[COMMAND_NAME] .= "_" . $suffix;
-                $class->command_add($client_class, $ref);
+                local $command_ref[COMMAND_NAME] .= "${command_name}_$suffix";
+                $class->command_add($client_class, \@command_ref);
             }
-            $command_ref = \@command_ref;
         }
-        if ($command_ref->[FLAGS] & PHASE2) {
+        if ($command_ref[FLAGS] & PHASE2) {
             # We currently have no code to avoid having to fake "success"
             # if we immediately get the whole answer (see process_phase1).
             # Having EXPECT_EOF allows us to delegate this to normal EOF
             # processing
-            $command_ref->[FLAGS] & EXPECT_EOF or
-                croak "TWHO_PHASE without EXPECT_EOF";
-            my $ref = $command_ref;
-            $command_ref = [$command_name, $command_ref->[COMMAND], 0,
-                            MAYBE_MORE|PHASE1, sub { process_phase1($ref, @_) }];
+            $command_ref[FLAGS] & EXPECT_EOF or
+                croak "PHASE2 without EXPECT_EOF";
+            my $ref = [@command_ref];
+            @command_ref = ($command_name, $command_ref[COMMAND], 0,
+                            MAYBE_MORE|PHASE1, sub { process_phase1($ref, @_) });
         }
     }
 
-    push @COMMANDS, $command_ref;
+    push @COMMANDS, \@command_ref;
     eval { $client_class->_add_command($#COMMANDS) };
     if ($@) {
         pop @COMMANDS;
@@ -483,10 +526,27 @@ sub command_get {
         die "Assertion: No COMMAND_NAME";
     my $command = $command_ref->[COMMAND] //
         die "Assertion: No COMMAND in command '$command_name'";
+    my $nr_args = $command =~ tr/%//;
+    if ($command_ref->[FLAGS] && ($command_ref->[FLAGS] & SYNC)) {
+        length $command eq 4 ||
+            croak "SYNC command '$command' does not have length 4";
+        $command_ref->[NR_BYTES] >= 0 ||
+            croak "SYNC command '$command' cannot be counted";
+        $command_ref->[NR_BYTES] < 2**32 ||
+            croak "SYNC command '$command' expected response out of range";
+        # In check_response() we only have special handling for this case
+        # (QUIT should be the only EXPECT_EOF SYNC command)
+        croak "SYNC command '$command' execpects byes and EOF" if
+            ($command_ref->[FLAGS] & EXPECT_EOF) && $command_ref->[NR_BYTES];
+        $nr_args =
+            $command_ref->[FLAGS] & SEND ? 2 :
+            $command_ref->[NR_BYTES] || !($command_ref->[FLAGS] & EXPECT_EOF) ?
+            1 : 0;
+    }
 
     $command !~ /%(?!(?:\d+\$)?[sd])/a ||
         croak "Invalid format in command '$command_name': $command";
-    return $command_name, $command =~ tr/%//, $command eq SPECIAL;
+    return $command_name, $nr_args, $command eq SPECIAL;
 }
 
 sub command_simple {
@@ -495,8 +555,29 @@ sub command_simple {
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
     my $command = ADB::Client::Command->new(CALLBACK => $callback);
-    $command->{transaction_timeout2} = delete $arguments->{transaction_timeout2}
-        if $command_ref->[FLAGS] & PHASE1;
+    $command->{transaction_timeout} =
+        delete $arguments->{transaction_timeout} //
+        $client_ref->{transaction_timeout};
+    my $flags = $command_ref->[FLAGS];
+    $command->{transaction_timeout2} =
+        delete $arguments->{transaction_timeout2} //
+        $client_ref->{transaction_timeout} if $flags & PHASE1;
+    $command->{on_progress} = delete $arguments->{on_progress} if
+        exists $arguments->{on_progress} &&
+        ($flags & (SYNC|MAYBE_MORE)) == (SYNC|MAYBE_MORE);
+
+    if ($command_ref->[FLAGS] & SEND) {
+        $client_ref->{nr_bytes} = 0;
+        $command->{mtime} = delete $arguments->{mtime};
+        my $mode = delete $arguments->{mode} // 0644;
+        $mode == int($mode) || croak "Mode must be an integer";
+        $mode == ($mode & (ADB_FILE_TYPE_MASK|ADB_PERMISSION_MASK)) ||
+            croak sprintf "Spurious bits in mode %o", $mode;
+        $mode |= $adb_mode_from_file_type{REG} unless $mode & ADB_FILE_TYPE_MASK;
+        adb_file_type_from_mode($mode);
+        $args->[0] .= sprintf(",%d", $mode);
+        $command->{on_lowmark} = \&_send_data;
+    }
 
     if (ref $command_ref->[PROCESS] eq "ARRAY") {
         my $keys = $command_ref->[PROCESS];
@@ -644,6 +725,7 @@ sub close : method {
         # We want that to represent the last connection attempt,
         # NOT the current connection state. Check $client_ref->{socket} instead
     }
+    $client_ref->{sync} = 0;
     $client_ref->{active}  = 0;
     $client_ref->{timeout} = undef;
     $client_ref->{starter} = undef;
@@ -698,6 +780,11 @@ sub success {
         $result = eval { $process->($_[0], $command_ref->[COMMAND], $client_ref, $result) };
         if ($@) {
             my $err = $@;
+            if ($client_ref->is_fatal) {
+                # Just in case this wasn't the fatal making its way back
+                $client_ref->close;
+                die $err;
+            }
             $err =~ s/\s+\z//;
             my $str = display_string($_[0]);
             unshift @{$client_ref->{commands}}, $command;
@@ -706,6 +793,10 @@ sub success {
         }
         if (ref $result ne "ARRAY") {
             unshift @{$client_ref->{commands}}, $command;
+            if (ref $result eq "SCALAR") {
+                $client_ref->close;
+                die $$result;
+            }
             ref $result eq "" ||
                 $client_ref->fatal("Could not process $command_ref->[COMMAND] output: Neither a string nor an ARRAY reference");
             $client_ref->error($result || "Unknown error") if defined $result;
@@ -730,7 +821,8 @@ sub activate {
     return if $client_ref->{active} || !@{$client_ref->{commands}} || $client_ref->{post_activate};
 
     for (1) {
-        my $command_ref = $client_ref->{commands}[0]->command_ref;
+        my $command = $client_ref->{commands}[0];
+        my $command_ref = $command->command_ref;
         if ($client_ref->{out} ne "") {
             my $response = display_string($client_ref->{out});
             $client_ref->fatal("$response to ADB still pending when starting $command_ref->[COMMAND]");
@@ -769,17 +861,61 @@ sub activate {
                     $client_ref->connector(CONNECT));
             redo;
         }
-        $client_ref->{out} = $client_ref->{commands}[0]->out;
+        if ($client_ref->{sync}) {
+            if ($command_ref->[FLAGS] & SYNC) {
+                $client_ref->{out} = $command->out;
+            } else {
+                # This will fail, but we want it to fail without disrupting
+                # the adbd server state and with a clear message
+                $client_ref->{out} = pack("a44x", $command_ref->[COMMAND]);
+            }
+        } else {
+            if ($command_ref->[FLAGS] & SYNC) {
+                # This will fail,but we want it to fail without disrupting
+                # the adbd server state and with a clear message
+                $client_ref->{out} = sprintf("%04X", length($command_ref->[COMMAND])) . $command_ref->[COMMAND];
+            } else {
+                $client_ref->{out} = $command->out;
+            }
+        }
         info("Sending to ADB: " . display_string($client_ref->{out})) if $DEBUG;
+
         $client_ref->{socket}->add_write(sub { $client_ref->_writer });
         $client_ref->{socket}->add_read(sub { $client_ref->_reader });
-        my $addr = $client_ref->{addr_connected} ||
-            $client_ref->fatal("Socket without addr_connected");
         $client_ref->{timeout} = timer(
-            $addr->{transaction_timeout} // $client_ref->{transaction_timeout},
+            $command->{transaction_timeout} //
+            $client_ref->fatal("No transaction_timeout"),
             sub { $client_ref->_transaction_timed_out });
+
+        if ($client_ref->{sync} &&
+            ($command_ref->[FLAGS] & SYNC) &&
+            $command->{on_lowmark} &&
+            length $client_ref->{out} < $client_ref->{block_size}) {
+            $command->{on_lowmark}->($client_ref, $command);
+        }
     }
     $client_ref->{active} = 1;
+}
+
+sub _send_data {
+    my ($client_ref, $command) = @_;
+
+    my $arguments = $command->arguments;
+    my $length = length $arguments->[0];
+    if ($length) {
+        $length = $client_ref->{block_size} if
+            $length > $client_ref->{block_size};
+        $length = 2**16 if $length > 2**16;
+        $client_ref->{out} .= pack("a4V", "DATA", $length);
+        $client_ref->{out} .= substr($arguments->[0], 0, $length, "");
+        $client_ref->{nr_bytes} += $length;
+    }
+    if ($arguments->[0] eq "") {
+        delete $command->{on_lowmark};
+        $client_ref->{out} .=
+            pack("a4V", "DONE",
+                 time_to_adb($command->{mtime} //= int(realtime())));
+    }
 }
 
 sub _transaction_timed_out {
@@ -804,9 +940,19 @@ sub connector {
     my $command = {
         COMMAND_REF	=> $command_ref,
         command_ref	=> $command_ref,
-        version_min	=> delete $arguments->{version_min},
-        version_max	=> delete $arguments->{version_max},
         version_scan	=> 0,
+        $callback ? (
+            transaction_timeout =>
+            delete $arguments->{transaction_timeout} ||
+            $client_ref->{transaction_timeout},
+            connection_timeout =>
+            delete $arguments->{connection_timeout} ||
+            $client_ref->{connection_timeout},
+            version_min	=> delete $arguments->{version_min},
+            version_max	=> delete $arguments->{version_max},
+        ) : (
+            connection_timeout => $client_ref->{connection_timeout},
+        ),
     };
     if ($spawn) {
         $command->{spawn}		= 1;
@@ -1044,7 +1190,8 @@ sub _connect_next {
             # $socket->add_error($callback);
             $client_ref->{in} = undef;
             $client_ref->{timeout} = timer(
-                $addr->{connection_timeout} // $client_ref->{connection_timeout},
+                $addr->{connection_timeout} // $command->{connection_timeout} //
+                $client_ref->fatal("No connection_timeout"),
                 sub { $client_ref->_connection_timeout }
             );
             $client_ref->{active} = 1;
@@ -1364,6 +1511,11 @@ sub _writer {
     my $rc = syswrite($client_ref->{socket}, $client_ref->{out}, $BLOCK_SIZE);
     if ($rc) {
         substr($client_ref->{out}, 0, $rc, "");
+        if ($client_ref->{sync} && length $client_ref->{out} < $client_ref->{block_size}) {
+            my $command = $client_ref->{commands}[0] ||
+                $client_ref->fatal("No command");
+            $command->{on_lowmark}->($client_ref, $command) if $command->{on_lowmark};
+        }
         $client_ref->{socket}->delete_write if $client_ref->{out} eq "";
         $client_ref->{sent} += $rc;
         return;
@@ -1404,7 +1556,7 @@ sub _reader {
                 $client_ref->success($$str);
             } elsif ($command) {
                 my $command_ref = $command->{COMMAND_REF};
-                my ($error, $str) = command_check_response($command_ref, $client_ref, 0);
+                my ($error, $str) = $client_ref->check_response(0, $command_ref);
                 return $client_ref->error($str) if $error;
                 if ($client_ref->{in} ne "") {
                     $str = display_string($client_ref->{in});
@@ -1453,7 +1605,7 @@ sub _reader {
         return;
     }
 
-    my ($error, $str) = command_check_response($command_ref, $client_ref, $rc) or return;
+    my ($error, $str) = $client_ref->check_response($rc, $command_ref) or return;
     return $client_ref->error($str) if $error;
     if ($client_ref->{in} ne "" && !($command_ref->[FLAGS] & MAYBE_MORE)) {
         $str = display_string($client_ref->{in});
@@ -1479,6 +1631,51 @@ sub _reader {
     $client_ref->{active} = 0;
 
     $client_ref->success($str);
+}
+
+sub check_response {
+    my ($client_ref, $len_added, $command_ref) = @_;
+
+    if ($client_ref->{sync}) {
+        return ASSERTION, "Assertion: negative input" if $len_added < 0;
+        for (1) {
+            last if length $client_ref->{in} < 4;
+            my $command = substr($client_ref->{in}, 0, 4);
+            if ($command eq "FAIL") {
+                last if length $client_ref->{in} < 8;
+                my $more = unpack("V", substr($client_ref->{in}, 4, 4));
+                last if length $client_ref->{in} < 8 + $more;
+                my $response = substr($client_ref->{in}, 0, 8 + $more, "");
+                substr($response, 0, 8, "");
+                if ($response =~ /^unknown command ([0-9a-f]{8})$/i) {
+                    # Make error message a bit friendlier
+                    my $command_name = reverse pack("H*", $1);
+                    $response = "Unsupported SYNC command '$command_name'";
+                }
+                return FAILED, $response;
+            }
+            last if length $client_ref->{in} < $command_ref->[NR_BYTES];
+            return SUCCEEDED, substr($client_ref->{in}, 0, $command_ref->[NR_BYTES], "");
+        }
+        if ($len_added == 0) {
+            # Special case for QUIT
+            return SUCCEEDED, "" if
+                ($command_ref->[FLAGS] & EXPECT_EOF) &&
+                $command_ref->[NR_BYTES] == 0;
+            my $response = display_string($client_ref->{in});
+            return BAD_ADB, "Truncated ADB response $response";
+        }
+        return;
+    }
+    my ($error, $str) = adb_check_response(
+        $client_ref, $len_added, $command_ref->[NR_BYTES],
+        $command_ref->[FLAGS] & EXPECT_EOF) or return;
+    if ($error == FAILED && $str eq "closed") {
+        $str = ($command_ref->[FLAGS] & SYNC) && !$client_ref->{sync} ?
+            "Not inside SYNC" : "Device did not recognize command";
+    }
+    utf8::decode($str) if !$error && $command_ref->[FLAGS] & UTF8_IN;
+    return $error, $str;
 }
 
 sub process_version {
@@ -1583,8 +1780,8 @@ sub process_phase1 {
 
     if ($client_ref->{in} ne "" and
         my ($error, $str) =
-        command_check_response($command_ref_orig,
-                               $client_ref, length $client_ref->{in})) {
+        $client_ref->check_response(length $client_ref->{in},
+                                    $command_ref_orig)) {
         # Oh, we already got the second phase result
         return $str if $error;
         if ($client_ref->{in} ne "") {
@@ -1596,7 +1793,8 @@ sub process_phase1 {
     }
     # need to wait for more bytes (typically when the device gets connected)
     $client_ref->{timeout} = timer(
-        $command->{transaction_timeout2} // $client_ref->{transaction_timeout},
+        $command->{transaction_timeout2} //
+        $client_ref->fatal("No transaction_timeout"),
         sub { $client_ref->_transaction_timed_out });
     $client_ref->{socket}->add_read(sub { $client_ref->_reader });
     $client_ref->{sent} = 1;
@@ -1625,7 +1823,7 @@ sub process_forward {
 
     return [""] if $forward eq "";
     my %data = ( in => "OKAY$forward" );
-    my ($error, $str) = ADB::Client::Utils::adb_check_response(\%data, length $forward, -1, EXPECT_EOF) or die "Incomplete response 'OKAY$forward'";
+    my ($error, $str) = adb_check_response(\%data, length $forward, -1, EXPECT_EOF) or die "Incomplete response 'OKAY$forward'";
     return $str if $error;
     $data{in} eq "" || die "Still input left";
     return [$str];
@@ -1642,6 +1840,158 @@ sub process_reverse_list {
         $reverses{$from} = $to;
     }
     return [\%reverses];
+}
+
+sub process_sync {
+    my (undef, undef, $client_ref, $result) = @_;
+    $client_ref->{sync} = 1;
+    return $result;
+}
+
+sub process_lstat_v1 {
+    my ($bytes, $command_name) = @_;
+
+    my ($id, $mode, $size, $mtime) = unpack("a4VVV", $bytes);
+    $id eq $command_name || return "Inconsistent response '$id'";
+    return [SYNC_ERROR] unless $mode || $size || $mtime;
+    return [{
+        mode	=> $mode,
+        size	=> $size,
+        mtime	=> time_from_adb($mtime),
+    }];
+}
+
+sub process_lstat_v2 {
+    my ($bytes, $command_name) = @_;
+
+    my %stat;
+    (my $id, my $error,
+     @stat{qw(dev ino mode nlink uid gid size atime mtime ctime)}) =
+         unpack("a4VQ<Q<VVVVQ<q<q<q<", $bytes);
+    $id eq $command_name || return "Inconsistent response '$id'";
+    return [$errno_adb{$error}] if $error;
+    $stat{mtime} = time_from_adb($stat{mtime});
+    return [\%stat];
+}
+
+sub process_list_v1 {
+    my (undef, $command_name, $client_ref) = @_;
+
+    my $command = $client_ref->command_retired;
+    $command->{data}  //= {};
+    $command->{count} //= 0;
+    while (length $client_ref->{in} >= 4) {
+        my ($id, $mode, $size, $mtime, $length) =
+            unpack("a4V4", $client_ref->{in});
+        if ($id eq "DENT") {
+            defined $length && length $client_ref->{in} >= 20 + $length || last;
+            my $file = substr($client_ref->{in}, 0, 20 + $length, "");
+            substr($file, 0, 20, "");
+            if ($command->command_ref->[FLAGS] & UTF8_IN) {
+                utf8::decode($file);
+                # utf8::downgrade($file, 1);
+            }
+            ++$command->{count};
+            my $stat = {
+                mode	=> $mode,
+                size	=> $size,
+                mtime	=> time_from_adb($mtime),
+            };
+            if ($command->{on_progress}) {
+                eval {
+                    $command->{on_progress}->($client_ref->client,
+                                              $command, $file, $stat);
+                };
+                if ($@) {
+                    my $err = $@;
+                    return \$err;
+                }
+            } else {
+                $command->{data}{$file} = $stat;
+            }
+        } elsif ($id eq "DONE") {
+            defined $length && length $client_ref->{in} >= 20 + $length || last;
+            substr($client_ref->{in}, 0, 20 + $length, "");
+            if ($client_ref->{in} ne "") {
+                my $str = display_string($client_ref->{in});
+                return "Spurious response bytes: $str";
+            }
+            return [$command->{count} ? $command->{data} : SYNC_ERROR];
+        } elsif ($id eq "FAIL") {
+            my ($err, $str) = $client_ref->check_response(length $client_ref->{in}, $command->command_ref) or last;
+            $err || $client_ref->fatal("FAIL succeeded");
+            return $str;
+        } else {
+            return "Inconsistent response '$id'";
+        }
+    }
+    # Go read more bytes
+    $client_ref->{timeout} = timer(
+        $command->{transaction_timeout} //
+            $client_ref->fatal("No transaction_timeout"),
+        sub { $client_ref->_transaction_timed_out });
+    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+    $client_ref->{sent} = 1;
+    $client_ref->{active} = 1;
+    return undef;
+}
+
+sub process_recv_v1 {
+    my (undef, undef, $client_ref) = @_;
+
+    my $command = $client_ref->command_retired;
+    $command->{data} //= "";
+    while (length $client_ref->{in} >= 4) {
+        my ($id, $length) = unpack("a4V", $client_ref->{in});
+        if ($id eq "DATA") {
+            defined $length && length $client_ref->{in} >= 8 + $length || last;
+            substr($client_ref->{in}, 0, 8, "");
+            if ($command->{on_progress}) {
+                eval {
+                    $command->{on_progress}->(
+                        $client_ref->client,
+                        $command, substr($client_ref->{in}, 0, $length, ""));
+                };
+                if ($@) {
+                    my $err = $@;
+                    return \$err;
+                }
+            } else {
+                $command->{data} .= substr($client_ref->{in}, 0, $length, "");
+            }
+        } elsif ($id eq "DONE") {
+            # Should we ignore length instead ? It's supposed to always be 0
+            defined $length && length $client_ref->{in} >= 8 + $length || last;
+            substr($client_ref->{in}, 0, $length+8, "");
+            if ($client_ref->{in} ne "") {
+                my $str = display_string($client_ref->{in});
+                return "Spurious response bytes: $str";
+            }
+            return [$command->{on_progress} ? () : $command->{data}];
+        } elsif ($id eq "FAIL") {
+            my ($err, $str) = $client_ref->check_response(length $client_ref->{in}, $command->command_ref) or last;
+            $err || $client_ref->fatal("FAIL succeeded");
+            return $str;
+        } else {
+            return "Inconsistent response '$id'";
+        }
+    }
+    # Go read more bytes
+    $client_ref->{timeout} = timer(
+        $command->{transaction_timeout} //
+            $client_ref->fatal("No transaction_timeout"),
+        sub { $client_ref->_transaction_timed_out });
+    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+    $client_ref->{sent} = 1;
+    $client_ref->{active} = 1;
+    return undef;
+}
+
+sub process_send_v1 {
+    my ($bytes, undef, $client_ref) = @_;
+    my $id = unpack("a4", $bytes);
+    $id eq "OKAY" || return "Inconsistent response '$id'";
+    return [$client_ref->{nr_bytes}, $client_ref->command_retired->{mtime}];
 }
 
 1;

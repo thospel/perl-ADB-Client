@@ -18,7 +18,8 @@ my $tests;
 BEGIN { $tests = 49 }
 use Test::More tests => $tests;
 
-use TestDrive qw(adb_start adb_server dumper $developer $tests_driver);
+use TestDrive qw($tests_driver $tests_pre
+                 adb_start adb_server dumper $developer);
 
 # We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop $ADB_HOST $ADB_PORT);
@@ -26,15 +27,8 @@ use ADB::Client::Events qw(timer);
 
 SKIP : {
     if ($developer) {
-        my $version = adb_server();
-        if ($version < 41) {
-          SKIP: {
-                diag("ADB server version $version has too many missing features for a developer test. Need at least version 41");
-                skip "ADB server version $version has too many missing features for a developer test. Need at least version 41", $tests-$tests_driver;
-            }
-            exit;
-        }
-        skip "Developer mode doesn't start a fake adb server", 5;
+        my $version = adb_server(41, $tests);
+        skip "Developer mode doesn't start a fake adb server", $tests_pre;
     }
     my $port_10 = adb_start(10);
 
@@ -56,7 +50,7 @@ SKIP: {
 }
 $str = " abc\nd\r\tf zg\x{123}z\0z ";
 eval { $client->connect($str) };
-like($@, qr{^\QArgument cannot be converted to native 8 bit encoding at },
+like($@, qr{^\QArgument cannot be converted to native 8 bit encoding: "host:connect: abc\nd\r\tf zg\x{123}z\0z " at },
      "But by default no utf8");
 
 @result = $client->host_features;

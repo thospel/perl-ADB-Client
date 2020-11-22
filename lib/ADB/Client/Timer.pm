@@ -7,7 +7,7 @@ use Carp;
 
 # In general don't use ADB::Client::Timer (consider it an implementation detail)
 # Do everyything through ADB::Client::Events
-use Exporter::Tidy other => [qw(timers_collect timers_run timer immediate)];
+use Exporter::Tidy other => [qw($now timers_collect timers_run timer immediate)];
 
 use ADB::Client::Utils qw(caller_info info callers clocktime $DEBUG);
 

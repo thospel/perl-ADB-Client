@@ -23,14 +23,7 @@ use TestDrive qw(addr_filter dumper adb_server $developer $tests_driver);
 use ADB::Client qw(mainloop $ADB);
 
 if ($developer) {
-    my $version = adb_server();
-    if ($version < 41) {
-      SKIP: {
-            diag("ADB server version $version does not suppoer acceptfd. Need at least version 41");
-            skip "ADB server version $version does not suppoer acceptfd. Need at least version 41", $tests-$tests_driver;
-        }
-        exit;
-    }
+    my $version = adb_server(41, $tests);
     # Need to set $ADB since we are going to spawn things
     $ADB = $ENV{ADB_CLIENT_TEST_REAL};
 }

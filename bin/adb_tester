@@ -61,6 +61,7 @@ print $OUT "Connected to $host:$port\n";
 my $command_in = "";
 my $command_out = "";
 my $socket_out = "";
+my $sync = 0;
 
 sub unstring {
     my $str = string_from_value(shift);
@@ -94,8 +95,15 @@ sub command_process {
         my $len = length $line;
         die "Line too long" if $len >= 2**16;
         $socket->add_write(\&socket_writer) if $socket_out eq "";
-        $line = sprintf("%04x", $len) . $line;
-        print $OUT "-> adb\n$line\n";
+        if ($sync) {
+            my $cmd = substr($line, 0, 4, "");
+            $line = pack("a*V/a*", $cmd, $line);
+        } else {
+            $sync = 1 if $line =~ /^sync(?::|\z)/;
+            $line = sprintf("%04x", $len) . $line;
+        }
+        my $out = string_from_value($line);
+        print $OUT "-> adb\n$out\n";
         $socket_out .= $line;
     }
 }
@@ -130,6 +138,7 @@ sub socket_reader {
             PeerHost => $host,
             PeerPort => $port) || die "Could not connect to $host:$port: $@";
         $socket->blocking(0);
+        $sync = 0;
         $socket_out = "";
         $socket->add_read(\&socket_reader);
         print $OUT "-> adb: Connect\n";

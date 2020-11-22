@@ -299,9 +299,7 @@ sub reader {
     if ($rc) {
         ::unidle();
         $state->{in} .= $buffer;
-        eval {
-            $state->{on_read}->($state, $rc);
-        };
+        eval { $state->{on_read}->($state, $rc) };
         $state->{on_error}->($state, $@) if $@;
         return $rc;
     }
@@ -472,9 +470,23 @@ All listeners behave like independent ADB servers
 package ADB;
 use Scalar::Util qw(refaddr weaken);
 use Carp;
-
 # use ADB::Client::Utils qw(callers);
-use ADB::Client::Utils qw(display_string info);
+use ADB::Client::Utils qw(display_string info time_to_adb time_from_adb
+                          adb_file_type_from_mode adb_permissions_from_mode);
+
+use constant {
+    # perl stat() fields
+    DEV		=> 0,
+    INO		=> 1,
+    MODE	=> 2,
+    NLINK	=> 3,
+    UID		=> 4,
+    GID		=> 5,
+    SIZE	=> 7,
+    ATIME	=> 8,
+    MTIME	=> 9,
+    CTIME	=> 10,
+};
 
 our @ISA = qw(Accepted);
 
@@ -503,6 +515,7 @@ sub new {
         on_close	=> \&adb_close,
         write_timeout	=> $TIMEOUT,
 
+        sync		=> 0,
         transport	=> 0,
         forward		=> {},
         # Maybe reverse should be on the device ?
@@ -523,6 +536,8 @@ sub adb_close {
     # Carp::cluck("Close");
     info("Close   (%s)", $state->{id}) if $verbose;
     # print STDERR "ADB CLOSE ", callers();
+    # This can get called during _reader which will inspect this after return
+    $state->{on_read} = \&adb_discard;
     delete $state->{listener}{accepted}{$state->{key}};
     delete $state->{listener}{device_events}{$state->{key}};
 }
@@ -557,6 +572,16 @@ sub adb_echo {
     $state->{in} = "";
 }
 
+my %command_sync = (
+    QUIT	=> \&adb_close,
+    STAT	=> \&command_lstat_v1,
+    LST2	=> \&command_lstat_v2,
+    STA2	=> \&command_lstat_v2,
+    LIST	=> \&command_list_v1,
+    RECV	=> \&command_recv_v1,
+    SEND	=> \&command_send_v1,
+);
+
 sub adb_read {
     my ($state, $rc) = @_;
 
@@ -564,21 +589,71 @@ sub adb_read {
     while ($state->{in} ne "") {
         # For convenient debugging with telnet...
         next if $state->{in} =~ s/^[\r\n]+//;
-        length $state->{in} >= 4 || return;
-        my $code = substr($state->{in}, 0, 4);
-        $code =~ /^[0-9a-fA-F]{4}\z/ ||
-            die "Invalid length code: ", display_string($code);
-        my $len = hex $code;
-        length $state->{in} >= 4 + $len || return;
-        my $command = substr($state->{in}, 0, 4 + $len, "");
-        substr($command, 0, 4, "");
-        $state->adb_command($command);
+        if ($state->{sync}) {
+            length $state->{in} >= 8 || return;
+            my $bytes = unpack("V", substr($state->{in}, 4, 4));
+            length $state->{in} >= 8+$bytes || return;
+            my $arguments = substr($state->{in}, 0, 8+$bytes, "");
+            my $command = substr($arguments, 0, 4);
+            substr($arguments, 0, 8, "");
+            if (my $code = $command_sync{$command}) {
+                $code->($state, $arguments, $command);
+            } else {
+                $command = lc unpack("H*", reverse $command);
+                $state->adb_sync_fail("unknown command $command");
+            }
+        } else {
+            length $state->{in} >= 4 || return;
+            my $code = substr($state->{in}, 0, 4);
+            $code =~ /^[0-9a-fA-F]{4}\z/ ||
+                die "Invalid length code: ", display_string($code);
+            my $len = hex $code;
+            length $state->{in} >= 4 + $len || return;
+            my $command = substr($state->{in}, 0, 4 + $len, "");
+            substr($command, 0, 4, "");
+            $state->adb_command($command);
+        }
         if ($state->{on_read} != \&adb_read) {
             if ($state->{in} ne "") {
                 $rc -= $len - length $state->{in};
                 $state->{on_read}->($state, $rc);
             }
             last;
+        }
+    }
+}
+
+sub send_read {
+    my ($state) = @_;
+
+    while (length $state->{in} >= 4) {
+        my ($id, $length) = unpack("a4V", $state->{in});
+        if ($id eq "DATA") {
+            defined $length && length $state->{in} >= 8 + $length || last;
+            substr($state->{in}, 0, 8, "");
+            my $fh = $state->{send_fh};
+            print($fh substr($state->{in}, 0, $length, "")) ||
+                return $state->adb_sync_fail("Could not close '$state->{send_file}': $^E");
+        } elsif ($id eq "DONE") {
+            defined $length || last;
+            substr($state->{in}, 0, 8, "");
+            my $file = delete $state->{send_file};
+            my $path = $state->sync_filecheck($file) // return;
+            close(delete $state->{send_fh}) ||
+                return $state->adb_sync_fail("Could not close '$file': $^E");
+            # Mask because we don't want to leave writable stuff
+            chmod(delete($state->{send_perms}) & 0755 | 0200, $path) ||
+                return $state->adb_sync_fail("Could not chmod '$file': $^E");
+            my $mtime = time_from_adb($length);
+            utime($mtime, $mtime, $path) ||
+                return $state->adb_sync_fail("Could not utime '$file': $^E");
+            $state->output(pack("a4x4", "OKAY"));
+            # Resume normal command processing
+            $state->{on_read} = \&adb_read;
+            last;
+        } else {
+            # I haven't checked what a real device does
+            $state->adb_sync_fail("Invalid chunck type '$id'");
         }
     }
 }
@@ -607,6 +682,12 @@ sub adb_output {
     }
 }
 
+sub adb_sync_fail {
+    my ($state, $err) = @_;
+    $state->output(pack("a*V/a*", "FAIL", $err));
+    $state->adb_close_soon;
+}
+
 sub transport_type_name {
     my ($type, $many) = @_;
 
@@ -629,7 +710,9 @@ my %command_transporter = (
     "reverse:killforward-all"	=> \&command_reverse_kill_all,
     "usb"			=> \&command_usb,
     "tcpip:"			=> \&command_tcpip,
+    "sync"			=> \&command_sync,
 );
+
 my $command_transporter_regex =
     join("|", map(quotemeta($_) . ($_ =~ /:\z/ ? '' :
                                    $_ =~ /:/ ? '\z' :
@@ -670,8 +753,8 @@ sub command_unroot {
     if ($device->root) {
         $state->adb_output(UNCOUNTED, "restarting adbd as non root\n");
         $state->{transport} = 0;
-        # Reconnect will create a new device without root
         $device->reconnect;
+        $device->root(0);
     } else {
         $state->adb_output(UNCOUNTED, "adbd not running as root\n");
     }
@@ -779,6 +862,13 @@ sub command_usb {
     $state->adb_output(UNCOUNTED, "restarting in USB mode\n");
     # Close any old open connection
     $device->listening_adb(0);
+}
+
+sub command_sync {
+    my ($state, $device) = @_;
+
+    $state->{sync} = 1;
+    $state->adb_output(UNCOUNTED, "", 1);
 }
 
 sub adb_command {
@@ -1070,6 +1160,135 @@ sub command_forward {
     }
 }
 
+sub sync_filecheck {
+    my ($state, $file) = @_;
+
+    if ($file !~ m{^/}) {
+        $state->adb_sync_fail("Not absolute");
+        return undef;
+    }
+    if ("$file/" =~ m{/\.\./}) {
+        # Avoid allowing people to explore the real filesystem
+        $state->adb_sync_fail("Going backwards is not supported");
+        return undef;
+    }
+    my $device = $state->{transport} ||
+        die "Assertion: sync command without transport";
+    my $root = $device->{filesystem};
+    if (!$root) {
+        my $serial = $device->serial;
+        $state->adb_sync_fail("Device '$serial' has no filesystem");
+        return undef;
+    }
+    return $root . $file;
+}
+
+# Todo: native to android (linux) mode convertor
+sub stat_massage {
+    my $lstat = shift ne "STA2";
+    my $mode = $_[MODE];
+    if ($lstat && -l _) {
+        $mode &= ~0133;
+    } else {
+        # Drop world read, copy user to group
+        $mode &= ~0074;
+        $mode |= $mode >> 3 & 070;
+    }
+    $_[MODE]  = $mode;
+    $_[UID] = $_[GID] = 0;
+    for my $i (MTIME, CTIME, ATIME) {
+        $_[$i] = time_to_adb($_[$i]);
+    }
+}
+
+sub command_lstat_v1 {
+    my ($state, $file, $command) = @_;
+
+    my $path = $state->sync_filecheck($file) // return;
+    if (my @stat = lstat($path)) {
+        my $mode = $stat[MODE];
+        stat_massage($command, @stat);
+        $state->output(pack("a4V3", $command, @stat[MODE, SIZE, MTIME]));
+    } else {
+        $state->output(pack("a4x12", $command));
+    }
+}
+
+sub command_lstat_v2 {
+    my ($state, $file, $command) = @_;
+
+    my $path = $state->sync_filecheck($file) // return;
+    if (my @stat = $command eq "LST2" ? lstat($path) : stat($path)) {
+        stat_massage($command, @stat);
+        $state->output(pack("a4x4Q<Q<VVVVQ<q<q<q<", $command, @stat[DEV, INO, MODE, NLINK, UID, GID, SIZE, ATIME, MTIME, CTIME]));
+    } else {
+        # Todo: native to android (linux) $! convertor
+        $state->output(pack("a4Vx64", $command, $!+0));
+    }
+}
+
+sub command_list_v1 {
+    my ($state, $file, $command) = @_;
+
+    my $path = $state->sync_filecheck($file) // return;
+    if (opendir(my $dh, $path)) {
+        while (my $f = readdir($dh)) {
+            my @stat = lstat("$path/$f") or next;
+            stat_massage($command, @stat);
+            $state->output(pack("a4V3V/a*", "DENT",
+                                @stat[MODE, SIZE, MTIME],
+                                $f));
+        }
+    }
+    $state->output(pack("a4x16", "DONE"));
+}
+
+sub command_recv_v1 {
+    my ($state, $file) = @_;
+
+    my $path = $state->sync_filecheck($file) // return;
+    if (-d $path) {
+        $state->adb_sync_fail("read failed: Is a directory");
+    } elsif (open(my $fh, "<", $path)) {
+        binmode($fh);
+        local $/ = \2**16;
+        local $_;
+        $state->output(pack("a4V/a*", "DATA", $_)) while <$fh>;
+        $state->output(pack("a4x4", "DONE"));
+    } else {
+        # Todo: native to android (linux) $! message convertor
+        $state->adb_sync_fail("read failed: $!");
+    }
+}
+
+sub command_send_v1 {
+    my ($state, $file) = @_;
+
+    if ($file =~ s/,(\d+)\z//) {
+        my $mode = $1;
+        my $path = $state->sync_filecheck($file) // return;
+        my $type = adb_file_type_from_mode($mode);
+        if ($type eq "REG") {
+            if (open(my $fh, ">", $path)) {
+                # What does android do if you open a symlink ?
+                $state->{send_fh} = $fh;
+                $state->{send_file} = $file;
+                $state->{send_perms} = adb_permissions_from_mode($mode);
+                $state->{on_read} = \&send_read;
+            } else {
+                # I haven't actually checked what a real device does here
+                $state->adb_sync_fail("Write failed: $!");
+            }
+        } else {
+            # I haven't actually checked what a real device does here
+            $state->adb_sync_fail("No support for $type files");
+        }
+    } else {
+        # I haven't actually checked what a real device does here
+        $state->adb_sync_fail("Invalid path '$file'");
+    }
+}
+
 # Non standard adb commands for testing
 sub command_internal {
     my ($state, $command) = @_;
@@ -1110,6 +1329,14 @@ sub command_internal {
     } elsif ($command =~ m{^discard:}) {
         # Fake command: identify running process
         $state->adb_output(UNCOUNTED, "discarded", 1);
+    } elsif ($command =~ m{^filesystem:(.*)}) {
+        my $path = $1;
+        if ($state->{transport}) {
+            $state->{transport}{filesystem} = $path;
+            $state->adb_output(OKAY, "Set filesystem");
+        } else {
+            $state->adb_output(FAIL, "device offline (no transport)");
+        }
     } else {
         $command = display_string($command);
         $state->adb_output(FAIL, "unknown internal command $command");
@@ -1272,6 +1499,7 @@ sub new {
     $device{serial} = $serial;
     $device{transport_id} = $devices->next_id;
     $device{root} = 0;
+    $device{filesystem} = undef;
     weaken($device{devices} = $devices);
 
     ++$nr_devices;
@@ -1329,7 +1557,10 @@ sub reconnect {
     $device->set_offline;
     $device->drop;
 
-    $device = Device->new($device->{devices}, $serial);
+    my $devices = $device->{devices};
+    $devices->{devices}{$serial} = $device;
+    $device->{transport_id} = $devices->next_id;
+
     $device->{state} = "";
     $device->set_offline;
     $device->state($state);

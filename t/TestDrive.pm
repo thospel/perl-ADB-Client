@@ -49,6 +49,7 @@ ADB::Client->add_command(["echo" => "internal:echo:%s", -1,
 ADB::Client->add_command(["discard" => "internal:discard:%s", 9, 0]);
 ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 0]);
 ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, 0]);
+ADB::Client->add_command(["filesystem"  => "internal:filesystem:%s",  -1, EXPECT_EOF]);
 ADB::Client->add_command(["pid" => "internal:pid", -1, EXPECT_EOF]);
 ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { return [ split /\0/, shift]}]);
 
@@ -56,11 +57,11 @@ use Exporter::Tidy
     other =>
     [qw($Bin $tmp_dir $t_dir $base_dir $old_stderr %expect_objects $adb_fake
         $developer $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $UNREACHABLE
-        $tests_driver
+        $tests_driver $tests_pre
         unalarm adb_run adb_server adb_start adb_stop adb_unacceptable
         adb_unreachable adb_unreachable6 adb_closer adb_echo adb_echo6
         adb_version adb_version6 adb_blackhole addr_filter collect_stderr
-        collected_stderr uncollect_stderr dumper)];
+        filesystem collected_stderr uncollect_stderr dumper)];
 
 $SIG{INT} = sub {
     Test::More::diag("Caught signal INT");
@@ -70,6 +71,7 @@ $SIG{INT} = sub {
 
 # How many tests using this module adds
 our $tests_driver = 7;
+our $tests_pre = 5;
 
 $Bin = abs_path($Bin);
 $Bin =~ s{/+\z}{};
@@ -171,6 +173,8 @@ sub adb_run {
 
 # Run the system's adbd server
 sub adb_server {
+    my ($min_version, $tests) = @_;
+
     local $ADB = $ENV{ADB_CLIENT_TEST_REAL};
     open(my $fh, "-|", $ADB, "start-server") || die "Cannot start '$ADB': $^E";
     my $out = do { local $/; <$fh> };
@@ -181,6 +185,14 @@ sub adb_server {
     my $version = ADB::Client->version;
     # Reminder that we run the system adbd
     Test::More::diag("Your ADB server has version $version");
+
+    if ($min_version && $version < $min_version) {
+      SKIP: {
+            Test::More::diag("ADB server version $version has too many missing features for a developer test. Need at least version $min_version");
+            Test::More::skip "ADB server version $version has too many missing features for a developer test. Need at least version $min_version", $tests-$tests_driver;
+        }
+        exit;
+    }
     return $version;
 }
 
@@ -327,6 +339,26 @@ sub addr_filter {
         }
     }
     return UNIVERSAL::isa($addr_info, "HASH") ? $ais->[0] : $ais;
+}
+
+sub filesystem {
+    my ($from, $id) = @_;
+
+    require File::Copy::Recursive;
+
+    $id ||= "android";
+    $tmp_dir ||= tempdir(CLEANUP => 1);
+    my $base = "$tmp_dir/$id";
+    mkdir($base) || croak "Could not mkdir($base): $^E";
+    # Need a symlink target of length 21 to match my real device
+    my $target = "emulatedemulatedemula";
+    mkdir("$base/$target") ||
+        die "Could not mkdir($base/$target): $^E";
+    File::Copy::Recursive::rcopy($from, "$base/$target") ||
+          die "Could not copy $from to $base: $^E";
+    symlink($target, "$base/sdcard") ||
+        die "Could not symlink $base/sdcard to $target: $^E";
+    return $base;
 }
 
 sub dumper {

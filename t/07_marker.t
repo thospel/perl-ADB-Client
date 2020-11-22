@@ -12,7 +12,7 @@ our $VERSION = "1.000";
 use FindBin qw($Bin);
 use lib $Bin;
 use Test::More tests => 22;
-use TestDrive qw(adb_start adb_server $developer);
+use TestDrive qw(adb_start adb_server $developer $tests_pre);
 use Storable qw(dclone);
 
 # We already checked loading in 04_adb_client.t
@@ -26,7 +26,7 @@ my $version = 39;
 SKIP : {
     if ($developer) {
         $version = adb_server();
-        skip "Developer mode doesn't start a fake adb server", 5;
+        skip "Developer mode doesn't start a fake adb server", $tests_pre;
     }
     my $port_10 = adb_start($version);
 

@@ -78,32 +78,42 @@ die "Could not parse your command line. Try $0 -h\n" unless
 $idle_timeout //= $verbose ? 1200 : $IDLE_TIMEOUT;
 
 # Little set of model devices
-my @init_devices = qw(10.253.0.13:5555 52000c4748d6a283);
 my %devices = (
-    "10.253.0.13:5555" => [
-        "device",
-        "product:zerofltexx model:SM_G920F device:zeroflte",
-        [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec zorro)]],
-    "52000c4748d6a283" => [
-        "device",
-        "usb:1-1.2 product:lineage_kminilte model:SM_G800F device:kminiltexx",
-        [qw(shell_v2 cmd stat_v2 wabbits)]],
-    "10.253.0.11:1234" => [
-        "device",
-        "product:lineage_kminilte model:SM_G800F device:kminiltexx",
-        [qw(shell_v2 cmd stat_v2 martians)]],
-    "0715f712da553032" => [
-        "device",
-        "usb:1-1.3 product:zerofltexx model:SM_G920F device:zeroflte",
-    ],
+    "52000c4748d6a283" => {
+        state		=> "device",
+        description	=> "product:lineage_kminilte model:SM_G800F device:kminiltexx",
+        features	=> [qw(shell_v2 cmd stat_v2 wabbits)],
+        ip		=> "10.253.0.11",
+        listening_adb	=> 1234,
+    },
+    "0715f712da553032" => {
+        state		=> "device",
+        description	=> "product:zerofltexx model:SM_G920F device:zeroflte",
+        features	=> [qw(fixed_push_mkdir shell_v2 apex stat_v2 abb fixed_push_symlink_timestamp cmd abb_exec zorro)],
+        ip		=> "10.253.0.13",
+        listening_adb	=> 5555,
+    },
 );
+my %serial_from_ip;
+my $device_listening_adb = {};
+{
+    my $i = "0";
+    for my $serial (sort keys %devices) {
+        $serial_from_ip{$devices{$serial}{ip}} = $serial;
+        $devices{$serial}{serial_usb} = $serial;
+        $devices{$serial}{usb} = "usb:1-1." . ++$i;
+        $device_listening_adb->{$serial} = delete($devices{$serial}{listening_adb}) || 0;
+    }
+}
+my @init_devices = qw(10.253.0.13:5555 52000c4748d6a283);
+
 # my @host_features = qw(shell_v2cmd push_sync stat_v2);
 my @host_features = qw(shell_v2 cmd stat_v2 ls_v2 fixed_push_mkdir apex abb fixed_push_symlink_timestamp abb_exec remount_shell track_app sendrecv_v2 sendrecv_v2_brotli sendrecv_v2_lz4 sendrecv_v2_zstd sendrecv_v2_dry_run_send push_sync);
 my %host_features = map(($_ => 1), @host_features);
 
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
-my $accepted = my $listening = my $nr_devices = 0;
+my $nr_accepted = my $nr_listening = my $nr_devices = 0;
 my ($finish, $idle_timer, %listeners, %specials, @sockets);
 
 our $BLOCK_SIZE = 65536;
@@ -169,7 +179,7 @@ sub add_listener {
         arg		=> $arg,
         $type == LISTENER ? (version => $arg // $ADB_VERSION) : (),
     }, "Listener";
-    ++$listening;
+    ++$nr_listening;
     if ($type == LISTENER) {
         $listeners{$key} = $listener;
         $listener->devices_init;
@@ -271,7 +281,7 @@ sub main {
         my $port = add_listener(CONTROL);
         print("Port: $port\n") || die "print: $^E";
         mainloop();
-        print("Close: $listening $accepted $nr_devices\n") || die "print: $^E";
+        print("Close: $nr_listening $nr_accepted $nr_devices\n") || die "print: $^E";
     }
 }
 
@@ -318,10 +328,10 @@ sub writer {
         if ($state->{out} eq "") {
             $state->{socket}->delete_write();
             $state->{timeout} = undef;
-        }
-        if (my $written = delete $state->{written}) {
-            weaken($state);
-            $written->($state);
+            if (my $written = delete $state->{written}) {
+                weaken($state);
+                $written->($state);
+            }
         }
         return;
     }
@@ -361,7 +371,7 @@ sub DESTROY {
     $state->{socket}->delete_read;
     $state->{timeout} = undef;
 
-    --$accepted;
+    --$nr_accepted;
 }
 
 sub dumper {
@@ -380,7 +390,7 @@ our @ISA = qw(Accepted);
 sub new {
     my ($class, $socket) = @_;
 
-    ++$accepted;
+    ++$nr_accepted;
     return bless {
         key		=> refaddr($socket),
         socket		=> $socket,
@@ -477,7 +487,7 @@ use constant {
 sub new {
     my ($class, $socket, $type, $id) = @_;
 
-    ++$accepted;
+    ++$nr_accepted;
     return bless {
         key		=> refaddr($socket),
         id		=> $id,
@@ -510,9 +520,22 @@ sub adb_error {
 sub adb_close {
     my ($state) = @_;
 
+    # Carp::cluck("Close");
+    info("Close   (%s)", $state->{id}) if $verbose;
     # print STDERR "ADB CLOSE ", callers();
     delete $state->{listener}{accepted}{$state->{key}};
     delete $state->{listener}{device_events}{$state->{key}};
+}
+
+sub adb_close_soon {
+    my ($state) = @_;
+
+    if ($state->{out} eq "") {
+        $state->adb_close;
+    } elsif (!$state->{written}) {
+        $state->{on_read} = \&adb_discard;
+        $state->{written} = \&adb_close;
+    }
 }
 
 sub adb_discard {
@@ -564,6 +587,7 @@ sub adb_output {
     my ($state, $status, $response, $keep_open) = @_;
 
     return if $state->{written};
+
     if (defined $status) {
         if ($status == UNCOUNTED) {
             $state->output("OKAY" . $response);
@@ -572,9 +596,9 @@ sub adb_output {
                 ($status ? "OKAY" : "FAIL"),
                 sprintf("%04X", length $response),
                 $response);
-            $state->{written} = \&adb_close;
+            # $state->{written} = \&adb_close;
         }
-        $state->{written} = $keep_open && $status != FAIL ? undef : \&adb_close;
+        $state->adb_close_soon if !$keep_open || $status == FAIL;
     } else {
         # Close after OKAY send (used by host:kill)
         $state->output("OKAY");
@@ -603,6 +627,8 @@ my %command_transporter = (
     "reverse:list-forward"	=> \&command_reverse_list,
     "reverse:killforward:"	=> \&command_reverse_kill,
     "reverse:killforward-all"	=> \&command_reverse_kill_all,
+    "usb"			=> \&command_usb,
+    "tcpip:"			=> \&command_tcpip,
 );
 my $command_transporter_regex =
     join("|", map(quotemeta($_) . ($_ =~ /:\z/ ? '' :
@@ -739,6 +765,22 @@ sub command_reverse_kill_all {
     $state->adb_output(UNCOUNTED, "OKAY");
 }
 
+sub command_tcpip {
+    my ($state, $device, $port) = @_;
+
+    $state->adb_output(UNCOUNTED, "restarting in TCP mode port: $port\n");
+    # Close any old open connection
+    $device->listening_adb($port);
+}
+
+sub command_usb {
+    my ($state, $device) = @_;
+
+    $state->adb_output(UNCOUNTED, "restarting in USB mode\n");
+    # Close any old open connection
+    $device->listening_adb(0);
+}
+
 sub adb_command {
     my ($state, $command) = @_;
     info("Command (%s) <\t'%s'", $state->{id}, $command) if $verbose;
@@ -816,12 +858,15 @@ sub command_host {
         # device it is added in state "offline".
         # I didn't bother to implement an example of that.
         if ($listener->{devices}->get($serial)) {
-            $state->adb_output(FAIL, "already connected to $serial");
-        } elsif ($listener->device_add($serial)) {
+            # Notice this is NOT a FAIL
+            $state->adb_output(OKAY, "already connected to $serial");
+        } elsif ($listener->device_add($serial, 1)) {
             $state->adb_output(OKAY, "connected to $serial");
         } else {
             # Several kinds of other connect and resolution errors are possible
-            $state->adb_output(FAIL, "failed to connect to '$serial': Connection refused");
+            # Notice this is NOT a FAIL
+            $state->adb_output(
+                OKAY,"failed to connect to '$serial': Connection refused");
         }
     } elsif ($command =~ m{^disconnect:((.*?)(?::(\d+))?)\z}as) {
         my $name = $1;
@@ -844,7 +889,7 @@ sub command_host {
         #$listener->{devices}->dumper;
         my @devices = $listener->{devices}->transport($type, $id, $serial, $state->{transport});
         if (@devices == 1) {
-            if ($devices[0]->offline) {
+            if ($devices[0]->is_offline) {
                 my $offline = $devices[0]->state;
                 $state->adb_output(FAIL, "device $offline");
             } else {
@@ -902,7 +947,7 @@ sub command_host {
         }
         if (@devices == 1) {
             if ($mode eq "disconnect") {
-                if (!$devices[0]->usb || $devices[0]->offline) {
+                if (!$devices[0]->usb || $devices[0]->is_offline) {
                     $state->adb_output(UNCOUNTED, "");
                     return;
                 }
@@ -911,7 +956,7 @@ sub command_host {
                     $serial = $devices[0]->serial;
                     $type = "serial";
                 }
-            } elsif ($devices[0]->online) {
+            } elsif ($devices[0]->is_online) {
                 $state->adb_output(UNCOUNTED, "");
                 return;
             }
@@ -942,7 +987,7 @@ sub command_host {
         $serial = $3 // $serial;
         my @devices = $listener->{devices}->transport($type, $id, $serial);
         if (@devices == 1) {
-            if (!$devices[0]->offline) {
+            if (!$devices[0]->is_offline) {
                 # Pass through to device. Leave connection open
                 $state->{transport} = $devices[0];
                 $state->adb_output(UNCOUNTED, $tport ? $state->{transport}->packed_id : "", 1);
@@ -1044,12 +1089,11 @@ sub command_internal {
         my $serial = $1;
         if ($listener->{devices}->get($serial)) {
             $state->adb_output(FAIL, "Already have device $serial");
-        } elsif (!$devices{$serial}) {
-            $state->adb_output(FAIL, "Unknown device $serial");
-        } else {
-            $listener->device_add($serial);
+        } elsif ($listener->device_add($serial, 1)) {
             # Send result
             $state->adb_output(OKAY, "Added '$serial'", 1);
+        } else {
+            $state->adb_output(FAIL, "Unknown device $serial");
         }
     } elsif (($serial) = $command =~ m{^device_drop:(.*)\z}s) {
         # Fake command: Drop device
@@ -1121,6 +1165,7 @@ sub waiter {
 
 package Listener;
 use Scalar::Util qw(weaken);
+use Storable qw(dclone);
 
 sub DESTROY {
     # print STDERR "DESTROY(@_)\n";
@@ -1132,7 +1177,7 @@ sub DESTROY {
         $listener->{type} == ::UNREACHABLE ||
         $listener->{socket}->delete_read;
 
-    --$listening;
+    --$nr_listening;
 }
 
 sub next_id {
@@ -1142,9 +1187,10 @@ sub next_id {
 }
 
 sub device_add {
-    my ($listener, $serial) = @_;
+    my ($listener, $serial, $may_fail) = @_;
 
-    my $device = $listener->{devices}->add($serial) || return undef;
+    my $device = Device->new($listener->{devices}, $serial, $may_fail) ||
+        return undef;
     $device->{state} = "";
     $device->set_offline;
     $device->set_online;
@@ -1170,10 +1216,11 @@ sub devices_init {
         transport_ids	=> 0,
         devices		=> {},
         listener	=> $listener,
+        listening_adb	=> dclone($device_listening_adb),
     }, "Devices";
     weaken($devices->{listener});
     for my $serial (@init_devices) {
-        $devices->add($serial);
+        Device->new($devices, $serial);
     }
     $listener->{devices} = $devices;
 }
@@ -1197,20 +1244,38 @@ use Carp;
 use Scalar::Util qw(weaken);
 
 sub new {
-    my ($class, $devices, $serial, $state, $description, $features) = @_;
+    my ($class, $devices, $serial, $may_fail) = @_;
+
+    die "Duplicate device $serial" if $devices->{devices}{$serial};
+
+    my %device;
+    if (my ($ip, $port) = $serial =~ /^(.*):(\d+)$/a) {
+        my $serial_usb = $serial_from_ip{$ip};
+        if (!$serial_usb) {
+            return undef if $may_fail;
+            die "Unknown device ip '$ip'";
+        }
+        if ($devices->{listening_adb}{$serial_usb} != $port) {
+            return undef if $may_fail;
+            die "Device $serial_usb is not listening for adb on $serial";
+        }
+        %device = %{$devices{$serial_usb} ||
+                        die "Assertion: Unknown serial $serial_usb"};
+    } else {
+        if (!$devices{$serial}) {
+            return undef if $may_fail;
+            die "Unknown device serial '$serial'";
+        }
+        %device = %{$devices{$serial}};
+        $device{description} = "$device{usb} $device{description}";
+    }
+    $device{serial} = $serial;
+    $device{transport_id} = $devices->next_id;
+    $device{root} = 0;
+    weaken($device{devices} = $devices);
 
     ++$nr_devices;
-    my $device = bless {
-        devices		=> $devices,
-        serial		=> $serial,
-        transport_id	=> $devices->next_id,
-        state		=> $state,
-        description	=> $description,
-        features	=> $features,
-        root		=> 0,
-    }, $class;
-    weaken($device->{devices});
-    return $device;
+    return $devices->{devices}{$serial} = bless \%device, $class;
 }
 
 sub transport_id {
@@ -1225,6 +1290,10 @@ sub packed_id {
 
 sub serial {
     return shift->{serial};
+}
+
+sub serial_usb {
+    return shift->{serial_usb};
 }
 
 sub state {
@@ -1260,8 +1329,7 @@ sub reconnect {
     $device->set_offline;
     $device->drop;
 
-    $device = $device->{devices}->add($serial) ||
-        croak "Cannot reconnect '$serial'";
+    $device = Device->new($device->{devices}, $serial);
     $device->{state} = "";
     $device->set_offline;
     $device->state($state);
@@ -1277,11 +1345,11 @@ sub root {
 
 # Notice that offline and online are not opposites.
 # There also might be a "no device" state (I've never seen it though)
-sub offline {
+sub is_offline {
     return shift->{state} eq "offline";
 }
 
-sub online {
+sub is_online {
     return shift->{state} eq "device";
 }
 
@@ -1331,6 +1399,12 @@ sub usb {
     return $device->{description} =~ m{(?:^| )(usb:\S+)} ? $1 : undef;
 }
 
+sub listening_adb {
+    my ($device, $port) = @_;
+
+    return $device->{devices}->listening_adb($device->serial_usb, $port);
+}
+
 sub DESTROY {
     --$nr_devices;
 }
@@ -1338,16 +1412,6 @@ sub DESTROY {
 package Devices;
 use Carp;
 # use ADB::Client::Utils qw(info);
-
-sub add {
-    my ($devices, $serial) = @_;
-
-    die "Duplicate device $serial" if $devices->{devices}{$serial};
-    my $device = Device->new($devices, $serial,
-                             @{$devices{$serial} || return undef});
-    $devices->{devices}{$serial} = $device;
-    return $device;
-}
 
 sub drop {
     my ($devices, $device) = @_;
@@ -1367,7 +1431,10 @@ sub drop {
 
     # Close all acepted connections that use this device as transport
     for my $state (values %{$listener->{accepted}}) {
-        $state->adb_close if $state->{transport} == $device;
+        if ($state->{transport} == $device) {
+            # print STDERR "Closing $state->{id} because transport $device->{serial} was lost\n";
+            $state->adb_close_soon;
+        }
     }
 }
 
@@ -1397,10 +1464,6 @@ sub all {
     return @{$devices->{devices}}{sort keys %{$devices->{devices}}};
 }
 
-sub all_online {
-    return grep $_->online => shift->all;
-}
-
 sub get {
     my ($devices, $serial) = @_;
 
@@ -1424,6 +1487,32 @@ sub transport {
     } else {
         die "Invlid transort type '$type'";
     }
+}
+
+sub listening_adb {
+    my ($devices, $serial_usb, $port_new) = @_;
+
+    $devices{$serial_usb} || die "Unknown device '$serial_usb'";
+    my $ip = $devices{$serial_usb}{ip};
+    my $port_old = $devices->{listening_adb}{$serial_usb} //
+        die "Unknown device '$serial_usb'";
+    my $net = "$ip:$port_old";
+    if (defined $port_new && $port_new != $port_old) {
+        $devices->{listening_adb}{$serial_usb} = $port_new;
+
+        # offline device connected to old port
+        my $device = $devices->get($net);
+        $device->set_offline if $device;
+
+        # online device connected to new port
+        $device = $devices->get("$ip:$port_new");
+        $device->set_online if $device;
+
+        # Reconnect the USB devce
+        $device = $devices->get($serial_usb);
+        $device->reconnect if $device;
+    }
+    return $net;
 }
 
 sub dumper {

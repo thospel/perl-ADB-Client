@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "034";
-$release_time = 1606000450;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "035";
+$release_time = 1606053901;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -101,7 +101,7 @@ $release_time = 1606000450;	## no critic (UselessNoCritic MagicNumbers)
   't/10_forwards.t' => {
     '1.000' => '1.000'
   },
-  't/11_connect.t' => {
+  't/11__connect.t' => {
     '1.000' => '1.000'
   },
   't/12_spawn.t' => {

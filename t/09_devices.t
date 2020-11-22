@@ -371,6 +371,9 @@ for my $command (@serial_commands) {
 
 # Reduce to one devices
 $client->device_drop("10.253.0.13:5555");
+#eval { $client->version };
+#like($@, qr{^ab},
+#     "We lost the connection because we had 10.253.0.13:5555 as transport");
 
 is($client->wait_device, "", "We have a device");
 

@@ -140,6 +140,7 @@ sub loop_levels {
 }
 
 sub mainloop {
+    local $@;
     $EVENT_INITER->() if $EVENT_INITER;
     my $level = push(@unlooping, undef)-1;
     eval {

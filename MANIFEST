@@ -28,7 +28,7 @@ t/07_marker.t
 t/08_commands.t
 t/09_devices.t
 t/10_forwards.t
-t/11_connect.t
+t/11__connect.t
 t/12_spawn.t
 t/13_spawn_socket.t
 t/20_ipv6.t

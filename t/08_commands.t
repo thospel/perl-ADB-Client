@@ -15,13 +15,14 @@ use FindBin qw($Bin);
 use lib $Bin;
 
 my $tests;
-BEGIN { $tests = 38 }
+BEGIN { $tests = 49 }
 use Test::More tests => $tests;
 
 use TestDrive qw(adb_start adb_server dumper $developer $tests_driver);
 
 # We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop $ADB_HOST $ADB_PORT);
+use ADB::Client::Events qw(timer);
 
 SKIP : {
     if ($developer) {
@@ -107,6 +108,7 @@ if ($developer) {
         $client->wait_id($transport_id, "disconnect");
         $client->wait_usb("device");
     }
+    eval { $client->disconnect("10.253.0.11:8732") };
 }
 is($client->transport_usb, "", "Connect to usb device");
 is($client->remount, qq(Not running as root. Try "adb root" first.\n),
@@ -171,3 +173,52 @@ if ($developer) {
 }
 $client->wait_id($transport_id, "disconnect");
 $client->wait_usb("device");
+
+my $msg = eval { $client->connect("10.253.0.11:8732") };
+like($@, qr{^\Qfailed to connect to '10.253.0.11:8732': },
+     "Cannot connect to random port");
+# Make sure the device indeed *IS* disconnected (in case the above failed)
+eval { $client->disconnect("10.253.0.11:8732") };
+
+$transport_id = $client->tport_usb;
+is($client->tcpip(8732), "restarting in TCP mode port: 8732\n",
+   "Start a net server on a random port");
+$client->wait_id($transport_id, "disconnect");
+$client->wait_usb("device");
+is($client->connect("10.253.0.11:8732"), "connected to 10.253.0.11:8732",
+   "Now we can connect ($@)");
+is($client->disconnect("10.253.0.11:8732"), "disconnected 10.253.0.11:8732",
+   "Disconnect again");
+eval { $client->connect("10.253.0.11:5555") };
+like($@, qr{^\Qfailed to connect to '10.253.0.11:5555': },
+     "Cannot connect to 5555");
+
+$transport_id = $client->tport_usb;
+is($client->usb, "restarting in USB mode\n", "Stop net server");
+$client->wait_id($transport_id, "disconnect");
+$client->wait_usb("device");
+
+eval { $client->connect("10.253.0.11:8732") };
+like($@, $developer ?
+     qr{^\Qfailed to connect to '10.253.0.11:8732': \E|^\Qfailed to connect to 10.253.0.11:8732} :
+     qr{^\Qfailed to connect to '10.253.0.11:8732': },
+     "Cannot connect to random port anymore");
+eval { $client->connect("10.253.0.11:5555") };
+like($@, qr{^\Qfailed to connect to '10.253.0.11:5555': },
+     "Cannot connect to 5555");
+
+$transport_id = $client->tport_usb;
+$msg = $client->tcpip(5555);
+if ($developer) {
+    like($msg, qr{^restarting in TCP mode port: 5555\n\z|^\z},
+         "Start a net server on 5555");
+} else {
+    is($msg, "restarting in TCP mode port: 5555\n", "Start a net server on 5555");
+}
+
+$client->wait_id($transport_id, "disconnect");
+$client->wait_usb("device");
+is($client->connect("10.253.0.11:5555"), "connected to 10.253.0.11:5555",
+   "Now we can connect ($@)");
+is($client->disconnect("10.253.0.11:5555"), "disconnected 10.253.0.11:5555",
+   "And disconnect 5555");

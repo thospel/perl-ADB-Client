@@ -95,7 +95,7 @@ our @BUILTINS = (
     [remount		=> "remount:", INFINITY, TRANSPORT|EXPECT_EOF],
     [root		=> "root:", INFINITY, TRANSPORT|EXPECT_EOF],
     [unroot		=> "unroot:", INFINITY, TRANSPORT|EXPECT_EOF],
-    [connect		=> "host:connect:%s", -1, EXPECT_EOF],
+    [connect		=> "host:connect:%s", -1, EXPECT_EOF, \&process_connect],
     [disconnect		=> "host:disconnect:%s", -1, EXPECT_EOF],
     # all the wait-for-device variants strictly have a SERIAL version
     # But only host-serial:<serial>:wait-for-<transport> does anything special
@@ -111,8 +111,8 @@ our @BUILTINS = (
     # [reconnect	=> "host:reconnect", 0, SERIAL|EXPECT_EOF],
     # [reconnect_device	=> "reconnect", 0, TRANSPORT|EXPECT_EOF],
     # [reconnect_offline	=> "host:reconnect-offline", 0, EXPECT_EOF],
-    # [usb		=> "usb:", 0, TRANSPORT|EXPECT_EOF],
-    # [tcpip		=> "tcpip:%s", 0, TRANSPORT|EXPECT_EOF],
+    [usb		=> "usb:", INFINITY, TRANSPORT|EXPECT_EOF],
+    [tcpip		=> "tcpip:%d", INFINITY, TRANSPORT|EXPECT_EOF],
     # [jdwp		=> "jdwp", 0, TRANSPORT|EXPECT_EOF],
     [forward_list	=> "host:list-forward", -1, EXPECT_EOF,
      \&process_forward_list],
@@ -1563,6 +1563,12 @@ sub process_devices {
     }
     # return [\%devices, \@devices, shift, @tracker];
     return [\%devices, @tracker];
+}
+
+sub process_connect {
+    my ($msg) = @_;
+
+    return $msg =~ /^connected to/i ? [$msg] : $msg;
 }
 
 sub process_tport {

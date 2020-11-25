@@ -9,12 +9,6 @@ our @CARP_NOT = qw(ADB::Client::Ref);
 
 use ADB::Client::Utils qw(display_string info $DEBUG $QUIET);
 
-use Exporter::Tidy
-    other	=>[
-        qw(SPECIAL COMMAND_NAME COMMAND NR_BYTES FLAGS PROCESS CODE
-           PHASE1 PHASE2 SYNC PACKED_OUT SEND ROOT
-           EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT UTF8_IN UTF8_OUT)];
-
 use constant {
     # Index in @COMMANDS element
     COMMAND_NAME	=> 0,
@@ -28,53 +22,73 @@ use constant {
     # It's up to the SPECIAL commands to give meaning to elements after this
     CODE	=> 2,
 
-    # FLAGS values:
-    # After OKAY we still expect the connection to be closed
-    EXPECT_EOF	=> 1,
-    # After the expected number of bytes more bytes may follow even though we
-    # didn't send a new command.
-    # Should never appear in combination with EXPECT_EOF
-    MAYBE_MORE	=> 2,
-    # FAIL may or may not close the connection
-    # Currently not relevant since we always close the connection ourselves
-    # when we see a FAIL
-    # Mainly describes host:transport which may close the connection or not
-    # depending on the adb version
-    MAYBE_EOF	=> 4,
-    # This command needs an active transport
-    TRANSPORT	=> 8,
-    # Commands like host:features need a transport. But one doesn't need to be
-    # active, it will do an implicit host:transport-any first if no transport
-    # is active. You can change the implicit transport by using variations like:
-    #    host-usb:features
-    #    host-local:features
-    #    host-serial:<serial>:features
-    # Many (all ?) host command like host:version also accept these alternate
-    # syntaxes, but typically we don't set the SERIAL flag for them since they
-    # ignore the transport given.
-    SERIAL	=> 16,
-    # Convert from UTF-8 after we recieve data from the ADB server
-    UTF8_IN	=> 32,
-    # Convert to UTF-8 before we send arguments to the ADB server
-    UTF8_OUT	=> 64,
-    # Don't set this. It's for internal use
-    PHASE1	=> 128,
-    # First we expect an OKAY and only then do the "normal" processing
-    # The stuff after the first OKAY is allowed to arrive immediately
-    PHASE2	=> 256,
-    # This command needs an active sync
-    SYNC	=> 512,
-    # This sends packed
-    PACKED_OUT	=> 1024,
-    # Special handling for send_v1
-    SEND	=> 2048,
-    # Needs ROOT (should only appear with TRANSPORT (or SYNC))
-    ROOT	=> 4096,
-
     EMPTY_ARGUMENTS	=> [],
 
     SPECIAL	=> "",
 };
+
+my @FLAGS;
+BEGIN {
+    # Do the the constants for FLAGS automatically
+    # (So I don't have to keep the list of powers of 2 consistent by hand)
+    @FLAGS = (
+        # FLAGS values:
+        # After OKAY we still expect the connection to be closed
+        "EXPECT_EOF",
+        # After the expected number of bytes more bytes may follow even though we
+        # didn't send a new command.
+        # Should never appear in combination with EXPECT_EOF
+        "MAYBE_MORE",
+        # FAIL may or may not close the connection
+        # Currently not relevant since we always close the connection ourselves
+        # when we see a FAIL
+        # Mainly describes host:transport which may close the connection or not
+        # depending on the adb version
+        "MAYBE_EOF",
+        # This command needs an active transport
+        "TRANSPORT",
+        # Commands like host:features need a transport. But one doesn't need to be
+        # active, it will do an implicit host:transport-any first if no transport
+        # is active. You can change the implicit transport by using variations like:
+        #    host-usb:features
+        #    host-local:features
+        #    host-serial:<serial>:features
+        # Many (all ?) host command like host:version also accept these alternate
+        # syntaxes, but typically we don't set the SERIAL flag for them since they
+        # ignore the transport given.
+        "SERIAL",
+        # Convert from UTF-8 after we recieve data from the ADB server
+        "UTF8_IN",
+        # Convert to UTF-8 before we send arguments to the ADB server
+        "UTF8_OUT",
+        # Don't set this. It's for internal use
+        "PHASE1",
+        # First we expect an OKAY and only then do the "normal" processing
+        # The stuff after the first OKAY is allowed to arrive immediately
+        "PHASE2",
+        # This command needs an active sync
+        # The combination of SYNC and MAYBE_MORE implies an on_progress callback
+        "SYNC",
+        # This sends packed
+        "PACKED_OUT",
+        # Special handling for send
+        "SEND",
+        # Special handling for recv
+        "RECV",
+        # Needs ROOT (should only appear with TRANSPORT (or SYNC))
+        "ROOT",
+    );
+    my $code = "use constant {\n";
+    for my $i (0..$#FLAGS) {
+        $code .= sprintf("    %s => %d,\n", $FLAGS[$i], 2**$i);
+    }
+    $code .= "};\n1";
+    eval $code || die $@;
+}
+use Exporter::Tidy
+    other	=> [
+        qw(SPECIAL COMMAND_NAME COMMAND NR_BYTES FLAGS PROCESS CODE)],
+    flags	=> \@FLAGS;
 
 my $objects = 0;
 

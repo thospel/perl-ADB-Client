@@ -24,10 +24,8 @@ use ADB::Client::Utils
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
               SO_ERROR TCP_NODELAY);
-use ADB::Client::Command qw(PHASE1 PHASE2 SYNC PACKED_OUT NR_BYTES UTF8_IN
-                            UTF8_OUT SEND ROOT
-                            SPECIAL COMMAND_NAME COMMAND FLAGS PROCESS CODE
-                            EXPECT_EOF MAYBE_EOF MAYBE_MORE SERIAL TRANSPORT);
+use ADB::Client::Command qw
+    (:flags NR_BYTES SPECIAL COMMAND_NAME COMMAND FLAGS PROCESS CODE);
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
@@ -161,10 +159,10 @@ our @BUILTINS = (
     [send_v1		=> "SEND", 8, SYNC|UTF8_OUT|SEND, \&process_send_v1],
     # Unimplemented, I have no device supporting send_v2
     # [send_v2		=> "SND2", 0, SYNC|UTF8_OUT|SEND],
-    [recv_v1		=> "RECV", 0, SYNC|UTF8_OUT|MAYBE_MORE,
+    [recv_v1		=> "RECV", 0, SYNC|UTF8_OUT|MAYBE_MORE|RECV,
      \&process_recv_v1],
     # Unimplemented, I have no device supporting recv_v2
-    # [recv_v2		=> "RCV2", 0, SYNC|UTF8_OUT|MAYBE_MORE],
+    # [recv_v2		=> "RCV2", 0, SYNC|UTF8_OUT|MAYBE_MORE|RECV],
     [quit		=> "QUIT", 0, SYNC|EXPECT_EOF],
 );
 
@@ -1658,7 +1656,9 @@ sub check_response {
             return SUCCEEDED, substr($client_ref->{in}, 0, $command_ref->[NR_BYTES], "");
         }
         if ($len_added == 0) {
-            # Special case for QUIT
+            # We don't have enough bytes but since we are at EOF we will
+            # never get any more
+            # Special case for QUIT which doesn't expect an answer, just close
             return SUCCEEDED, "" if
                 ($command_ref->[FLAGS] & EXPECT_EOF) &&
                 $command_ref->[NR_BYTES] == 0;

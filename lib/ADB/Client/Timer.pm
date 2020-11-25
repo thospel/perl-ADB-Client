@@ -5,6 +5,8 @@ use warnings;
 use Scalar::Util qw(weaken refaddr);
 use Carp;
 
+our @CARP_NOT = qw(ADB::Client::Events);
+
 # In general don't use ADB::Client::Timer (consider it an implementation detail)
 # Do everyything through ADB::Client::Events
 use Exporter::Tidy other => [qw($now timers_collect timers_run timer immediate)];

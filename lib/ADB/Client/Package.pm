@@ -8,8 +8,8 @@ use strict;
 use warnings;
 use vars qw($VERSION $SUB_VERSION $release_time %history);
 $VERSION = "1.000";
-$SUB_VERSION = "038";
-$release_time = 1606328494;	## no critic (UselessNoCritic MagicNumbers)
+$SUB_VERSION = "039";
+$release_time = 1606492715;	## no critic (UselessNoCritic MagicNumbers)
 %history = (
   'Changes' => {
     '1.000' => '1.000'
@@ -135,6 +135,9 @@ $release_time = 1606328494;	## no critic (UselessNoCritic MagicNumbers)
     '1.000' => '1.000'
   },
   't/TestDrive.pm' => {
+    '1.000' => '1.000'
+  },
+  't/adb_fake_cover' => {
     '1.000' => '1.000'
   },
   't/sdcard/adb_client_test/dir/bar' => {

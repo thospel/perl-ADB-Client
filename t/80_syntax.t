@@ -15,7 +15,7 @@ use TestDrive qw(collect_stderr collected_stderr uncollect_stderr);
 
 sub check {
     collect_stderr();
-    my $rc = system($^X, "-c", @_);
+    my $rc = system($^X, "-c", @_, "--blib");
     uncollect_stderr();
     my $errors = collected_stderr();
     $errors =~ s/.* syntax OK\n//;

@@ -52,8 +52,7 @@ use constant {
     UNACCEPTABLE=> 2,	# Doesnt' even accept connections (OS will accept)
     UNREACHABLE	=> 3,	# Occupies a port but refuses connection (no listen)
     BLACKHOLE	=> 4,	# Eats everything on the accepted connection. Can talk
-    CLOSER	=> 5,	# Closes the connection as soon as n bytes are sent
-    ECHO	=> 6,	# Echoes whatever you type
+    ECHO	=> 5,	# Echoes whatever you type
 
     NULL	=> "/dev/null",
 };
@@ -114,7 +113,7 @@ my %host_features = map(($_ => 1), @host_features);
 # Make sure we will quit by ourselves after inactivity so testing won't get
 # stuck in case of errors in adb_fake
 my $nr_accepted = my $nr_listening = my $nr_devices = 0;
-my ($finish, $idle_timer, %listeners, %specials, @sockets);
+my ($finish, $idle_timer, $alarm_timer, %listeners, %specials, @sockets);
 
 our $BLOCK_SIZE = 65536;
 # Default ADB version for plain adb_fake
@@ -141,10 +140,12 @@ sub acceptable {
     $listener->{accepted}{$state->{key}} = $state;
     weaken(my $s = $state);
     $socket->add_read(sub { $s->reader });
-    $state->output($listener->{arg}) if
-        $listener->{type} == BLACKHOLE && $listener->{arg} ne "";
+    if ($listener->{type} == BLACKHOLE) {
+        $state->output($listener->{arg}{hello}) if $listener->{arg}{hello} ne "";
+        $state->{bytes_left} = $listener->{arg}{n};
+        $state->adb_close_soon if $state->{bytes_left} <= 0;
+    }
     $state->output("adb_fake $VERSION\n") if $listener->{type} == CONTROL;
-    $state->adb_close if $listener->{type} == CLOSER && $listener->{arg} <= 0;
 }
 
 sub add_listener {
@@ -197,6 +198,7 @@ sub finish {
     info("finish") if $verbose;
     $finish = 1;
     $idle_timer = undef;
+    $alarm_timer = undef;
     %specials = ();
     %listeners = ();
 }
@@ -206,8 +208,17 @@ sub timed_out {
     finish();
 }
 
+# Push the idle timeout forward
 sub unidle {
     $idle_timer = timer($idle_timeout, \&timed_out);
+}
+
+# Push the alarm forward
+sub unalarm {
+    $alarm_timer = timer($idle_timeout, \&unalarm);
+    # This alarm should never trigger.
+    # But it's our last resort in case the event system gets stuck
+    alarm $idle_timeout + 3;
 }
 
 sub dumper {
@@ -291,6 +302,10 @@ use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
 
 use ADB::Client::Utils qw(info string_from_value);
 use ADB::Client::Events qw(timer);
+
+sub listener {
+    return shift->{listener};
+}
 
 sub reader {
     my ($state) = @_;
@@ -382,6 +397,7 @@ sub dumper {
 
 package Control;
 use Scalar::Util qw(refaddr);
+use ADB::Client::Utils qw(INFINITY);
 
 our @ISA = qw(Accepted);
 
@@ -421,12 +437,12 @@ sub control_read {
             $port = ::add_listener(::UNREACHABLE);
         } elsif ($command eq "unreachable6") {
             $port = ::add_listener(::UNREACHABLE, undef, "::1");
-        } elsif ($command =~ m{^blackhole(?:\s(.*))?\z}) {
-            my $arg = $1 // "";
-            $arg =~ s/\\n/\n/g;
-            $port = ::add_listener(::BLACKHOLE, $arg);
-        } elsif ($command =~ m{closer(?:\s+(\d+))?\z}) {
-            $port = ::add_listener(::CLOSER, $1 // 0);
+        } elsif ($command =~ m{^blackhole(?:\s+([-?[0-9]+))?(?:\s(.*))?\z}) {
+            my $n = $1 // -1;
+            my $hello = $2 // "";
+            $hello =~ s/\\n/\n/g;
+            $n = INFINITY if $n < 0;
+            $port = ::add_listener(::BLACKHOLE, { n => $n, hello => $hello});
         } elsif ($command eq "echo") {
             $port = ::add_listener(::ECHO);
         } elsif ($command eq "echo6") {
@@ -438,16 +454,20 @@ sub control_read {
             ::finish();
             return;
         } elsif ($command eq "help") {
-            $state->output("Valid commands (case insensitive):
+            $state->output('Valid commands (case insensitive):
 Listener  [version]	Start a listener on 127.0.0.1
 Listener6 [version]	Start a listener on ::1
 Listener0 [version]	Start a listener on ::
-Unacceptable		Start a listening port on 127.0.0.1 without accept handler
+Unacceptable		Start a listening port on 127.0.0.1 without accept
+                        handler. Up to a point OS will accept for you though
 Unacceptable6		Start a listening port on ::1 without accept handler
 Unreachable		Start a non-listening port on 127.0.0.1
 Unreachable6		Start a non-listening port on ::1
-BlackHole [greeting]	Start a listener on 127.0.0.1 that only reads
-Closer [n]		Start a listener on 127.0.0.1 that closes after reading n bytes
+BlackHole [n] [hello]	Start a listener on 127.0.0.1 that sends "hello"
+                        (defaults to nothing), reads n bytes (defaults to -1)
+                        and then closes the connection. Negative n means keep
+                        reading forever (untill the peer closes). "n" is
+                        mandatory if "hello" looks like a number
 Echo			Start a listener on 127.0.0.1 that echoes everything
 Echo6			Start a listener on ::1 that echoes everything
 Quit			Exit the program (not just the control connection)
@@ -455,7 +475,7 @@ Help			Show this help
 Dump			Dump the current state
 
 All listeners behave like independent ADB servers
-");
+');
             return;
         } elsif ($command eq "") {
             return;
@@ -468,12 +488,12 @@ All listeners behave like independent ADB servers
 }
 
 package ADB;
-use Fcntl qw(O_WRONLY O_CREAT O_TRUNC);
+use Errno qw(ENOENT);
 use Scalar::Util qw(refaddr weaken);
 use Carp;
 # use ADB::Client::Utils qw(callers);
 use ADB::Client::Utils qw(%adb_mode_from_file_type
-                          errno_adb_from_native
+                          errno_adb_from_native string_from_value
                           display_string info time_to_adb time_from_adb
                           adb_file_type_from_mode adb_permissions_from_mode);
 
@@ -502,6 +522,7 @@ use constant {
 sub new {
     my ($class, $socket, $type, $id) = @_;
 
+    info("Accept  (%s)", $id) if $verbose;
     ++$nr_accepted;
     return bless {
         key		=> refaddr($socket),
@@ -511,9 +532,9 @@ sub new {
         out 		=> "",
         on_read		=>
         $type == ::LISTENER	? \&adb_read :
-        $type == ::CLOSER	? \&adb_closer :
+        $type == ::BLACKHOLE	? \&adb_closer :
         $type == ::ECHO		? \&adb_echo :
-        \&adb_discard,
+        die("Unhandled type $type"),
         on_error	=> \&adb_error,
         on_close	=> \&adb_close,
         write_timeout	=> $TIMEOUT,
@@ -565,13 +586,26 @@ sub adb_discard {
 sub adb_closer {
     my ($state, $rc) = @_;
 
-    $state->adb_close if length($state->{in}) >= $state->{listener}{arg};
+    info("Discard (%s) > \t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
+
+    $state->{bytes_left} -= $rc;
+    $state->adb_close_soon if $state->{bytes_left} <= 0;
+    $state->{in} = "";
 }
 
 sub adb_echo {
     my ($state, $rc) = @_;
 
+    info("Echo    (%s) > \t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
     $state->output($state->{in});
+    $state->{in} = "";
+}
+
+sub wait_interrupt {
+    my ($state, $rc) = @_;
+
+    delete $state->listener->{device_events}{$state->{key}};
+    $state->adb_output(FAIL, $state->{interrupt_message});
     $state->{in} = "";
 }
 
@@ -599,6 +633,9 @@ sub adb_read {
             my $arguments = substr($state->{in}, 0, 8+$bytes, "");
             my $command = substr($arguments, 0, 4);
             substr($arguments, 0, 8, "");
+
+            info("Command (%s) <\t'%s %s'", $state->{id}, $command, $arguments) if $verbose;
+
             if (my $code = $command_sync{$command}) {
                 $code->($state, $arguments, $command);
             } else {
@@ -632,30 +669,38 @@ sub send_read {
     while (length $state->{in} >= 4) {
         my ($id, $length) = unpack("a4V", $state->{in});
         if ($id eq "DATA") {
-            defined $length && length $state->{in} >= 8 + $length || last;
+            defined $length && length $state->{in} >= 8 + $length || return;
             substr($state->{in}, 0, 8, "");
             my $fh = $state->{send_fh};
-            print($fh substr($state->{in}, 0, $length, "")) ||
-                return $state->adb_sync_fail("Could not close '$state->{send_file}': $^E");
+            if (!print($fh substr($state->{in}, 0, $length, ""))) {
+                $state->adb_sync_fail("Could not close '$state->{send_file}': $^E");
+                last;
+            }
         } elsif ($id eq "DONE") {
-            defined $length || last;
+            defined $length || return;
             substr($state->{in}, 0, 8, "");
             my $file = delete $state->{send_file};
             my $path = $state->sync_filecheck($file) // return;
-            close(delete $state->{send_fh}) ||
-                return $state->adb_sync_fail("Could not close '$file': $^E");
+            if (!close(delete $state->{send_fh})) {
+                $state->adb_sync_fail("Could not close '$file': $^E");
+                last;
+            }
             my $mtime = time_from_adb($length);
-            utime($mtime, $mtime, $path) ||
-                return $state->adb_sync_fail("Could not utime '$file': $^E");
+            if (!utime($mtime, $mtime, $path)) {
+                $state->adb_sync_fail("Could not utime '$file': $^E");
+                last;
+            }
             $state->output(pack("a4x4", "OKAY"));
             # Resume normal command processing
             $state->{on_read} = \&adb_read;
-            last;
+            return;
         } else {
-            # I haven't checked what a real device does
-            $state->adb_sync_fail("Invalid chunck type '$id'");
+            $state->adb_sync_fail("invalid data message");
+            last;
         }
     }
+    unlink($state->{send_path}) ||
+        die "Could not unlink just created '$state->{send_path}': $^E";
 }
 
 sub adb_output {
@@ -684,6 +729,8 @@ sub adb_output {
 
 sub adb_sync_fail {
     my ($state, $err) = @_;
+
+    die "Already have 'written" if $state->{written};
     $state->output(pack("a*V/a*", "FAIL", $err));
     $state->adb_close_soon;
 }
@@ -1054,15 +1101,22 @@ sub command_host {
             $state->adb_output(UNCOUNTED, "");
             return;
         }
+
         # No online devices. Become a waiter
-        $state->{transport} = 0;
         $listener->{device_events}{$state->{key}} = $state;
+        # We will end with a close, but avoid others closing us
+        # (not sure if this ever makes a difference)
+        $state->{transport} = 0;
         $state->{on_device_event} = \&waiter;
         $state->{wait_type}   = $type;
         $state->{wait_mode}   = $mode;
         $state->{wait_serial} = $serial;
-        # Currently don't have a strategy for read. Works badly for now
-        # $state->{socket}->delete_read;
+        $state->{interrupt_message} =
+            $mode eq "disconnect" ? "success" :
+            defined $id ? "no device with transport id '$id'" :
+            defined $serial ? "device '$serial' not found" :
+            sprintf("no %s found", transport_type_name($type, 1));
+        $state->{on_read} = \&wait_interrupt,
     } elsif ($command =~ m{^(transport|tport):(any|usb|local|serial:(.*))}) {
         # host-local:tport:usb gets you usb
         # host-usb:tport:local gets you local
@@ -1247,54 +1301,89 @@ sub command_recv_v1 {
     my ($state, $file) = @_;
 
     my $path = $state->sync_filecheck($file) // return;
-    if (-d $path) {
-        $state->adb_sync_fail("read failed: Is a directory");
-    } elsif (open(my $fh, "<", $path)) {
-        binmode($fh);
-        local $/ = \2**16;
-        local $_;
-        $state->output(pack("a4V/a*", "DATA", $_)) while <$fh>;
-        $state->output(pack("a4x4", "DONE"));
+    if (lstat($path)) {
+        if (-f _) {
+            # For now we only support regular files and not symlinks to them
+            if (open(my $fh, "<", $path)) {
+                binmode($fh);
+                local $/ = \2**16;
+                local $_;
+                $state->output(pack("a4V/a*", "DATA", $_)) while <$fh>;
+                $state->output(pack("a4x4", "DONE"));
+            } else {
+                my $err = errno_adb_from_native($!);
+                $state->adb_sync_fail("read failed: $err");
+            }
+        } elsif (-d _) {
+            # Special message for common case
+            $state->adb_sync_fail("read failed: Is a directory");
+        } else {
+            # Some of these are valid but we have no tests that need them
+            $state->adb_sync_fail("read failed: Not a regular file");
+        }
     } else {
         my $err = errno_adb_from_native($!);
         $state->adb_sync_fail("read failed: $err");
     }
 }
 
+sub mkdirp {
+    my ($state, $dir) = @_;
+
+    $dir =~ s{/[^/]*\z}{} || die "Cannot shorten path '$dir'";
+    return 1 if $dir eq "";
+    my $path = $state->sync_filecheck($dir) // return;
+    return 1 if -d $path;
+    if (-e _) {
+        $state->adb_sync_fail("couldn't create file: Not a directory");
+        return;
+    }
+    $state->mkdirp($dir) // return;
+    my $umask_old = umask(022);
+    if (!mkdir($path)) {
+        umask($umask_old);
+        $state->adb_sync_fail("secure_mkdirs failed: $^E");
+        return;
+    }
+    umask($umask_old);
+    return 1;
+}
+
 sub command_send_v1 {
     my ($state, $file) = @_;
 
-    if ($file =~ s/,(\d+)\z//) {
-        my $mode = $1;
-        my $path = $state->sync_filecheck($file) // return;
-        my $type = adb_file_type_from_mode($mode);
-        if ($type eq "REG") {
-            # Owner will be able to write (mimic my android device)
-            my $perms = adb_permissions_from_mode($mode) | 0200;
-            # Mask because we don't want to leave world/group writable stuff
-            # This all happens inside a directory that was created with mode
-            # 0700 (see filesystem() in TestDrive) so there is no security issue
-            # with a more permissive umask
-            my $umask_old = umask(022);
-            if (sysopen(my $fh, $path, O_WRONLY|O_CREAT|O_TRUNC, $perms)) {
-                umask($umask_old);
-                # What does android do if you open a symlink ?
-                $state->{send_fh} = $fh;
-                $state->{send_file} = $file;
-                $state->{send_perms} =
-                $state->{on_read} = \&send_read;
-            } else {
-                umask($umask_old);
-                $state->adb_sync_fail("couldn't create file: $!");
-            }
-        } else {
-            # There aren't any bad file types in the real implementation
-            # There is special hadling to create symlinks
-            $state->adb_sync_fail("No support for $type files");
-        }
+    $file =~ s/,(\d+)\z// ||
+        return $state->adb_sync_fail("missing , in ID_SEND_V1");
+    my $mode = $1;
+    my $path = $state->sync_filecheck($file) // return;
+
+    # Create containing directories
+    $state->mkdirp($file) // return;
+
+    my $type = adb_file_type_from_mode($mode);
+    if ($type eq "REG") {
+        unlink($path) || $! == ENOENT ||
+            return $state->adb_sync_fail("couldn't unlink file: $!");
+        # Owner will be able to write (mimic my android device)
+        my $perms = adb_permissions_from_mode($mode) | 0200;
+        # Mask because we don't want to leave world/group writable stuff
+        # This all happens inside a directory that was created with mode
+        # 0700 (see filesystem() in TestDrive) so there is no security issue
+        # with a more permissive umask
+        my $umask_old = umask(~$perms & 0777);
+        open(my $fh, ">", $path);
+        umask($umask_old);
+        $fh || return $state->adb_sync_fail("couldn't create file: $!");
+        binmode($fh);
+        # What does android do if you open a symlink ?
+        $state->{send_fh} = $fh;
+        $state->{send_file} = $file;
+        $state->{send_path} = $path;
+        $state->{on_read} = \&send_read;
     } else {
-        # I haven't actually checked what a real device does here
-        $state->adb_sync_fail("Invalid path '$file'");
+        # There aren't any bad file types in the real implementation
+        # There is special hadling to create symlinks
+        $state->adb_sync_fail("No support for $type files");
     }
 }
 
@@ -1396,6 +1485,7 @@ sub waiter {
     my $listener = $state->{listener};
     delete $listener->{device_events}{$state->{key}};
     $state->{on_device_event} = undef;
+    $state->{on_read} = \&adb_read;
     $state->adb_output(UNCOUNTED, "");
 }
 
@@ -1765,7 +1855,8 @@ sub dumper {
 
 package main;
 event_init();
-$idle_timer = unidle();
+unalarm();
+unidle();
 eval { main() };
 if ($@) {
     select(STDERR);

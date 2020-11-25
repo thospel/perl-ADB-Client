@@ -163,7 +163,7 @@ sub NAME : method {
     my %arguments = @_;
     if (delete $arguments{blocking} // $client_ref->{blocking}) {
         # blocking
-        $client_ref->PROXY(\%arguments, $client_ref->callback_blocking, INDEX, \@vars);
+        $client_ref->PROXY(\%arguments, $client_ref->callback_blocking(\%arguments), INDEX, \@vars);
         return $client_ref->wait;
     }
     $client_ref->PROXY(\%arguments, delete $arguments{callback} || $CALLBACK_DEFAULT, INDEX, \@vars);
@@ -291,6 +291,44 @@ sub wait_local_device {
 sub restart {
     my $client = shift;
     return $client->reboot("", @_);
+}
+
+sub list_dir : method {
+    my ($client, $dir, %arguments) = @_;
+
+    croak "Forbidden argument 'on_progress'" if exists $arguments{on_progress};
+
+    $client = $client->new if ref $client eq "";
+    my $client_ref = $$client;
+
+    my %result;
+    my $on_progress = sub {
+        my ($client, $data, $file, $stat, $parent) = @_;
+        $data->{$file} = $stat;
+        $result{"$parent/$file"} = 1;
+    };
+    $client_ref->callback_unshift(\%arguments, sub {
+        $_[2] = \%result if !$_[1] && ref $_[2] ne "";
+    });
+
+    return $client->list_v1($dir, %arguments, on_progress => $on_progress);
+}
+
+sub mkdir_unlink {
+    my ($client, $file, %arguments) = @_;
+
+    # These options are accepted by send_v1 but make no sense here
+    for my $key (qw(raw mode mtime perms ftype low_water high_water)) {
+        croak "Forbidden argument '$key'" if exists $arguments{$key};
+    }
+
+    $client = $client->new if ref $client eq "";
+    my $client_ref = $$client;
+
+    $client_ref->callback_unshift(\%arguments, sub {
+        $_[1] = undef if $_[1] && $_[1] eq "invalid data message";
+    });
+    return $client->send_v1($file, pack("a4x4", "DEAD"), %arguments, raw => 1);
 }
 
 1;

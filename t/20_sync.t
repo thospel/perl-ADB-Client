@@ -12,9 +12,10 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
+use Errno qw(ENOPROTOOPT);
 
 my $tests;
-BEGIN { $tests = 57 }
+BEGIN { $tests = 72 }
 use Test::More tests => $tests;
 
 use TestDrive qw($tests_driver $tests_pre $t_dir
@@ -22,7 +23,8 @@ use TestDrive qw($tests_driver $tests_pre $t_dir
 
 # We already checked loading in 04_adb_client.t
 use ADB::Client qw(mainloop $ADB $ADB_HOST $ADB_PORT);
-use ADB::Client::Utils qw(adb_file_type_from_mode realtime);
+use ADB::Client::Utils
+    qw(adb_file_type_from_mode realtime errno_adb_from_native time_from_adb);
 
 my $adb_dir = "/sdcard/adb_client_test";
 my $test_dir = $t_dir . $adb_dir;
@@ -156,11 +158,11 @@ SKIP: {
 
 my @progress;
 @result = $client->list_v1("$adb_dir/empty_dir", on_progress => sub {
-    my ($client0, $command, $file, $stat) = @_;
+    my ($client0, $data, $file, $stat) = @_;
     cmp_ok($client0, "==", $client, "First on_progress argument is the client");
-    isa_ok($command, "ADB::Client::Command", "Second on_progress argument");
+    isa_ok($data, "HASH", "Second on_progress argument");
     push @progress, [$file, $stat];
-    $command->{data}{$file} = 1;
+    $data->{$file} = 1;
 });
 is_deeply(\@result, [{ "." => 1, ".." => 1 }], "Got modified result") ||
     dumper(\@result);
@@ -185,9 +187,10 @@ is_deeply(\@progress, [
  ]
 ], "Got on_progress callbacks") || dumper(\@progress);
 
+my $noproto_adb = errno_adb_from_native(ENOPROTOOPT);
+my $noproto_native = local $! = ENOPROTOOPT;
 @result = $client->list_v1("$adb_dir/does_not_exist");
-is_deeply(\@result, ["Protocol not available"],
-          "List v1 on non existing directory");
+is_deeply(\@result, [$noproto_adb], "List v1 on non existing directory");
 
 @result = $client->list_v1("$adb_dir/foo");
 is_deeply(\@result, ["Protocol not available"],
@@ -208,78 +211,101 @@ is(adb_file_type_from_mode($result[0]{dir}{mode}), "DIR", "dir is a directory");
 
 # Try list_v1 recusrive
 @result = $client->list_v1($adb_dir, recursive => 1, on_progress => sub {
-    my ($client, $command, $file, $stat) = @_;
+    my ($client, $data, $file, $stat, $parent) = @_;
     delete @$stat{qw(mtime size)};
-    $command->{data}{$file} = $stat;
+    $stat->{parent} = $parent;
+    $data->{$file} = $stat;
 });
-is_deeply(\@result, [
-  {
+my $expect = [{
     "." => {
-      ftype => "DIR",
-      mode => 040771,
-      perms => 0771
+        parent => "/sdcard/adb_client_test",
+        ftype => "DIR",
+        mode => 040771,
+        perms => 0771
     },
     ".." => {
-      ftype => "DIR",
-      mode => 040771,
-      perms => 0771
+        parent => "/sdcard/adb_client_test",
+        ftype => "DIR",
+        mode => 040771,
+        perms => 0771
     },
     dir => {
-      ftype => "DIR",
-      mode => 040771,
-      perms => 0771,
-      tree => {
-        "." => {
-          ftype => "DIR",
-          mode => 040771,
-          perms => 0771
-        },
-        ".." => {
-          ftype => "DIR",
-          mode => 040771,
-          perms => 0771
-        },
-        bar => {
-          ftype => "REG",
-          mode => 0100660,
-          perms => 0660
+        parent => "/sdcard/adb_client_test",
+        ftype => "DIR",
+        mode => 040771,
+        perms => 0771,
+        tree => {
+            "." => {
+                parent => "/sdcard/adb_client_test/dir",
+                ftype => "DIR",
+                mode => 040771,
+                perms => 0771
+            },
+            ".." => {
+                parent => "/sdcard/adb_client_test/dir",
+                ftype => "DIR",
+                mode => 040771,
+                perms => 0771
+            },
+            bar => {
+                parent => "/sdcard/adb_client_test/dir",
+                ftype => "REG",
+                mode => 0100660,
+                perms => 0660
+            }
         }
-      }
     },
     empty => {
-      ftype => "REG",
-      mode => 0100660,
-      perms => 0660
+        parent => "/sdcard/adb_client_test",
+        ftype => "REG",
+        mode => 0100660,
+        perms => 0660
     },
     empty_dir => {
-      ftype => "DIR",
-      mode => 040771,
-      perms => 0771,
-      tree => {
-        "." => {
-          ftype => "DIR",
-          mode => 040771,
-          perms => 0771
-        },
-        ".." => {
-          ftype => "DIR",
-          mode => 040771,
-          perms => 0771
+        parent => "/sdcard/adb_client_test",
+        ftype => "DIR",
+        mode => 040771,
+        perms => 0771,
+        tree => {
+            "." => {
+                parent => "/sdcard/adb_client_test/empty_dir",
+                ftype => "DIR",
+                mode => 040771,
+                perms => 0771
+            },
+            ".." => {
+                parent => "/sdcard/adb_client_test/empty_dir",
+                ftype => "DIR",
+                mode => 040771,
+                perms => 0771
+            }
         }
-      }
     },
     foo => {
-      ftype => "REG",
-      mode => 0100660,
-      perms => 0660
+        parent => "/sdcard/adb_client_test",
+        ftype => "REG",
+        mode => 0100660,
+        perms => 0660
     },
     "f\x{f3}\x{f2}\x{1321}" => {
-      ftype => "REG",
-      mode => 0100660,
-      perms => 0660
+        parent => "/sdcard/adb_client_test",
+        ftype => "REG",
+        mode => 0100660,
+        perms => 0660
     }
-  }
-], "Recursive directory") || dumper(\@result);
+}];
+is_deeply(\@result, $expect, "Recursive directory") || dumper(\@result);
+
+# Try list_v1 recusrive
+@result = $client->list_dir($adb_dir, recursive => 1, self_parent => 0);
+is_deeply(\@result, [{
+  "/sdcard/adb_client_test/dir" => 1,
+  "/sdcard/adb_client_test/dir/bar" => 1,
+  "/sdcard/adb_client_test/empty" => 1,
+  "/sdcard/adb_client_test/empty_dir" => 1,
+  "/sdcard/adb_client_test/foo" => 1,
+  "/sdcard/adb_client_test/f\x{f3}\x{f2}\x{1321}" => 1
+}], "Recursive directory") || dumper(\@result);
 
 # Try list v2
 if (0) {
@@ -306,8 +332,11 @@ if (0) {
 # Try recv v1
 @result = $client->recv_v1("$adb_dir/foo");
 is_deeply(\@result, ["foo\n" ], "Fetch content of foo");
-@result = $client->recv_v1("$adb_dir/$utf8_file");
-is_deeply(\@result, ["foo\n$decoded_file\n" ], "Fetch content of utf8_file");
+# Check unicode fetch and raw
+@result = $client->recv_v1("$adb_dir/$utf8_file", raw => 1);
+is_deeply(\@result,
+          ["DATA\r\0\0\0foo\n$decoded_file\nDONE\0\0\0\0"],
+          "Fetch content of utf8_file") || dumper(\@result);
 
 # Try recv v2
 if (0) {
@@ -360,6 +389,16 @@ SKIP: {
     is($client->recv_v1("$adb_dir/bar"), $content, "Can retreive sent file");
 }
 
+# Try send_v1raw
+@result = $client->send_v1("$adb_dir/bar",
+                           pack("(a4V/a*)3a4x4",
+                           DATA => "bar",
+                           DATA => "",
+                           DATA => "zzzef",
+                           "DONE"), raw => 1);
+is($result[0], 40, "Raw bytes transferred");
+is($client->recv_v1("$adb_dir/bar"), "barzzzef", "Can retreive sent file");
+
 # Try send v2
 if (0) {
     $content = "barbar\n";
@@ -368,6 +407,62 @@ if (0) {
 }
 
 is($client->quit, "", "Quit sync mode");
+
+# Check mkdir_unlink, create directories
+$client->transport_local;
+$client->sync;
+ok($client->connected, "We start connected");
+@result = eval { $client->mkdir_unlink("$adb_dir/deep1/deep2/deep3/target") };
+is($@, "", "no error from mkdir_unlink");
+is(@result, 0, "Nothing returned on success") || dumper(\@result);
+ok(!$client->connected, "We do however lose the connection");
+$client->transport_local;
+$client->sync;
+@result = $client->list_dir("$adb_dir/deep1", recursive => 1, self_parent => 0);
+is_deeply(\@result, [{
+    "/sdcard/adb_client_test/deep1/deep2" => 1,
+    "/sdcard/adb_client_test/deep1/deep2/deep3" => 1
+}], "Directories now exist") || dumper(\@result);
+
+# Check mkdir_unlink, create directory on top of a file
+@result = eval { $client->mkdir_unlink("$adb_dir/foo/deeper") };
+like($@, qr{^\Qcouldn't create file: Not a directory at },
+     "Error from mkdir_unlink");
+$client->transport_local;
+$client->sync;
+
+# Check mkdir_unlink, create disallowed directory
+@result = eval { $client->mkdir_unlink("/deep1/deep2") };
+like($@, qr{^\Qsecure_mkdirs failed: },
+     "Error from mkdir_unlink");
+$client->transport_local;
+$client->sync;
+
+# Check mkdir_unlink, unlink a file
+@result = $client->lstat_v1("$adb_dir/bar");
+is_deeply(\@result, [{    "ftype" => "REG",
+    "mode" => 0100660,
+    "mtime" => time_from_adb(0),
+    "perms" => 0660,
+    "size" => 8
+}], "File $adb_dir/bar exists") || dumper(\@result);
+@result = eval { $client->mkdir_unlink("$adb_dir/bar") };
+is($@, "", "no error from mkdir_unlink");
+is(@result, 0, "Nothing returned on success") || dumper(\@result);
+$client->transport_local;
+$client->sync;
+@result = $client->lstat_v1("$adb_dir/bar");
+is_deeply(\@result, [$noproto_native, $noproto_adb], "File is gone") ||
+    dumper(\@result);
+
+# Try to get a FAIL response while still sending
+eval { $client->send_v1("$adb_dir/baz",
+                        pack("(a4V/a*)2a4x4",
+                             DEAD => "bar",
+                             DATA => "z" x 40,
+                             "DONE"),
+                        raw => 1, low_water => 1, high_water => 10) };
+like($@, qr{^\Qinvalid data message at }, "Normal error");
 
 $client->transport_local;
 $client->sync;

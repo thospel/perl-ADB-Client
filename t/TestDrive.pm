@@ -79,7 +79,11 @@ our $t_dir = $Bin;
 our $base_dir = $t_dir;
 $base_dir =~ s{/t\z}{} ||
     croak "test directory $t_dir does not seem to end on /t";
-our $adb_fake = "$base_dir/bin/adb_fake";
+# Also cover adb_fake so I can easily see for which commands not all ways of
+# using them have a test
+our $adb_fake = $INC{"Devel/Cover.pm"} ?
+    "$t_dir/adb_fake_cover" :
+    "$base_dir/bin/adb_fake";
 $ADB = $adb_fake;
 
 my ($adb_out, $adb_control, $pid);
@@ -204,13 +208,10 @@ sub adb_start {
         no warnings "exec";
         # open($adb_out = undef, "-|", $adb_fake)
         open($adb_out = undef, "-|", $^X,
-             # Also cover adb_fake so I can easily see for which commands not
-             # all ways of using them have a test
-             $INC{"Devel/Cover.pm"} ? "-MDevel::Cover=-silent,1" : (),
              $adb_fake,
              $blib ? "--blib" : (),
              $ENV{ADB_CLIENT_TEST_VERBOSE} ? "-v" : ()) ||
-            Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");
+                 Test::More::BAIL_OUT("Cannot even start fake adb server: $^E");
     };
     my $line = <$adb_out> //
         Test::More::BAIL_OUT("Unexpected EOF from fake adb server");
@@ -277,7 +278,7 @@ sub adb_unreachable6 {
 }
 
 sub adb_closer {
-    return _adb_listener("Closer");
+    return _adb_listener("Blackhole 0");
 }
 
 sub adb_echo {
@@ -299,7 +300,7 @@ sub adb_version6 {
 sub adb_blackhole {
     my $arg = $_[0] || "";
     $arg =~s /\n/\\n/g;
-    return _adb_listener("Blackhole" . (defined $_[0] ? " $arg" : ""));
+    return _adb_listener("Blackhole" . (defined $_[0] ? " -1 $arg" : ""));
 }
 
 sub addr_filter {
@@ -349,17 +350,24 @@ sub filesystem {
     $id ||= "android";
     $tmp_dir ||= tempdir(CLEANUP => 1);
     my $base = "$tmp_dir/$id";
-    # Disallow others from doing evil things
-    # (assuming the path to $tmp_dir itself is safe from symlink attacks)
-    mkdir($base, 0700) || croak "Could not mkdir($base): $^E";
-    # Need a symlink target of length 21 to match my real device
-    my $target = "emulatedemulatedemula";
-    mkdir("$base/$target") ||
-        die "Could not mkdir($base/$target): $^E";
-    File::Copy::Recursive::rcopy($from, "$base/$target") ||
-          die "Could not copy $from to $base: $^E";
-    symlink($target, "$base/sdcard") ||
-        die "Could not symlink $base/sdcard to $target: $^E";
+    my $old_umask = umask(022);
+    eval {
+        # Disallow others from doing evil things
+        # (assuming the path to $tmp_dir itself is safe from symlink attacks)
+        mkdir($base, 0700) || croak "Could not mkdir($base): $^E";
+        # Need a symlink target of length 21 to match my real device
+        my $target = "emulatedemulatedemula";
+        mkdir("$base/$target") ||
+            die "Could not mkdir($base/$target): $^E";
+        File::Copy::Recursive::rcopy($from, "$base/$target") ||
+              die "Could not copy $from to $base: $^E";
+        symlink($target, "$base/sdcard") ||
+            die "Could not symlink $base/sdcard to $target: $^E";
+        chmod(0500, $base) ||
+            die "Could not chmod($base): $^E";
+    };
+    umask($old_umask);
+    die $@ if $@;
     return $base;
 }
 

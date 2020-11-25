@@ -33,7 +33,7 @@ use Exporter::Tidy
     other	=> [qw($CALLBACK_DEFAULT
                        $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
 
-our @CARP_NOT = qw(ADB::Client ADB::Client::Events);
+our @CARP_NOT = qw(ADB::Client ADB::Client::Events ADB::Client::Timer);
 
 our $BLOCK_SIZE = int(2**16);
 
@@ -153,14 +153,15 @@ our @BUILTINS = (
     [stat_v2		=> "STA2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
     [lstat_v2		=> "LST2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
     [list_v1		=> "LIST", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE,
-     [\&process_list_v1, "recursive"]],
+     [\&process_list_v1, qw(recursive self_parent)]],
     # Unimplemented, I have no device supporting list_v2
     # [list_v2		=> "LIS2", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE],
-    [send_v1		=> "SEND", 8, SYNC|UTF8_OUT|SEND, \&process_send_v1],
+    [send_v1		=> "SEND", 8, SYNC|UTF8_OUT|SEND,
+     [\&process_send_v1, "raw"]],
     # Unimplemented, I have no device supporting send_v2
     # [send_v2		=> "SND2", 0, SYNC|UTF8_OUT|SEND],
     [recv_v1		=> "RECV", 0, SYNC|UTF8_OUT|MAYBE_MORE|RECV,
-     \&process_recv_v1],
+     [\&process_recv_v1, "raw"]],
     # Unimplemented, I have no device supporting recv_v2
     # [recv_v2		=> "RCV2", 0, SYNC|UTF8_OUT|MAYBE_MORE|RECV],
     [quit		=> "QUIT", 0, SYNC|EXPECT_EOF],
@@ -231,6 +232,9 @@ sub new {
         block_size	=> $block_size,
         socket		=> undef,
         expect_eof	=> undef,
+        expect_fail	=> undef,
+        read_suspended	=> 0,
+        write_suspended	=> 0,
         sent		=> 0,
         in		=> "",
         out		=> "",
@@ -352,10 +356,12 @@ sub connected {
 }
 
 sub callback_blocking {
+    my (undef, $arguments) = @_;
+
     croak "Already have a blocking command pending" if
         defined shift->{result};
     my $loop_levels = loop_levels();
-    return sub {
+    my $unloop = sub {
         my $client_ref = $ {shift()};
         $client_ref->fatal("No wait pending") if !defined $client_ref->{result};
         $client_ref->fatal("Result already set") if $client_ref->{result};
@@ -363,6 +369,17 @@ sub callback_blocking {
         $client_ref->{result} = \@_;
         unloop($loop_levels);
     };
+    my $callback = delete $arguments->{callback} // return $unloop;
+    return [$unloop, ref $callback eq "ARRAY" ? @$callback : $callback];
+}
+
+sub callback_unshift {
+    my ($client_ref, $arguments, $callback_new) = @_;
+
+    my $callback = $arguments->{callback};
+    $callback = $CALLBACK_DEFAULT if
+        !$callback && ($arguments->{blocking} // $client_ref->{blocking});
+    $arguments->{callback} = $callback ? [$callback_new, ref $callback eq "ARRAY" ? @$callback : $callback] : $callback_new;
 }
 
 sub wait : method {
@@ -469,11 +486,28 @@ sub command_add {
     $command_ref[COMMAND] // croak "No COMMAND in command '$command_name'";
     if (!utf8::downgrade($command_ref[COMMAND], 1)) {
         my $command = display_string($command_ref[COMMAND]);
-          croak "Command cannot be converted to native 8 bit encoding: $command";
+        croak "Command cannot be converted to native 8 bit encoding: $command";
     }
 
     if ($command_ref[COMMAND] ne SPECIAL) {
         $command_ref[FLAGS] // croak "No FLAGS in command '$command_name'";
+
+        my $command = $command_ref[COMMAND];
+        if ($command_ref[FLAGS] & SYNC) {
+            length $command eq 4 ||
+                croak "SYNC command '$command' does not have length 4";
+            $command_ref[NR_BYTES] >= 0 ||
+                croak "SYNC command '$command' cannot be counted";
+            $command_ref[NR_BYTES] < 2**32 ||
+                croak "SYNC command '$command' expected response out of range";
+            # In check_response() we only have special handling for this case
+            # (QUIT should be the only EXPECT_EOF SYNC command)
+            croak "SYNC command '$command' execpects byes and EOF" if
+                ($command_ref[FLAGS] & EXPECT_EOF) && $command_ref[NR_BYTES];
+        }
+        croak "Command '$command' has both SEND and RECV" if
+            ($command_ref[FLAGS] & SEND) && ($command_ref[FLAGS] & RECV);
+
         if ($command_ref[FLAGS] & SERIAL) {
             my @command_ref = @$command_ref;
             $command_ref[FLAGS] &= ~SERIAL;
@@ -526,20 +560,10 @@ sub command_get {
         die "Assertion: No COMMAND in command '$command_name'";
     my $nr_args = $command =~ tr/%//;
     if ($command_ref->[FLAGS] && ($command_ref->[FLAGS] & SYNC)) {
-        length $command eq 4 ||
-            croak "SYNC command '$command' does not have length 4";
-        $command_ref->[NR_BYTES] >= 0 ||
-            croak "SYNC command '$command' cannot be counted";
-        $command_ref->[NR_BYTES] < 2**32 ||
-            croak "SYNC command '$command' expected response out of range";
-        # In check_response() we only have special handling for this case
-        # (QUIT should be the only EXPECT_EOF SYNC command)
-        croak "SYNC command '$command' execpects byes and EOF" if
-            ($command_ref->[FLAGS] & EXPECT_EOF) && $command_ref->[NR_BYTES];
         $nr_args =
             $command_ref->[FLAGS] & SEND ? 2 :
-            $command_ref->[NR_BYTES] || !($command_ref->[FLAGS] & EXPECT_EOF) ?
-            1 : 0;
+            $command_ref->[NR_BYTES] == 0 && ($command_ref->[FLAGS] & EXPECT_EOF) ?
+            0 : 1;
     }
 
     $command !~ /%(?!(?:\d+\$)?[sd])/a ||
@@ -549,6 +573,9 @@ sub command_get {
 
 sub command_simple {
     my ($client_ref, $arguments, $callback, $index, $args) = @_;
+
+    croak "Already have a blocking command pending" if
+        defined $client_ref->{result};
 
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
@@ -560,9 +587,18 @@ sub command_simple {
     $command->{transaction_timeout2} =
         delete $arguments->{transaction_timeout2} //
         $client_ref->{transaction_timeout} if $flags & PHASE1;
+
     $command->{on_progress} = delete $arguments->{on_progress} if
         exists $arguments->{on_progress} &&
         ($flags & (SYNC|MAYBE_MORE)) == (SYNC|MAYBE_MORE);
+
+    if (ref $command_ref->[PROCESS] eq "ARRAY") {
+        my $keys = $command_ref->[PROCESS];
+        # Skip first (the actual processing code)
+        for my $key (@$keys[1..$#$keys]) {
+            $command->{$key} = delete $arguments->{$key} if exists $arguments->{$key};
+        }
+    }
 
     if ($command_ref->[FLAGS] & SEND) {
         $client_ref->{nr_bytes} = 0;
@@ -581,20 +617,31 @@ sub command_simple {
         $mode |= $adb_mode_from_file_type{REG} unless $mode & ADB_FILE_TYPE_MASK;
         adb_file_type_from_mode($mode);
         $args->[0] .= sprintf(",%d", $mode);
-        $command->{on_lowmark} = \&_send_data;
+        $command->{on_low_water} = $command->{raw} ?
+            \&_send_data_raw : \&_send_data;
     }
 
-    if (ref $command_ref->[PROCESS] eq "ARRAY") {
-        my $keys = $command_ref->[PROCESS];
-        # Skip first (the actual processing code)
-        for my $key (@$keys[1..$#$keys]) {
-            $command->{$key} = delete $arguments->{$key} if exists $arguments->{$key};
+    if ($command_ref->[FLAGS] & (SEND|RECV)) {
+        # As soon as we have bytes >= low_water we do a write. Except when the
+        # read side got EOF, then we do a final write with whatever is left
+        my $low_water =
+            delete $arguments->{low_water} // $client_ref->{block_size};
+        $low_water >= 1 || croak "low_water should be at least 1";
+        # As soon as we have bytes >= high_water we stop reading
+        my $high_water =
+            delete $arguments->{high_water} // 3 * $client_ref->{block_size};
+        $high_water >= $low_water || croak "high_water must me >= low_water";
+        # command_add() already checked commands cannot have both SEND and RECV
+        if ($command_ref->[FLAGS] & SEND) {
+            $command->{send_low_water} = $low_water;
+            $command->{send_high_water} = $high_water;
+        } else {
+            $command->{recv_low_water} = $low_water;
+            $command->{recv_high_water} = $high_water;
         }
     }
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
-
-    croak "Already have a blocking command pending" if defined $client_ref->{result};
 
     $command->command_ref($command_ref, @$args);
     push @{$client_ref->{commands}}, $command;
@@ -620,11 +667,12 @@ sub special_simple {
 
 sub _fatal {
     my ($client_ref, $arguments, $callback, $index) = @_;
+
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
 
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
-    croak "Already have a blocking command pending" if defined $client_ref->{result};
     push(@{$client_ref->{commands}},
          ADB::Client::Command->new(COMMAND_REF => $command_ref));
     $client_ref->activate(1);
@@ -684,13 +732,13 @@ sub _forget {
 sub _connect : method {
     my ($client_ref, $arguments, $callback, $index) = @_;
 
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
+
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
     my $connector = $client_ref->connector($command_ref, $arguments, $callback);
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
-
-    croak "Already have a blocking command pending" if defined $client_ref->{result};
 
     push @{$client_ref->{commands}}, $connector;
     $client_ref->activate(1);
@@ -699,14 +747,14 @@ sub _connect : method {
 sub spawn {
     my ($client_ref, $arguments, $callback, $index) = @_;
 
+    croak "Already have a blocking command pending" if defined $client_ref->{result};
+
     my $command_ref = $COMMANDS[$index] ||
         croak "No command at index '$index'";
     my $connector =
         $client_ref->connector($command_ref, $arguments, $callback, 1);
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
-
-    croak "Already have a blocking command pending" if defined $client_ref->{result};
 
     push @{$client_ref->{commands}}, $connector;
     $client_ref->activate(1);
@@ -717,19 +765,21 @@ sub close : method {
 
     if ($client_ref->{socket}) {
         if ($client_ref->{out} ne "") {
-            $client_ref->{socket}->delete_write;
+            $client_ref->{socket}->delete_write if !$client_ref->{write_suspended};
             $client_ref->{out} = "";
         }
         $client_ref->{socket}->delete_read if
-            $client_ref->{active} && defined $client_ref->{in};
+            $client_ref->{active} && defined $client_ref->{in} && !$client_ref->{read_suspended};
         $client_ref->{in} = "";
-        $client_ref->{sent} = 0;
         $client_ref->{expect_eof} = undef;
+        $client_ref->{expect_fail} = undef;
         $client_ref->{socket} = undef;
         # Don't update $client_ref->{addr_connected}{connected}
         # We want that to represent the last connection attempt,
         # NOT the current connection state. Check $client_ref->{socket} instead
     }
+    $client_ref->{read_suspended} = 0;
+    $client_ref->{write_suspended} = 0;
     $client_ref->{sync} = 0;
     $client_ref->{active}  = 0;
     $client_ref->{timeout} = undef;
@@ -762,7 +812,16 @@ sub error {
     local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
         $client_ref->fatal("Error without command");
     local $client_ref->{post_activate} = 0;
-    $client_ref->{command_retired}->{CALLBACK}->($client_ref->{client}, $err, @_);
+    my $callback = $client_ref->{command_retired}->{CALLBACK};
+    unshift @_, $err;
+    if (ref $callback eq "ARRAY") {
+        my $client = $client_ref->{client};
+        for my $c (@$callback) {
+            $c->($client, @_);
+        }
+    } else {
+        $callback->($client_ref->{client}, @_);
+    }
     $client_ref->activate if $client_ref->{post_activate};
     # Make sure not to return anything
     return;
@@ -812,7 +871,16 @@ sub success {
     local $client_ref->{command_retired} = shift @{$client_ref->{commands}} ||
         $client_ref->fatal("Success without command");
     local $client_ref->{post_activate} = 1;
-    $command->{CALLBACK}->($client_ref->{client}, undef, @$result);
+    my $callback = $client_ref->{command_retired}->{CALLBACK};
+    unshift @$result, undef;
+    if (ref $callback eq "ARRAY") {
+        my $client = $client_ref->{client};
+        for my $c (@$callback) {
+            $c->($client, @$result);
+        }
+    } else {
+        $callback->($client_ref->{client}, @$result);
+    }
     if ($client_ref->{post_activate}) {
         $client_ref->{post_activate} = 0;
         $client_ref->activate;
@@ -886,6 +954,7 @@ sub activate {
                 $client_ref->{out} = $command->out;
             }
         }
+        $client_ref->{sent} = 0;
         info("Sending to ADB: " . display_string($client_ref->{out})) if $DEBUG;
 
         $client_ref->{socket}->add_write(sub { $client_ref->_writer });
@@ -895,12 +964,9 @@ sub activate {
             $client_ref->fatal("No transaction_timeout"),
             sub { $client_ref->_transaction_timed_out });
 
-        if ($client_ref->{sync} &&
-            ($command_ref->[FLAGS] & SYNC) &&
-            $command->{on_lowmark} &&
-            length $client_ref->{out} < $client_ref->{block_size}) {
-            $command->{on_lowmark}->($client_ref, $command);
-        }
+        $command->{on_low_water}->($client_ref, $command) if
+            $command->{send_low_water} &&
+            length $client_ref->{out} < $command->{send_low_water};
     }
     $client_ref->{active} = 1;
 }
@@ -911,19 +977,40 @@ sub _send_data {
     my $arguments = $command->arguments;
     my $length = length $arguments->[1];
     if ($length) {
-        $length = $client_ref->{block_size} if
-            $length > $client_ref->{block_size};
-        $length = 2**16 if $length > 2**16;
-        $client_ref->{out} .= pack("a4V", "DATA", $length);
-        $client_ref->{out} .= substr($arguments->[1], 0, $length, "");
-        $client_ref->{nr_bytes} += $length;
+        my $want = $command->{send_high_water} - length $client_ref->{out};
+        $want > 0 || $client_ref->fatal("Bad water calculation: $want <= 0");
+        while (1) {
+            $length = $want if $length > $want;
+            $length = 2**16 if $length > 2**16;
+            $client_ref->{out} .= pack("a4V", "DATA", $length);
+            $client_ref->{out} .= substr($arguments->[1], 0, $length, "");
+            $client_ref->{nr_bytes} += $length;
+            $want = $command->{send_high_water} - length $client_ref->{out};
+            last if $want <= 0;
+            $length = length $arguments->[1] || last;
+        }
     }
     if ($arguments->[1] eq "") {
-        delete $command->{on_lowmark};
+        delete $command->{send_low_water};
         $client_ref->{out} .=
             pack("a4V", "DONE",
                  ($command->{mtime} //= int(realtime())) - EPOCH1970);
     }
+}
+
+sub _send_data_raw {
+    my ($client_ref, $command) = @_;
+
+    my $arguments = $command->arguments;
+    my $length = length $arguments->[1];
+    if ($length) {
+        my $want = $command->{send_high_water} - length $client_ref->{out};
+        $want > 0 || $client_ref->fatal("Bad water calculation: $want <= 0");
+        $length = $want if $length > $want;
+        $client_ref->{out} .= substr($arguments->[1], 0, $length, "");
+        $client_ref->{nr_bytes} += $length;
+    }
+    delete $command->{send_low_water} if $arguments->[1] eq "";
 }
 
 sub _transaction_timed_out {
@@ -1513,18 +1600,105 @@ sub _spawn_result {
     $client_ref->_connect_next;
 }
 
+sub suspend_read {
+    my ($client_ref) = @_;
+
+    $client_ref->fatal("Already suspended") if $client_ref->{read_suspended};
+    $client_ref->{socket} || $client_ref->fatal("suspend without socket");
+    $client_ref->{active} || $client_ref->fatal("suspend without active");
+    $client_ref->{timeout} = undef;
+    if (defined $client_ref->{in}) {
+        $client_ref->{socket}->delete_read;
+        $client_ref->{timeout} = undef if
+            $client_ref->{out} eq "" || $client_ref->{write_suspended};
+    }
+    $client_ref->{read_suspended} = 1;
+}
+
+sub resume_read {
+    my ($client_ref) = @_;
+
+    $client_ref->fatal("Not suspended") if !$client_ref->{read_suspended};
+    $client_ref->{socket} || $client_ref->fatal("resume without socket");
+    $client_ref->{active} || $client_ref->fatal("resume without active");
+    if (defined $client_ref->{in}) {
+        $client_ref->{socket}->add_read(sub { $client_ref->_reader });
+        if ($client_ref->{out} eq "" || $client_ref->{write_suspended}) {
+            my $command = $client_ref->{commands}[0] ||
+                $client_ref->fatal("resume without command");
+            my $timeout = $command->{$command->{COMMAND_REF}[FLAGS] & PHASE2 ?
+                                     "transaction_timeout2" : "transaction_timeout"};
+            $client_ref->{timeout} = timer(
+                $timeout // $client_ref->fatal("No transaction_timeout"),
+                sub { $client_ref->_transaction_timed_out });
+        }
+    }
+    $client_ref->{read_suspended} = 0;
+}
+
+sub suspend_write {
+    my ($client_ref) = @_;
+
+    $client_ref->fatal("Already suspended") if $client_ref->{write_suspended};
+    $client_ref->{socket} || $client_ref->fatal("suspend without socket");
+    $client_ref->{active} || $client_ref->fatal("suspend without active");
+    $client_ref->{timeout} = undef;
+    if ($client_ref->{out} ne "") {
+        $client_ref->{socket}->delete_write;
+        $client_ref->{timeout} = undef if
+            !defined $client_ref->{in} || $client_ref->{read_suspended};
+    }
+    $client_ref->{write_suspended} = 1;
+}
+
+sub resume_write {
+    my ($client_ref) = @_;
+
+    $client_ref->fatal("Not suspended") if !$client_ref->{write_suspended};
+    $client_ref->{socket} || $client_ref->fatal("resume without socket");
+    $client_ref->{active} || $client_ref->fatal("resume without active");
+    if ($client_ref->{out} ne "") {
+        $client_ref->{socket}->add_write(sub { $client_ref->_writeer });
+        if (!defined $client_ref->{in}) {
+            my $command = $client_ref->{commands}[0] ||
+                $client_ref->fatal("resume without command");
+            my $addr = $command->{address}[$command->{address_i}];
+            $client_ref->{timeout} = timer(
+                $addr->{connection_timeout} // $command->{connection_timeout} //
+                $client_ref->fatal("No connection_timeout"),
+                sub { $client_ref->_connection_timeout }
+            );
+        } elsif ($client_ref->{read_suspended}) {
+            my $command = $client_ref->{commands}[0] ||
+                $client_ref->fatal("resume without command");
+            my $timeout = $command->{$command->{COMMAND_REF}[FLAGS] & PHASE2 ?
+                                     "transaction_timeout2" : "transaction_timeout"};
+            $client_ref->{timeout} = timer(
+                $timeout // $client_ref->fatal("No transaction_timeout"),
+                sub { $client_ref->_transaction_timed_out });
+        }
+    }
+    $client_ref->{write_suspended} = 0;
+}
+
 sub _writer {
     my ($client_ref) = @_;
 
     my $rc = syswrite($client_ref->{socket}, $client_ref->{out}, $BLOCK_SIZE);
     if ($rc) {
         substr($client_ref->{out}, 0, $rc, "");
-        if ($client_ref->{sync} && length $client_ref->{out} < $client_ref->{block_size}) {
+        if ($client_ref->{sync}) {
             my $command = $client_ref->{commands}[0] ||
                 $client_ref->fatal("No command");
-            $command->{on_lowmark}->($client_ref, $command) if $command->{on_lowmark};
+            $command->{on_low_water}->($client_ref, $command) if
+                $command->{send_low_water} &&
+                length $client_ref->{out} < $command->{send_low_water};
         }
-        $client_ref->{socket}->delete_write if $client_ref->{out} eq "";
+        if ($client_ref->{out} eq "") {
+            $client_ref->{socket}->delete_write;
+            $client_ref->{timeout} = undef if $client_ref->{read_suspended};
+        }
+
         $client_ref->{sent} += $rc;
         return;
     }
@@ -1571,7 +1745,6 @@ sub _reader {
                     $client_ref->error("Spurious response bytes: $str");
                     return;
                 }
-                $client_ref->{sent} = 0;
                 if (defined $error) {
                     # Success
                     $client_ref->close;
@@ -1595,18 +1768,28 @@ sub _reader {
     my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("No command");
     my $command_ref = $command->{COMMAND_REF};
+    $client_ref->{in} .= $buffer;
     if ($client_ref->{out} ne "" || $client_ref->{sent} == 0) {
-        $buffer = display_string($buffer);
+        my $response = display_string($client_ref->{in});
         if ($client_ref->{out} eq "") {
             # Implies sent == 0
-            $client_ref->error("Response without having sent anything: $buffer");
-        } else {
-            $client_ref->error("Response while command has not yet completed: $buffer");
+            $client_ref->error("Response without having sent anything: $response");
+            return;
         }
-        return;
+        # So $client_ref->{out} ne ""
+        if ($client_ref->{sent} >= length $command->out) {
+            # This implies we are running some command with followup data
+            # E.g. Getting a FAIL while still sending send_v1 data is valid
+            # This had better be a final status message though
+            $client_ref->{expect_fail} = 1;
+            # (read obviously isn't suspended since we just got data)
+            $client_ref->suspend_write if !$client_ref->{write_suspended};
+        } else {
+            $client_ref->error("Response while command has not yet completed: $response");
+            return;
+        }
     }
 
-    $client_ref->{in} .= $buffer;
     if ($client_ref->{expect_eof}) {
         my $spurious = display_string($client_ref->{in});
         $client_ref->error("Spurious response bytes $spurious");
@@ -1621,7 +1804,6 @@ sub _reader {
         return;
     }
 
-    $client_ref->{sent} = 0;
     # Success
     if ($command_ref->[FLAGS] & EXPECT_EOF) {
         # Delay until actual EOF
@@ -1663,6 +1845,10 @@ sub check_response {
                 return FAILED, $response;
             }
             last if length $client_ref->{in} < $command_ref->[NR_BYTES];
+            if ($client_ref->{expect_fail}) {
+                my $response = display_string($client_ref->{in});
+                return BAD_ADB, "Response while command has not yet completed: $response";
+            }
             return SUCCEEDED, substr($client_ref->{in}, 0, $command_ref->[NR_BYTES], "");
         }
         if ($len_added == 0) {
@@ -1677,6 +1863,7 @@ sub check_response {
         }
         return;
     }
+
     my ($error, $str) = adb_check_response(
         $client_ref, $len_added, $command_ref->[NR_BYTES],
         $command_ref->[FLAGS] & EXPECT_EOF) or return;
@@ -1684,7 +1871,13 @@ sub check_response {
         $str = ($command_ref->[FLAGS] & SYNC) && !$client_ref->{sync} ?
             "Not inside SYNC" : "Device did not recognize command";
     }
-    utf8::decode($str) if !$error && $command_ref->[FLAGS] & UTF8_IN;
+    if (!$error) {
+        if ($client_ref->{expect_fail}) {
+            $str = display_string($str);
+            return BAD_ADB, "Response while command has not yet completed: $str";
+        }
+        utf8::decode($str) if $command_ref->[FLAGS] & UTF8_IN;
+    }
     return $error, $str;
 }
 
@@ -1802,13 +1995,9 @@ sub process_phase1 {
         # Wait for EOF
     }
     # need to wait for more bytes (typically when the device gets connected)
-    $client_ref->{timeout} = timer(
-        $command->{transaction_timeout2} //
-        $client_ref->fatal("No transaction_timeout"),
-        sub { $client_ref->_transaction_timed_out });
-    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
-    $client_ref->{sent} = 1;
     $client_ref->{active} = 1;
+    $client_ref->{read_suspended} = 1;
+    $client_ref->resume_read;
     return undef;
 }
 
@@ -1896,13 +2085,20 @@ sub process_list_v1 {
     # It seems we could get count from keys %{$command->{data}}
     # But the on_progress callback might not update $command->{data}
     $command->{count} //= 0;
+    my $path;
     while (length $client_ref->{in} >= 4) {
         my ($id, $mode, $size, $mtime, $length) =
             unpack("a4V4", $client_ref->{in});
         if ($id eq "DENT") {
             defined $length && length $client_ref->{in} >= 20 + $length || last;
+            ++$command->{count};
             my $file = substr($client_ref->{in}, 0, 20 + $length, "");
             substr($file, 0, 20, "");
+
+            # Possibly skip . and ..
+            next if ($file eq "." || $file eq "..") &&
+                !($command->{self_parent} // 1);
+
             if ($command->command_ref->[FLAGS] & UTF8_IN) {
                 utf8::decode($file);
                 # utf8::downgrade($file, 1);
@@ -1915,9 +2111,11 @@ sub process_list_v1 {
                 mtime	=> $mtime + EPOCH1970,
             };
             if ($command->{on_progress}) {
+                $path //= $command->arguments->[0];
                 eval {
                     $command->{on_progress}->($client_ref->client,
-                                              $command, $file, $stat);
+                                              $command->{data}, $file, $stat,
+                                              $path);
                 };
                 if ($@) {
                     my $err = $@;
@@ -1926,7 +2124,6 @@ sub process_list_v1 {
             } else {
                 $command->{data}{$file} = $stat;
             }
-            ++$command->{count};
         } elsif ($id eq "DONE") {
             defined $length && length $client_ref->{in} >= 20 + $length || last;
             substr($client_ref->{in}, 0, 20 + $length, "");
@@ -1945,7 +2142,6 @@ sub process_list_v1 {
                 $command->{todo} = [];
             }
             if ($command->{count}) {
-                my $path;
                 for my $f (sort keys %$result) {
                     $result->{$f}{ftype} eq "DIR" || next;
                     next if $f eq "." || $f eq "..";
@@ -1977,13 +2173,9 @@ sub process_list_v1 {
         }
     }
     # Go read more bytes
-    $client_ref->{timeout} = timer(
-        $command->{transaction_timeout} //
-            $client_ref->fatal("No transaction_timeout"),
-        sub { $client_ref->_transaction_timed_out });
-    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
-    $client_ref->{sent} = 1;
     $client_ref->{active} = 1;
+    $client_ref->{read_suspended} = 1;
+    $client_ref->resume_read;
     return undef;
 }
 
@@ -1996,24 +2188,33 @@ sub process_recv_v1 {
         my ($id, $length) = unpack("a4V", $client_ref->{in});
         if ($id eq "DATA") {
             defined $length && length $client_ref->{in} >= 8 + $length || last;
-            substr($client_ref->{in}, 0, 8, "");
+            substr($client_ref->{in}, 0, 8, "") unless $command->{raw};
             if ($command->{on_progress}) {
                 eval {
                     $command->{on_progress}->(
                         $client_ref->client,
-                        $command, substr($client_ref->{in}, 0, $length, ""));
+                        $command, $command->{raw} ?
+                        substr($client_ref->{in}, 0, $length+8, "") :
+                        substr($client_ref->{in}, 0, $length, ""));
                 };
                 if ($@) {
                     my $err = $@;
                     return \$err;
                 }
             } else {
-                $command->{data} .= substr($client_ref->{in}, 0, $length, "");
+                $command->{data} .= $command->{raw} ?
+                    substr($client_ref->{in}, 0, $length+8, "") :
+                    substr($client_ref->{in}, 0, $length, "");
             }
         } elsif ($id eq "DONE") {
-            # Should we ignore length instead ? It's supposed to always be 0
-            defined $length && length $client_ref->{in} >= 8 + $length || last;
-            substr($client_ref->{in}, 0, $length+8, "");
+            defined $length || last;
+            # We ignore the length on DONE
+            # return "DONE with length $length" if $length;
+            if ($command->{raw}) {
+                $command->{data} .= substr($client_ref->{in}, 0, 8, "");
+            } else {
+                substr($client_ref->{in}, 0, 8, "");
+            }
             if ($client_ref->{in} ne "") {
                 my $str = display_string($client_ref->{in});
                 return "Spurious response bytes: $str";
@@ -2028,13 +2229,9 @@ sub process_recv_v1 {
         }
     }
     # Go read more bytes
-    $client_ref->{timeout} = timer(
-        $command->{transaction_timeout} //
-            $client_ref->fatal("No transaction_timeout"),
-        sub { $client_ref->_transaction_timed_out });
-    $client_ref->{socket}->add_read(sub { $client_ref->_reader });
-    $client_ref->{sent} = 1;
     $client_ref->{active} = 1;
+    $client_ref->{read_suspended} = 1;
+    $client_ref->resume_read;
     return undef;
 }
 

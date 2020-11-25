@@ -40,6 +40,7 @@ t/91_real_adb.t
 t/98_fatal.t
 t/99_internals.t
 t/TestDrive.pm
+t/adb_fake_cover
 t/sdcard/adb_client_test/dir/bar
 t/sdcard/adb_client_test/empty
 t/sdcard/adb_client_test/foo

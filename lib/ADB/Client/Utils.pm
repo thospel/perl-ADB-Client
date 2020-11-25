@@ -23,15 +23,16 @@ use Exporter::Tidy
     other =>[qw(addr_info adb_addr_info info caller_info callers dumper
                 string_from_value display_string adb_check_response realtime
                 clocktime realtime_running clocktime_running ip_port_from_addr
-                addr_from_ip_port is_listening get_home errno_native time_to_adb
-                time_from_adb
-                _native adb_file_type_from_mode adb_permissions_from_mode
-                $me %errno_adb %errno_native %adb_mode_from_file_type
-                %adb_file_type_from_mode
-                $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
+                addr_from_ip_port is_listening time_to_adb time_from_adb
+                errno_adb errno_native_from_adb errno_adb_from_native
+                adb_file_type_from_mode adb_mode_from_file_type
+                adb_permissions_from_mode get_home
+                %errno_adb_from_native %errno_native_from_adb %errno_adb
+                %adb_mode_from_file_type %adb_file_type_from_mode
+                $me $BASE_REALTIME $BASE_CLOCKTIME $CLOCK_TYPE $SO_ACCEPTCONN
                 $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT $ADB_SERIAL
                 ADB_FILE_TYPE_MASK ADB_PERMISSION_MASK OKAY FAIL SUCCEEDED
-                FAILED BAD_ADB ASSERTION INFINITY DISPLAY_MAX EPOCH0 IPV6)];
+                FAILED BAD_ADB ASSERTION INFINITY DISPLAY_MAX EPOCH1970 IPV6)];
 
 use constant {
     # Code assumes OKAY and FAIL both have length 4, so you can't change this
@@ -43,7 +44,7 @@ use constant {
     BAD_ADB		=> 2,
     ASSERTION		=> 3,
     INFINITY		=> 9**9**9,
-    EPOCH0		=> Time::Local::timegm(0,0,0,1,0,1970),
+    EPOCH1970		=> Time::Local::timegm(0,0,0,1,0,1970),
     IPV6		=>
     socket(my $s, AF_INET6, SOCK_STREAM, IPPROTO_TCP) ? 1 :
     $! == EPROTONOSUPPORT ? 0 :
@@ -87,11 +88,11 @@ sub clocktime_running {
 }
 
 sub time_to_adb {
-    return shift() - EPOCH0;
+    return shift() - EPOCH1970;
 }
 
 sub time_from_adb {
-    return shift() + EPOCH0;
+    return shift() + EPOCH1970;
 }
 
 our $me;
@@ -498,16 +499,31 @@ our %_errno_adb = (
     ETXTBSY	=> [26, "Text file busy"],
 );
 
-our %errno_native = our %errno_adb = (0 => dualvar(0, ""));
+our %errno_adb_from_native = our %errno_native_from_adb = our %errno_adb = (0 => dualvar(0, ""));
 while (my ($key, $value) = each %_errno_adb) {
-    my $code = Errno->can($key) || die "Unknown errno $key";
-    my $err = local $! = eval { Errno->$key } || ENOPROTOOPT;
-    $errno_adb{$value->[0]} = dualvar($value->[0], $value->[1]);
-    $errno_native{$value->[0]} = local $! = $code->();
+    my $err_native = local $! = eval { Errno->$key } || ENOPROTOOPT;
+    my $err_adb = dualvar($value->[0], $value->[1]);;
+    $errno_adb{$value->[0]} = $err_adb;
+    $errno_native_from_adb{$value->[0]} = $err_native;
+    $errno_adb_from_native{$err_native+0} = $err_adb;
 }
 
-sub errno_native {
-    return $errno_native{0+shift};
+sub errno_adb {
+    my $errno = 0 + $_[0];
+    return $errno_adb{$errno} ||
+        croak "Unknown adb errno $errno ($_[0])";
+}
+
+sub errno_native_from_adb {
+    my $errno = 0 + $_[0];
+    return $errno_native_from_adb{$errno} ||
+        croak "Unknown adb errno $errno ($_[0])";
+}
+
+sub errno_adb_from_native {
+    my $errno = 0 + $_[0];
+    return $errno_adb_from_native{$errno} ||
+        croak "Unknown native errno $errno ($_[0])";
 }
 
 use constant {
@@ -517,7 +533,7 @@ use constant {
 
 our %adb_mode_from_file_type = (
     SOCK	=> 0140000,
-    LNK		=> 0120000,
+    LINK	=> 0120000,
     REG		=> 0100000,
     BLK		=> 0060000,
     DIR		=> 0040000,
@@ -531,6 +547,12 @@ sub adb_file_type_from_mode {
     my $mode = shift // croak "Undefined mode";
     return $adb_file_type_from_mode{$mode & ADB_FILE_TYPE_MASK} //
         croak sprintf "Cannot get file_type from %o", $mode;
+}
+
+sub adb_mode_from_file_type {
+    my $ftype = shift // croak "Undefined file type";
+    return $adb_mode_from_file_type{$ftype} //
+        croak sprintf("Unknown file_type '%s'", display_string($ftype));
 }
 
 sub adb_permissions_from_mode {

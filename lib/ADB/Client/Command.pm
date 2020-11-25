@@ -127,10 +127,6 @@ sub command_ref : method {
                 } else {
                     $command->{OUT} = pack("a4V/a*", $command_ref->[COMMAND], @_);
                 }
-                if (@_ > 1) {
-                    shift;
-                    $command->{ARGUMENTS} = \@_;
-                }
             } else {
                 $command->{OUT} = pack("a4x4", $command_ref->[COMMAND]);
             }
@@ -148,6 +144,7 @@ sub command_ref : method {
             }
             $command->{OUT} = sprintf("%04X", length $out) . $out;
         }
+        $command->{ARGUMENTS} = \@_;
     }
     $command->{COMMAND_REF} = $command_ref;
 }

@@ -16,10 +16,11 @@ use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
     qw(info caller_info callers dumper display_string adb_check_response
        ip_port_from_addr clocktime_running realtime adb_file_type_from_mode
-       time_from_adb time_to_adb
-       %errno_adb %adb_mode_from_file_type
+       adb_mode_from_file_type
+       %errno_adb %errno_native_from_adb
+       %adb_mode_from_file_type %adb_file_type_from_mode
        SUCCEEDED FAILED BAD_ADB ASSERTION INFINITY
-       ADB_FILE_TYPE_MASK ADB_PERMISSION_MASK
+       ADB_FILE_TYPE_MASK ADB_PERMISSION_MASK EPOCH1970
        $DEBUG $VERBOSE $QUIET $ADB_HOST $ADB_PORT),
     _prefix => "utils_", qw(addr_info);
 use Socket qw(IPPROTO_TCP IPPROTO_UDP SOCK_DGRAM SOCK_STREAM SOL_SOCKET
@@ -31,9 +32,6 @@ use ADB::Client::Tracker;
 use Exporter::Tidy
     other	=> [qw($CALLBACK_DEFAULT
                        $ADB_HOST $ADB_PORT $ADB $ADB_SOCKET $DEBUG $VERBOSE)];
-
-use constant {
-};
 
 our @CARP_NOT = qw(ADB::Client ADB::Client::Events);
 
@@ -49,14 +47,16 @@ our $CONNECTION_TIMEOUT = 10;
 our $SPAWN_TIMEOUT = 10;
 
 use constant {
-    FATAL	=> [_fatal	=> SPECIAL, \&ADB::Client::Ref::_fatal_run],
+    FATAL	=> [_fatal	=> SPECIAL, \&_fatal_run],
     MARKER	=> [marker	=> SPECIAL, \&_marker],
     CONNECT	=> [_connect	=> SPECIAL, \&_connect_start],
     SPAWN	=> [spawn	=> SPECIAL, \&_connect_start],
     VERSION	=> [version	=> "host:version", -1, EXPECT_EOF, \&process_version],
     KILL	=> [kill	=> "host:kill", 0, EXPECT_EOF],
+    FILE_TYPE_UNKNOWN	=> "UNKNOWN",
     # 92 is android ENOPROTOOPT
-    SYNC_ERROR	=> $errno_adb{92},
+    SYNC_ERROR_ADB	=> $errno_adb{92},
+    SYNC_ERROR_NATIVE	=> $errno_native_from_adb{92},
 };
 
 our @COMMANDS;
@@ -153,7 +153,7 @@ our @BUILTINS = (
     [stat_v2		=> "STA2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
     [lstat_v2		=> "LST2", 72, SYNC|UTF8_OUT, \&process_lstat_v2],
     [list_v1		=> "LIST", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE,
-     \&process_list_v1],
+     [\&process_list_v1, "recursive"]],
     # Unimplemented, I have no device supporting list_v2
     # [list_v2		=> "LIS2", 0, SYNC|UTF8_IN|UTF8_OUT|MAYBE_MORE],
     [send_v1		=> "SEND", 8, SYNC|UTF8_OUT|SEND, \&process_send_v1],
@@ -567,7 +567,14 @@ sub command_simple {
     if ($command_ref->[FLAGS] & SEND) {
         $client_ref->{nr_bytes} = 0;
         $command->{mtime} = delete $arguments->{mtime};
-        my $mode = delete $arguments->{mode} // 0644;
+        my $mode = delete $arguments->{mode};
+        if (!defined $mode) {
+            my $perms = delete $arguments->{perms} // 0644;
+            my $ftype = delete $arguments->{ftype} // "REG";
+            $mode = adb_mode_from_file_type($ftype) | $perms;
+        }
+        $mode |= adb_mode_from_file_type("REG") unless
+            $mode & ADB_FILE_TYPE_MASK;
         $mode == int($mode) || croak "Mode must be an integer";
         $mode == ($mode & (ADB_FILE_TYPE_MASK|ADB_PERMISSION_MASK)) ||
             croak sprintf "Spurious bits in mode %o", $mode;
@@ -733,6 +740,10 @@ sub command_retired {
     return shift->{command_retired};
 }
 
+sub command_current {
+    return shift->{commands}[0];
+}
+
 sub post_activate {
     my ($client_ref, $activate) = @_;
 
@@ -749,7 +760,7 @@ sub error {
 
     $client_ref->close();
     local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
-        $client_ref->fatal("error without command");
+        $client_ref->fatal("Error without command");
     local $client_ref->{post_activate} = 0;
     $client_ref->{command_retired}->{CALLBACK}->($client_ref->{client}, $err, @_);
     $client_ref->activate if $client_ref->{post_activate};
@@ -765,9 +776,8 @@ sub success {
 
     $client_ref->fatal("Active during success") if $client_ref->{active};
 
-    my $command = shift @{$client_ref->{commands}} ||
+    my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("Success without command");
-    local $client_ref->{command_retired} = $command;
 
     my $result = \@_;
     my $command_ref = $command->{COMMAND_REF};
@@ -785,12 +795,10 @@ sub success {
             }
             $err =~ s/\s+\z//;
             my $str = display_string($_[0]);
-            unshift @{$client_ref->{commands}}, $command;
             $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
             return;
         }
         if (ref $result ne "ARRAY") {
-            unshift @{$client_ref->{commands}}, $command;
             if (ref $result eq "SCALAR") {
                 $client_ref->close;
                 die $$result;
@@ -801,6 +809,8 @@ sub success {
             return;
         }
     }
+    local $client_ref->{command_retired} = shift @{$client_ref->{commands}} ||
+        $client_ref->fatal("Success without command");
     local $client_ref->{post_activate} = 1;
     $command->{CALLBACK}->($client_ref->{client}, undef, @$result);
     if ($client_ref->{post_activate}) {
@@ -899,20 +909,20 @@ sub _send_data {
     my ($client_ref, $command) = @_;
 
     my $arguments = $command->arguments;
-    my $length = length $arguments->[0];
+    my $length = length $arguments->[1];
     if ($length) {
         $length = $client_ref->{block_size} if
             $length > $client_ref->{block_size};
         $length = 2**16 if $length > 2**16;
         $client_ref->{out} .= pack("a4V", "DATA", $length);
-        $client_ref->{out} .= substr($arguments->[0], 0, $length, "");
+        $client_ref->{out} .= substr($arguments->[1], 0, $length, "");
         $client_ref->{nr_bytes} += $length;
     }
-    if ($arguments->[0] eq "") {
+    if ($arguments->[1] eq "") {
         delete $command->{on_lowmark};
         $client_ref->{out} .=
             pack("a4V", "DONE",
-                 time_to_adb($command->{mtime} //= int(realtime())));
+                 ($command->{mtime} //= int(realtime())) - EPOCH1970);
     }
 }
 
@@ -1693,7 +1703,7 @@ sub process_version {
 sub process_features {
     my ($features, $command_name, $client_ref) = @_;
 
-    my $filter = $client_ref->command_retired->{filter};
+    my $filter = $client_ref->command_current->{filter};
     $filter = { map(($_ => 1), @$filter) } if ref $filter eq "ARRAY";
 
     my %features;
@@ -1755,7 +1765,7 @@ sub process_devices {
         # Notice that close doesn't actually close the socket, it just removes
         # the reference. And since we have a copy the socket remains open
         $client_ref->close;
-        @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_retired->command_ref, $client_ref->{block_size}, \%devices, $client_ref->{in});
+        @tracker = ADB::Client::Tracker->new($socket, $client_ref->command_current->command_ref, $client_ref->{block_size}, \%devices, $client_ref->{in});
         $client_ref->{in} = "";
     }
     # return [\%devices, \@devices, shift, @tracker];
@@ -1775,7 +1785,7 @@ sub process_tport {
 sub process_phase1 {
     my ($command_ref_orig, $devices, $command_name, $client_ref, $result) = @_;
 
-    my $command = $client_ref->command_retired;
+    my $command = $client_ref->command_current;
     $command->{COMMAND_REF} = $command_ref_orig;
 
     if ($client_ref->{in} ne "" and
@@ -1853,11 +1863,13 @@ sub process_lstat_v1 {
 
     my ($id, $mode, $size, $mtime) = unpack("a4VVV", $bytes);
     $id eq $command_name || return "Inconsistent response '$id'";
-    return [SYNC_ERROR] unless $mode || $size || $mtime;
+    return [SYNC_ERROR_NATIVE, SYNC_ERROR_ADB] unless $mode || $size || $mtime;
     return [{
         mode	=> $mode,
+        perms	=> $mode & ADB_PERMISSION_MASK,
+        ftype	=> $adb_file_type_from_mode{$mode & ADB_FILE_TYPE_MASK} || FILE_TYPE_UNKNOWN,
         size	=> $size,
-        mtime	=> time_from_adb($mtime),
+        mtime	=> $mtime + EPOCH1970,
     }];
 }
 
@@ -1869,16 +1881,20 @@ sub process_lstat_v2 {
      @stat{qw(dev ino mode nlink uid gid size atime mtime ctime)}) =
          unpack("a4VQ<Q<VVVVQ<q<q<q<", $bytes);
     $id eq $command_name || return "Inconsistent response '$id'";
-    return [$errno_adb{$error}] if $error;
-    $stat{mtime} = time_from_adb($stat{mtime});
+    return [$errno_native_from_adb{$error}, $errno_adb{$error}] if $error;
+    $stat{perms} = $stat{mode} & ADB_PERMISSION_MASK;
+    $stat{ftype} = $adb_file_type_from_mode{$stat{mode} & ADB_FILE_TYPE_MASK} || FILE_TYPE_UNKNOWN,
+    $stat{$_} += EPOCH1970 for qw(mtime atime ctime);
     return [\%stat];
 }
 
 sub process_list_v1 {
     my (undef, $command_name, $client_ref) = @_;
 
-    my $command = $client_ref->command_retired;
-    $command->{data}  //= {};
+    my $command = $client_ref->command_current;
+    $command->{data} //= {};
+    # It seems we could get count from keys %{$command->{data}}
+    # But the on_progress callback might not update $command->{data}
     $command->{count} //= 0;
     while (length $client_ref->{in} >= 4) {
         my ($id, $mode, $size, $mtime, $length) =
@@ -1891,11 +1907,12 @@ sub process_list_v1 {
                 utf8::decode($file);
                 # utf8::downgrade($file, 1);
             }
-            ++$command->{count};
             my $stat = {
                 mode	=> $mode,
+                perms	=> $mode & ADB_PERMISSION_MASK,
+                ftype	=> $adb_file_type_from_mode{$mode & ADB_FILE_TYPE_MASK} || FILE_TYPE_UNKNOWN,
                 size	=> $size,
-                mtime	=> time_from_adb($mtime),
+                mtime	=> $mtime + EPOCH1970,
             };
             if ($command->{on_progress}) {
                 eval {
@@ -1909,6 +1926,7 @@ sub process_list_v1 {
             } else {
                 $command->{data}{$file} = $stat;
             }
+            ++$command->{count};
         } elsif ($id eq "DONE") {
             defined $length && length $client_ref->{in} >= 20 + $length || last;
             substr($client_ref->{in}, 0, 20 + $length, "");
@@ -1916,7 +1934,40 @@ sub process_list_v1 {
                 my $str = display_string($client_ref->{in});
                 return "Spurious response bytes: $str";
             }
-            return [$command->{count} ? $command->{data} : SYNC_ERROR];
+            my $result = $command->{count} ? $command->{data} : SYNC_ERROR_NATIVE;
+            $command->{recursive} || return [$result];
+            if ($command->{base}) {
+                my $next = shift @{$command->{todo}};
+                $$next = $result;
+            } else {
+                # First call
+                $command->{base} = $result;
+                $command->{todo} = [];
+            }
+            if ($command->{count}) {
+                my $path;
+                for my $f (sort keys %$result) {
+                    $result->{$f}{ftype} eq "DIR" || next;
+                    next if $f eq "." || $f eq "..";
+                    my $fenc = $f;
+                    if (($command->command_ref->[FLAGS] & UTF8_IN) &&
+                        !($command->command_ref->[FLAGS] & UTF8_OUT)) {
+                        utf8::encode($fenc);
+                    } elsif (!($command->command_ref->[FLAGS] & UTF8_IN) &&
+                             ($command->command_ref->[FLAGS] & UTF8_OUT)) {
+                        utf8::decode($fenc);
+                    }
+                    $path //= $command->arguments->[0];
+                    $result->{$f}{tree} = "$path/$fenc";
+                    push @{$command->{todo}}, \$result->{$f}{tree};
+                }
+            }
+            my $next = $command->{todo}[0] || return [$command->{base}];
+            $command->command_ref($command->command_ref, $$next);
+            $command->{count} = 0;
+            $command->{data} = {};
+            $client_ref->activate;
+            return undef;
         } elsif ($id eq "FAIL") {
             my ($err, $str) = $client_ref->check_response(length $client_ref->{in}, $command->command_ref) or last;
             $err || $client_ref->fatal("FAIL succeeded");
@@ -1939,7 +1990,7 @@ sub process_list_v1 {
 sub process_recv_v1 {
     my (undef, undef, $client_ref) = @_;
 
-    my $command = $client_ref->command_retired;
+    my $command = $client_ref->command_current;
     $command->{data} //= "";
     while (length $client_ref->{in} >= 4) {
         my ($id, $length) = unpack("a4V", $client_ref->{in});
@@ -1991,7 +2042,7 @@ sub process_send_v1 {
     my ($bytes, undef, $client_ref) = @_;
     my $id = unpack("a4", $bytes);
     $id eq "OKAY" || return "Inconsistent response '$id'";
-    return [$client_ref->{nr_bytes}, $client_ref->command_retired->{mtime}];
+    return [$client_ref->{nr_bytes}, $client_ref->command_current->{mtime}];
 }
 
 1;

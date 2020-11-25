@@ -16,7 +16,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 
-use Test::More tests => 32;
+use Test::More tests => 37;
 use TestDrive qw(adb_start dumper);
 
 # We already checked loading in 04_adb_client.t
@@ -25,15 +25,19 @@ use ADB::Client qw(mainloop);
 my $port = adb_start();
 my $client = new_ok("ADB::Client" =>
                     [host => "127.0.0.1", port => $port]);
+ok(!$client->is_fatal, "We know the client isn't fatal");
 is($client->version(), 39, "Expected Version");
 ok($client->_connect(), "Can connect");
+ok(!$client->is_fatal, "We know the client still isn't fatal");
 eval { $client->fatal("Bullet") };
 like($@, qr{^Fatal: Assertion: Bullet at }, "Expected fatal error");
+ok($client->is_fatal, "We know the client is fatal");
 for my $i (1..2) {
     eval { $client->activate(0) };
     like($@, qr{^Attempt to restart a dead ADB::Client at },
          "Expected fatal error [$i]");
 }
+ok($client->is_fatal, "We know the client is fatal");
 
 # Ok, mount a scratch ADB::Client
 $client = new_ok("ADB::Client" =>
@@ -59,6 +63,8 @@ $client->version(callback => $callback);
 eval { mainloop() };
 like($@, qr{^Attempt to restart a dead ADB::Client at },
      "Expected dead ADB::Client");
+ok($client->is_fatal, "We know the client is fatal");
+
 # dumper(\@results);
 is_deeply(\@results, [ [ 0, undef, 39 ]], "The commands before _fatal do run");
 for my $i (1..2) {

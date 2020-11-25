@@ -95,7 +95,7 @@ sub activate {
 
 # Simply forward command
 for my $name (
-    qw(connected host port adb_socket fatal addr_info _addr_info
+    qw(connected host port adb_socket fatal addr_info _addr_info is_fatal
        connection_data command_retired post_activate blocking)) {
     my %replace = (
         NAME	=> $name,

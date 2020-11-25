@@ -468,10 +468,13 @@ All listeners behave like independent ADB servers
 }
 
 package ADB;
+use Fcntl qw(O_WRONLY O_CREAT O_TRUNC);
 use Scalar::Util qw(refaddr weaken);
 use Carp;
 # use ADB::Client::Utils qw(callers);
-use ADB::Client::Utils qw(display_string info time_to_adb time_from_adb
+use ADB::Client::Utils qw(%adb_mode_from_file_type
+                          errno_adb_from_native
+                          display_string info time_to_adb time_from_adb
                           adb_file_type_from_mode adb_permissions_from_mode);
 
 use constant {
@@ -641,9 +644,6 @@ sub send_read {
             my $path = $state->sync_filecheck($file) // return;
             close(delete $state->{send_fh}) ||
                 return $state->adb_sync_fail("Could not close '$file': $^E");
-            # Mask because we don't want to leave writable stuff
-            chmod(delete($state->{send_perms}) & 0755 | 0200, $path) ||
-                return $state->adb_sync_fail("Could not chmod '$file': $^E");
             my $mtime = time_from_adb($length);
             utime($mtime, $mtime, $path) ||
                 return $state->adb_sync_fail("Could not utime '$file': $^E");
@@ -1183,16 +1183,17 @@ sub sync_filecheck {
     return $root . $file;
 }
 
-# Todo: native to android (linux) mode convertor
 sub stat_massage {
     my $lstat = shift ne "STA2";
-    my $mode = $_[MODE];
+    my $mode = $_[MODE] & 07777;
     if ($lstat && -l _) {
         $mode &= ~0133;
+        $mode |= $adb_mode_from_file_type{"LINK"};
     } else {
         # Drop world read, copy user to group
         $mode &= ~0074;
         $mode |= $mode >> 3 & 070;
+        $mode |= $adb_mode_from_file_type{-f _ ? "REG" : -d _ ? "DIR" : die "Unimplemented mode" };
     }
     $_[MODE]  = $mode;
     $_[UID] = $_[GID] = 0;
@@ -1222,8 +1223,7 @@ sub command_lstat_v2 {
         stat_massage($command, @stat);
         $state->output(pack("a4x4Q<Q<VVVVQ<q<q<q<", $command, @stat[DEV, INO, MODE, NLINK, UID, GID, SIZE, ATIME, MTIME, CTIME]));
     } else {
-        # Todo: native to android (linux) $! convertor
-        $state->output(pack("a4Vx64", $command, $!+0));
+        $state->output(pack("a4Vx64", $command, errno_adb_from_native($!)));
     }
 }
 
@@ -1256,8 +1256,8 @@ sub command_recv_v1 {
         $state->output(pack("a4V/a*", "DATA", $_)) while <$fh>;
         $state->output(pack("a4x4", "DONE"));
     } else {
-        # Todo: native to android (linux) $! message convertor
-        $state->adb_sync_fail("read failed: $!");
+        my $err = errno_adb_from_native($!);
+        $state->adb_sync_fail("read failed: $err");
     }
 }
 
@@ -1269,18 +1269,27 @@ sub command_send_v1 {
         my $path = $state->sync_filecheck($file) // return;
         my $type = adb_file_type_from_mode($mode);
         if ($type eq "REG") {
-            if (open(my $fh, ">", $path)) {
+            # Owner will be able to write (mimic my android device)
+            my $perms = adb_permissions_from_mode($mode) | 0200;
+            # Mask because we don't want to leave world/group writable stuff
+            # This all happens inside a directory that was created with mode
+            # 0700 (see filesystem() in TestDrive) so there is no security issue
+            # with a more permissive umask
+            my $umask_old = umask(022);
+            if (sysopen(my $fh, $path, O_WRONLY|O_CREAT|O_TRUNC, $perms)) {
+                umask($umask_old);
                 # What does android do if you open a symlink ?
                 $state->{send_fh} = $fh;
                 $state->{send_file} = $file;
-                $state->{send_perms} = adb_permissions_from_mode($mode);
+                $state->{send_perms} =
                 $state->{on_read} = \&send_read;
             } else {
-                # I haven't actually checked what a real device does here
-                $state->adb_sync_fail("Write failed: $!");
+                umask($umask_old);
+                $state->adb_sync_fail("couldn't create file: $!");
             }
         } else {
-            # I haven't actually checked what a real device does here
+            # There aren't any bad file types in the real implementation
+            # There is special hadling to create symlinks
             $state->adb_sync_fail("No support for $type files");
         }
     } else {

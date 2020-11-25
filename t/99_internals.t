@@ -55,6 +55,7 @@ END {
         [ "delete_error $socket_fd"],
         "Entering mainloop (level 0)",
         "Exiting mainloop (level 0)",
+        "Unloop (level 0)",
         "Entering mainloop (level 1)",
         "Exiting mainloop (level 1)",
     ], "Expected add and delete info lines") ||
@@ -532,7 +533,7 @@ is($retired->command_ref, $fatal_ref, "Command ref is now FATAL");
 $retired = undef;
 
 eval { $client->client_ref->error("Boem") };
-like($@, qr{^Fatal: Assertion: error without command at },
+like($@, qr{^Fatal: Assertion: Error without command at },
      "Expected error from version");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);

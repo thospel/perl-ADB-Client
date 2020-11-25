@@ -349,7 +349,9 @@ sub filesystem {
     $id ||= "android";
     $tmp_dir ||= tempdir(CLEANUP => 1);
     my $base = "$tmp_dir/$id";
-    mkdir($base) || croak "Could not mkdir($base): $^E";
+    # Disallow others from doing evil things
+    # (assuming the path to $tmp_dir itself is safe from symlink attacks)
+    mkdir($base, 0700) || croak "Could not mkdir($base): $^E";
     # Need a symlink target of length 21 to match my real device
     my $target = "emulatedemulatedemula";
     mkdir("$base/$target") ||

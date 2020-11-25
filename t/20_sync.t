@@ -14,7 +14,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 
 my $tests;
-BEGIN { $tests = 56 }
+BEGIN { $tests = 57 }
 use Test::More tests => $tests;
 
 use TestDrive qw($tests_driver $tests_pre $t_dir
@@ -66,6 +66,7 @@ SKIP : {
 
 END {
   SKIP: {
+        local $?;
         skip "No cleanup for plain user", 2 unless $developer;
         skip "Nothing to cleanup", 2 unless $created;
         is(adb_run("-e", "shell", "rm -rf $adb_dir && echo done"),
@@ -92,7 +93,9 @@ is_deeply(\@result, [{
     # mode	=> 0120777,
     mode	=> 0120644,
     mtime	=> $result[0]{mtime},
-    size	=> 21
+    size	=> 21,
+    ftype	=> "LINK",
+    perms	=> 0644,
   }
 ], "Can run lstat_v1 on /sdcard") || dumper(\@result);
 
@@ -106,6 +109,8 @@ is_deeply(\@result, [{
     ino => $result[0]{ino},
     mode => 0120644,
     # mode => 0120777,
+    ftype => "LINK",
+    perms => 0644,
     mtime => $result[0]{mtime},
     nlink => 1,
     size => 21,
@@ -119,7 +124,7 @@ isa_ok($result[0], "HASH", "Which");
 SKIP: {
     skip "stat_v2 result is not a hash", 2 unless ref $result[0] eq "HASH";
     is_deeply([sort keys %{$result[0]}],
-              [qw(atime ctime dev gid ino mode mtime nlink size uid)],
+              [qw(atime ctime dev ftype gid ino mode mtime nlink perms size uid)],
               "Can run stat_v2 on /sdcard") || dumper([sort keys %{$result[0]}]);
     is($result[0]{mode}, 040771, "Get proper file mode");
 }
@@ -133,14 +138,18 @@ SKIP: {
     # skip "list_v1 result does not include . and ..", 1 unless %{$result[0]};
     is_deeply(\@result, [{
         "." => {
-            "mode" => 040771,
-            "mtime" => $result[0]{"."}{mtime},
-            "size" => 4096
+            mode => 040771,
+            ftype => "DIR",
+            perms => 0771,
+            mtime => $result[0]{"."}{mtime},
+            size => $result[0]{"."}{size},
         },
         ".." => {
-            "mode" => 040771,
-            "mtime" => $result[0]{".."}{mtime},
-            "size" => 4096
+            mode => 040771,
+            ftype => "DIR",
+            perms => 0771,
+            mtime => $result[0]{".."}{mtime},
+            size => $result[0]{".."}{size},
         }
     }], "List v1 on empty directory") ||dumper(\@result);
 }
@@ -156,22 +165,24 @@ my @progress;
 is_deeply(\@result, [{ "." => 1, ".." => 1 }], "Got modified result") ||
     dumper(\@result);
 is_deeply(\@progress, [
-  [
-    ".",
-    {
-      "mode" => 040771,
-      "mtime" => $progress[0][1]{mtime},
-      "size" => 4096
-    }
-  ],
-  [
-    "..",
-    {
-      "mode" => 040771,
-      "mtime" =>  $progress[1][1]{mtime},
-      "size" => 4096
-    }
-  ]
+    [".",
+     {
+         mode => 040771,
+         ftype => "DIR",
+         perms => 0771,
+         mtime => $progress[0][1]{mtime},
+         size => $progress[0][1]{size},
+     }
+ ],
+    ["..",
+     {
+         mode => 040771,
+         ftype => "DIR",
+         perms => 0771,
+         mtime =>  $progress[1][1]{mtime},
+         size => $progress[1][1]{size},
+     }
+ ]
 ], "Got on_progress callbacks") || dumper(\@progress);
 
 @result = $client->list_v1("$adb_dir/does_not_exist");
@@ -189,11 +200,86 @@ is_deeply(\@files, [qw(. .. dir empty empty_dir foo), $utf8_file],
           "Proper list of files") || dumper(\@files);
 my $stat_foo = $result[0]{foo};
 isa_ok($stat_foo, "HASH", "Any single stat entry");
-is_deeply([sort keys %$stat_foo], [qw(mode mtime size)],
+is_deeply([sort keys %$stat_foo], [qw(ftype mode mtime perms size)],
           "Expected stat keys") || dumper($stat_foo);
 is($stat_foo->{mode}, 0100660, "Expected mode");
 is(adb_file_type_from_mode($stat_foo->{mode}), "REG", "foo is a regulat file");
 is(adb_file_type_from_mode($result[0]{dir}{mode}), "DIR", "dir is a directory");
+
+# Try list_v1 recusrive
+@result = $client->list_v1($adb_dir, recursive => 1, on_progress => sub {
+    my ($client, $command, $file, $stat) = @_;
+    delete @$stat{qw(mtime size)};
+    $command->{data}{$file} = $stat;
+});
+is_deeply(\@result, [
+  {
+    "." => {
+      ftype => "DIR",
+      mode => 040771,
+      perms => 0771
+    },
+    ".." => {
+      ftype => "DIR",
+      mode => 040771,
+      perms => 0771
+    },
+    dir => {
+      ftype => "DIR",
+      mode => 040771,
+      perms => 0771,
+      tree => {
+        "." => {
+          ftype => "DIR",
+          mode => 040771,
+          perms => 0771
+        },
+        ".." => {
+          ftype => "DIR",
+          mode => 040771,
+          perms => 0771
+        },
+        bar => {
+          ftype => "REG",
+          mode => 0100660,
+          perms => 0660
+        }
+      }
+    },
+    empty => {
+      ftype => "REG",
+      mode => 0100660,
+      perms => 0660
+    },
+    empty_dir => {
+      ftype => "DIR",
+      mode => 040771,
+      perms => 0771,
+      tree => {
+        "." => {
+          ftype => "DIR",
+          mode => 040771,
+          perms => 0771
+        },
+        ".." => {
+          ftype => "DIR",
+          mode => 040771,
+          perms => 0771
+        }
+      }
+    },
+    foo => {
+      ftype => "REG",
+      mode => 0100660,
+      perms => 0660
+    },
+    "f\x{f3}\x{f2}\x{1321}" => {
+      ftype => "REG",
+      mode => 0100660,
+      perms => 0660
+    }
+  }
+], "Recursive directory") || dumper(\@result);
 
 # Try list v2
 if (0) {
@@ -246,6 +332,8 @@ cmp_ok($mtime, "<=", $time_after, "Time upper bound") || dumper(\@result);
 @result = $client->lstat_v1("$adb_dir/bar");
 is_deeply(\@result, [{
     mode => 0100660,
+    ftype => "REG",
+    perms => 0660,
     mtime => $mtime,
     size => $content_length,
 }], "Expected stat of new file") || dumper(\@result);
@@ -256,12 +344,16 @@ SKIP: {
     $content .= pack("N", rand(2**32)) for 1..2**16;
     my $content_length = length($content);
     my ($length, $mtime) = $client->send_v1("$adb_dir/bar", $content,
-                                            mtime => 8, mode => 0444);
+                                            mtime => 8,
+                                            ftype => "REG",
+                                            perms => 0444);
     is($length, $content_length, "Expected length");
     is($mtime, 8, "Expected mtime");
     my $stat = $client->lstat_v1("$adb_dir/bar");
     is_deeply($stat, {
         mode => 0100660,
+        ftype => "REG",
+        perms => 0660,
         mtime => 8,
         size => 4*2**16,
     }, "Expected stat") || dumper($stat);

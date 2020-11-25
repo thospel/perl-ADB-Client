@@ -33,6 +33,7 @@ WriteMakefile
          "Term::ReadLine"	=> "0.0",
          # "IO::Socket::IP"	=> "0.38",
          "File::Copy::Recursive"=> "0.41",
+         "IO::AIO"		=> "4.31",
      },
      ABSTRACT		=> 'Download a novel from the web and convert it to epub',
      AUTHOR		=> 'Ton Hospel <ADB-Client@ton.iguana.be>',

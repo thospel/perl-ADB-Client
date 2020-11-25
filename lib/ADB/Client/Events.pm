@@ -9,6 +9,7 @@ use ADB::Client::Timer qw(timers_collect timers_run);
 use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
 
 our $EVENT_INITER = \&event_init;
+our $AIO_INITER = \&aio_init;
 
 my ($timer, $immediate);
 BEGIN {
@@ -35,8 +36,8 @@ BEGIN {
 }
 
 use Exporter::Tidy
-    other => [qw(mainloop unloop loop_levels event_init
-                 $IGNORE_PIPE_LOCAL $EVENT_INITER)],
+    other => [qw(mainloop unloop loop_levels event_init aio_init
+                 $IGNORE_PIPE_LOCAL $EVENT_INITER $AIO_INITER)],
     _map => {
         # Can't just export the placeholders since the replace will not
         # impact the imported symbol
@@ -49,6 +50,7 @@ use Exporter::Tidy
 
 our $IGNORE_PIPE_LOCAL = 0;
 
+my $read_fixed = 0;
 my $read_mask  = "";
 my $write_mask = "";
 my $error_mask = "";
@@ -132,6 +134,7 @@ sub delete_error(*) {
 
 sub unloop {
     my $loop_levels = shift // -1;
+    info("Unloop (level $loop_levels)") if $DEBUG;
     $unlooping[$loop_levels] = shift || 1;
 }
 
@@ -149,18 +152,21 @@ sub mainloop {
         my ($r, $w, $e);
         until ($unlooping[-1]) {
             my $timeout = timers_collect();
-            $timeout // (%read_refs || %write_refs || %error_refs || last);
+            $timeout // (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
             if ((select($r = $read_mask,
                         $w = $write_mask,
-                        $e = $error_mask, $timeout) || (timers_run(), next)) > 0) {
+                        $e = $error_mask, $timeout) || next) > 0) {
                 $$_ && $$_->() for
                     \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     \@write_refs{grep vec($w, $_, 1), keys %write_refs},
                     \@error_refs{grep vec($e, $_, 1), keys %error_refs};
-                timers_run();
-            } elsif ($! != EINTR) {
+            } elsif ($! == EINTR) {
+                redo;
+            } else {
                 die "Select failed: $^E";
             }
+        } continue {
+            timers_run();
         }
         info("Exiting mainloop (level $level)") if $VERBOSE || $DEBUG;
     };
@@ -185,6 +191,19 @@ sub event_init {
     *immediate = \&ADB::Client::Timer::immediate;
 
     $EVENT_INITER = undef;
+}
+
+sub aio_init {
+    $AIO_INITER || return;
+    require IO::AIO;
+
+    $EVENT_INITER->() if $EVENT_INITER;
+    my $fd = IO::AIO::poll_fileno();
+    $read_refs{$fd} = \&IO::AIO::poll_cb;
+    vec($read_mask, $fd, 1) = 1;
+    ++$read_fixed;
+
+    $AIO_INITER = undef;
 }
 
 1;

@@ -72,7 +72,7 @@ our @BUILTINS = (
     # commands that autoclose and loses state for the ones that leave the
     # connection open for following commands
     # close() itself is not exposed to the user since it messes up the state
-    # if the queue is active. Use post_activate if you want to stall the queue
+    # if the queue is active. Use post_action if you want to stall the queue
     [_close		=> SPECIAL, \&_closer],
     [forget		=> SPECIAL, \&_forget],
     [resolve		=> SPECIAL, \&_resolve],
@@ -246,7 +246,7 @@ sub new {
         active		=> undef,
         commands	=> [],
         command_retired	=> undef,
-        post_activate	=> undef,
+        post_action	=> undef,
         result		=> undef,
         starter		=> undef,
         $DEBUG ? (callers => callers()) : (),
@@ -365,7 +365,7 @@ sub callback_blocking {
         my $client_ref = $ {shift()};
         $client_ref->fatal("No wait pending") if !defined $client_ref->{result};
         $client_ref->fatal("Result already set") if $client_ref->{result};
-        $client_ref->fatal("We are not the final command") if @{$client_ref->{commands}};
+        $client_ref->fatal("We are not the final command") if @{$client_ref->{commands}} > 1;
         $client_ref->{result} = \@_;
         unloop($loop_levels);
     };
@@ -786,21 +786,17 @@ sub close : method {
     $client_ref->{starter} = undef;
 }
 
-sub command_retired {
-    return shift->{command_retired};
-}
-
 sub command_current {
     return shift->{commands}[0];
 }
 
-sub post_activate {
-    my ($client_ref, $activate) = @_;
+sub post_action {
+    my ($client_ref, $action) = @_;
 
-    defined $activate || croak "Missing post_activate argument";
-    my $old = $client_ref->{post_activate} //
-        croak "post_activate outside success or error callback";
-    $client_ref->{post_activate} = $activate ? 1 : 0;
+    defined $action || croak "Missing post_action argument";
+    my $old = $client_ref->{post_action} //
+        croak "post_action outside success or error callback";
+    $client_ref->{post_action} = $action ? 1 : 0;
     return $old;
 }
 
@@ -809,21 +805,30 @@ sub error {
     my $err = shift || "Unknown error";
 
     $client_ref->close();
-    local $client_ref->{command_retired} = shift @{$client_ref->{commands}} //
+
+    my $command = $client_ref->{commands}[0] ||
         $client_ref->fatal("Error without command");
-    local $client_ref->{post_activate} = 0;
-    my $callback = $client_ref->{command_retired}->{CALLBACK};
+    my $callback = $command->{CALLBACK} ||
+        $client_ref->fatal("Command without callback");
     unshift @_, $err;
-    if (ref $callback eq "ARRAY") {
-        my $client = $client_ref->{client};
-        for my $c (@$callback) {
-            $c->($client, @_);
+    local $client_ref->{post_action} = 1;
+    eval {
+        if (ref $callback eq "ARRAY") {
+            my $client = $client_ref->{client};
+            for my $c (@$callback) {
+                $c->($client, @_);
+            }
+        } else {
+            $callback->($client_ref->{client}, @_);
         }
-    } else {
-        $callback->($client_ref->{client}, @_);
+    };
+    if ($@) {
+        shift @{$client_ref->{commands}} //
+            $client_ref->fatal("Error without command");
+        die $@;
     }
-    $client_ref->activate if $client_ref->{post_activate};
-    # Make sure not to return anything
+    !$client_ref->{post_action} || shift @{$client_ref->{commands}} //
+        $client_ref->fatal("Error without command");
     return;
 }
 
@@ -852,7 +857,7 @@ sub success {
                 $client_ref->close;
                 die $err;
             }
-            $err =~ s/\s+\z//;
+            $err =~ s/\.?\s*\z//;
             my $str = display_string($_[0]);
             $client_ref->error("Assertion: Could not process $command_ref->[COMMAND] output $str: $err");
             return;
@@ -868,24 +873,31 @@ sub success {
             return;
         }
     }
-    local $client_ref->{command_retired} = shift @{$client_ref->{commands}} ||
-        $client_ref->fatal("Success without command");
-    local $client_ref->{post_activate} = 1;
-    my $callback = $client_ref->{command_retired}->{CALLBACK};
+    my $callback = $command->{CALLBACK} ||
+        $client_ref->fatal("Command without callback");
     unshift @$result, undef;
-    if (ref $callback eq "ARRAY") {
-        my $client = $client_ref->{client};
-        for my $c (@$callback) {
-            $c->($client, @$result);
+    local $client_ref->{post_action} = 1;
+    eval {
+        if (ref $callback eq "ARRAY") {
+            my $client = $client_ref->{client};
+            for my $c (@$callback) {
+                $c->($client, @$result);
+            }
+        } else {
+            $callback->($client_ref->{client}, @$result);
         }
-    } else {
-        $callback->($client_ref->{client}, @$result);
+    };
+    if ($@) {
+        shift @{$client_ref->{commands}} //
+            $client_ref->fatal("Success without command");
+        die $@;
     }
-    if ($client_ref->{post_activate}) {
-        $client_ref->{post_activate} = 0;
+    if ($client_ref->{post_action}) {
+        shift @{$client_ref->{commands}} ||
+            $client_ref->fatal("Success without command");
+        $client_ref->{post_action} = 0;
         $client_ref->activate;
     }
-    # Make sure not to return anything
     return;
 }
 
@@ -894,7 +906,7 @@ sub success {
 sub activate {
     my ($client_ref, $top_level) = @_;
 
-    return if $client_ref->{active} || !@{$client_ref->{commands}} || $client_ref->{post_activate};
+    return if $client_ref->{active} || !@{$client_ref->{commands}} || $client_ref->{post_action};
 
     for (1) {
         my $command = $client_ref->{commands}[0];
@@ -1092,11 +1104,11 @@ sub connector {
 sub _connector {
     my $client_ref = shift->client_ref;
 
-    # Hack! This tells the success (and error) method not to call activate
-    $client_ref->post_activate(0);
+    # Hack! This tells the success (and error) method not to drop the command
+    # (and not call activate)
+    $client_ref->post_action(0);
 
-    my $command = $client_ref->{command_retired};
-    unshift @{$client_ref->{commands}}, $command;
+    my $command = $client_ref->{commands}[0] ;
     my $old_step = $command->{step};
     $command->{step} = \&_connect_step;
     $command->{COMMAND_REF} = $command->{command_ref};

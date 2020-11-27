@@ -418,14 +418,14 @@ like($@, qr{^Model without client_ref at }, "");
 # Try some bad ADB::Client::Ref commands
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
-eval { $client->post_activate() };
-like($@, qr{^Missing post_activate argument at },
+eval { $client->post_action() };
+like($@, qr{^Missing post_action argument at },
      "Expected error from version");
-eval { $client->post_activate(undef) };
-like($@, qr{^Missing post_activate argument at },
+eval { $client->post_action(undef) };
+like($@, qr{^Missing post_action argument at },
      "Expected error from version");
-eval { $client->post_activate(0) };
-like($@, qr{^post_activate outside success or error callback at },
+eval { $client->post_action(0) };
+like($@, qr{^post_action outside success or error callback at },
      "Expected error from version");
 
 is($client->connection_data, undef, "connection_data starts undef");
@@ -510,9 +510,9 @@ $client->resolve(
     host => "Waffle",
     callback => sub {
         my ($client, $err) = @_;
-        $retired = $client->command_retired;
+        $retired = $client->command_current;
         $result = $err;
-        $client->post_activate(1);
+        $client->post_action(1);
     });
 {
     no warnings "redefine";

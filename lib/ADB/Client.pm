@@ -96,7 +96,8 @@ sub activate {
 # Simply forward command
 for my $name (
     qw(connected host port adb_socket fatal addr_info _addr_info is_fatal
-       connection_data command_current post_action blocking)) {
+       connection_data command_current post_action blocking
+       suspendable resumable)) {
     my %replace = (
         NAME	=> $name,
         FILE	=> __FILE__,

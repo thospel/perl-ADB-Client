@@ -138,8 +138,7 @@ sub acceptable {
     my $state = $class->new($socket, $listener->{type}, $listener->next_id);
     weaken($state->{listener} = $listener);
     $listener->{accepted}{$state->{key}} = $state;
-    weaken(my $s = $state);
-    $socket->add_read(sub { $s->reader });
+    $state->{reader} = $socket->add_read(\&Accepted::reader, $state);
     if ($listener->{type} == BLACKHOLE) {
         $state->output($listener->{arg}{hello}) if $listener->{arg}{hello} ne "";
         $state->{bytes_left} = $listener->{arg}{n};
@@ -187,10 +186,8 @@ sub add_listener {
     } else {
         $specials{$key} = $listener;
     }
-    if ($type != UNACCEPTABLE && $type != UNREACHABLE) {
-        weaken(my $l = $listener);
-        $socket->add_read(sub { acceptable($l) });
-    }
+    $listener->{reader} = $socket->add_read(\&acceptable, $listener) if
+        $type != UNACCEPTABLE && $type != UNREACHABLE;
     return $listener->{port};
 }
 
@@ -292,7 +289,8 @@ sub main {
         my $port = add_listener(CONTROL);
         print("Port: $port\n") || die "print: $^E";
         mainloop();
-        print("Close: $nr_listening $nr_accepted $nr_devices\n") || die "print: $^E";
+        print("Close: $nr_listening $nr_accepted $nr_devices\n") ||
+            die "Final print failed: $^E";
     }
 }
 
@@ -339,7 +337,7 @@ sub writer {
         info("Response(%s) > \t%s", $state->{id}, string_from_value($written)) if
             $verbose && $state->isa("ADB");;
         if ($state->{out} eq "") {
-            $state->{socket}->delete_write();
+            $state->{writer} = undef;
             $state->{timeout} = undef;
             if (my $written = delete $state->{written}) {
                 weaken($state);
@@ -367,8 +365,8 @@ sub output {
     die "Unexpected upgrade string" if utf8::is_utf8($str);
 
     if ($state->{out} eq "") {
+        $state->{writer} = $state->{socket}->add_write(\&writer, $state);
         weaken(my $s = $state);
-        $state->{socket}->add_write(sub { $s->writer });
         $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
     }
     $state->{out} .= $str;
@@ -380,10 +378,7 @@ sub DESTROY {
 
     # Rescue sockets so they will get closed by the final _exit
     push @sockets, $state->{socket} if $finish;
-    $state->{socket}->delete_write if $state->{out} ne "";
-    $state->{socket}->delete_read;
-    $state->{timeout} = undef;
-
+    $state->{writer} = undef if $state->{out} ne "";
     --$nr_accepted;
 }
 
@@ -1499,10 +1494,6 @@ sub DESTROY {
 
     # Rescue sockets so they will get closed by the final _exit
     push @sockets, $listener->{socket} if $finish;
-    $listener->{type} == ::UNACCEPTABLE ||
-        $listener->{type} == ::UNREACHABLE ||
-        $listener->{socket}->delete_read;
-
     --$nr_listening;
 }
 

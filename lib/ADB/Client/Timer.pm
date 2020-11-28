@@ -2,6 +2,9 @@ package ADB::Client::Timer;
 # A small timer manager
 use strict;
 use warnings;
+
+our $VERSION = '1.000';
+
 use Scalar::Util qw(weaken refaddr);
 use Carp;
 

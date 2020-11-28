@@ -62,18 +62,18 @@ sub delete {
         $starter->{pid_adb} = undef;
     }
     $starter->{timeout} = undef;
+    # Removes the reader for either exec_rd or rd
+    $starter->{reader} = undef;
     if ($starter->{exec_rd}) {
-        $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
         $starter->{rd} = undef;
         $starter->{log_rd} = undef;
     } else {
         if ($starter->{rd}) {
-            $starter->{rd}->delete_read;
             $starter->{rd} = undef;
         }
         if ($starter->{log_rd}) {
-            $starter->{log_rd}->delete_read;
+            $starter->{log_reader} = undef;
             $starter->{log_rd} = undef;
         }
     }
@@ -233,7 +233,7 @@ sub _spawn {
     close($wr) || die "Assertion: Error closing adb writer: $^E";
 
     $exec_rd->blocking(0);
-    $exec_rd->add_read(sub { $starter->_reader_exec });
+    $starter->{reader} = $exec_rd->add_read(\&_reader_exec, $starter);
     $starter->{exec_rd} = $exec_rd;
     $starter->{log_rd}  = $log_rd;
 
@@ -307,8 +307,11 @@ sub join {
         in		=> "",
         log_in	=> "",
         rd		=> undef,
-        log_rd		=> undef,
         exec_rd		=> undef,
+        # Shared reader for rd and exec_rd
+        reader		=> undef,
+        log_rd		=> undef,
+        log_reader	=> undef,
         timeout		=> undef,
     }, $class;
     ++$objects;
@@ -347,12 +350,10 @@ sub _reader_exec {
 
         $starter->{timeout} = timer($ADB_SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
 
-        $starter->{exec_rd}->delete_read;
         $starter->{exec_rd} = undef;
-
-        $starter->{rd}->add_read(sub { $starter->_reader });
-        $starter->{log_rd}->add_read(sub { $starter->_reader_log }) if
-            $starter->{log_rd};
+        # This also deletes the reader on socket exec_rd
+        $starter->{reader} = $starter->{rd}->add_read(\&_reader, $starter);
+        $starter->{log_reader} = $starter->{log_rd}->add_read(\&_reader_log, $starter);
 
         my $pid = waitpid($starter->{pid}, 0);
         warn("Assertion: Failed to wait for $pid") if $pid <= 0;
@@ -396,7 +397,7 @@ sub _reader_log {
     } elsif (defined $rc) {
         # EOF
         if ($starter->{rd}) {
-            $starter->{log_rd}->delete_read;
+            $starter->{log_reader} = undef;
             $starter->{log_rd} = undef;
             # We'll wait for $starter->{rd} to finish
         } else {
@@ -445,9 +446,9 @@ sub _reader {
             warn("ADB server on $starter->{ip} port $starter->{port} started without logging\n") if $starter->{unlog};
             $starter->close(undef, $starter->{port});
         } elsif ($starter->{log_rd}) {
-            $starter->{rd}->delete_read;
+            $starter->{reader} = undef;
             $starter->{rd} = undef;
-            # We'll wait for $starter->{log_rd} to finish
+            # Leave log_reader. We'll wait for $starter->{log_rd} to finish
         } else {
             # _nok always does a delete
             $starter->_nok();

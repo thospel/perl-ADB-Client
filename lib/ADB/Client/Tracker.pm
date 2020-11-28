@@ -24,6 +24,7 @@ sub new {
     return bless {
         socket		=> $socket,
         in		=> $in,
+        reader		=> undef,
         result		=> undef,
         current		=> {%$current},
         command_ref	=> $command_ref,
@@ -41,7 +42,7 @@ sub track {
     croak "Socket closed" if !$tracker->{socket};
     weaken($tracker);
     if ($tracker->{in} eq "") {
-        $tracker->{socket}->add_read(sub { $tracker->_reader });
+        $tracker->{reader} = $tracker->{socket}->add_read(\&_reader, $tracker);
     } else {
         $tracker->{timeout} = immediate(sub { $tracker->_process });
     }
@@ -57,7 +58,7 @@ sub untrack {
     if ($tracker->{timeout}) {
         $tracker->{timeout} = undef;
     } else {
-        $tracker->{socket}->delete_read;
+        $tracker->{reader} = undef;
     }
 }
 
@@ -81,7 +82,7 @@ sub _process {
 
     if ($tracker->{timeout}) {
         $tracker->{timeout} = undef;
-        $tracker->{socket}->add_read(sub { $tracker->_reader });
+        $tracker->{reader} = undef;
     }
     while (length $tracker->{in} >= 4) {
         my $len = substr($tracker->{in}, 0, 4);

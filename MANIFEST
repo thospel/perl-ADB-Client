@@ -35,6 +35,7 @@ t/20_sync.t
 t/40_ipv6.t
 t/41_non_loopback.t
 t/80_syntax.t
+t/81_event_speed.t
 t/90_real_adbd.t
 t/91_real_adb.t
 t/98_fatal.t

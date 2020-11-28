@@ -21,7 +21,7 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 753;
+use Test::More tests => 747;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
@@ -170,7 +170,9 @@ mainloop();
 event_init();
 
 my $read = 0;
-$socket->add_read(sub { $socket->delete_read; return $read = 1 });
+my $obj = [];
+my $reader;
+$reader = $socket->add_read(sub { $reader = undef; return $read = 1 }, $obj);
 
 my $timed = 0;
 my $immed = 0;
@@ -249,31 +251,19 @@ cmp_ok(\&immediate, '==', \&ADB::Client::Events::immediate,
 
 for my $name (qw(read write error)) {
     my $err;
-    my $add_name    = "add_$name";
-    my $delete_name = "delete_$name";
-    my $add_fun    = ADB::Client::Events->can($add_name);
-    my $delete_fun = ADB::Client::Events->can($delete_name);
+    my $add_name = "add_$name";
+    my $add_fun  = ADB::Client::Events->can($add_name);
 
-    $socket1->$add_name(sub {});
+    my $handle = $socket1->$add_name(sub {}, $obj);
 
     eval { $add_fun->(0) };
     like($@, qr{^Not a filehandle at },
          "Proper eror from $add_name call on non fh");
 
-    eval { $delete_fun->(0) };
-    like($@, qr{^Not a filehandle at },
-         "Proper eror from $add_name call on non fh");
-
-    $socket->$add_name(sub {});
-    eval { $socket->$add_name(sub {}) };
+    $handle = $socket->$add_name(sub {}, $obj);
+    eval { $socket->$add_name(sub {}, $obj) };
     like($@, qr{^Descriptor \d+ already selected for $name at },
          "Proper eror from duplicate $add_name call");
-    $socket->$delete_name($socket);
-    eval { $socket->$delete_name(sub {}) };
-    like($@, qr{^Descriptor \d+ wasn't selected for $name at }a,
-         "Proper eror from duplicate $add_name call");
-
-    $socket1->$delete_name(sub {});
 }
 
 my $client = new_ok("ADB::Client", [port => $port]);
@@ -318,10 +308,12 @@ ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { retu
 eval { ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]) };
 like($@, qr{^Attempt to redefine already existing command 'version0' at },
      "Cannot create command twice");
+diag(__LINE__);
 eval { $client->version0 };
 like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
+diag(__LINE__);
 
 eval {
     local @ADB::Client::Ref::BUILTINS = [foo => "foo", -1, SERIAL];
@@ -603,9 +595,7 @@ $ADB::Client::Command::DEBUG = 1;
 }
 for my $name (qw(read write error)) {
     my $add_name    = "add_$name";
-    my $delete_name = "delete_$name";
-    $socket->$add_name(sub {});
-    $socket->$delete_name;
+    my $handle = $socket->$add_name(sub {}, $obj);
 }
 $ADB::Client::Events::VERBOSE = 1;
 mainloop();
@@ -618,8 +608,8 @@ mainloop();
     local *ADB::Client::Events::caller_info = sub {};
     local *ADB::Client::Events::info        = sub {};
     # Avoid ADB::Client::Ref::delete creating a final FATAL command object
-    *ADB::Client::Command::new        = sub {};
-    $socket->add_read(sub {});
+    *ADB::Client::Command::new = sub {};
+    my $reader = $socket->add_read(sub {}, $obj);
     close($socket);
     eval { mainloop() };
     like($@, qr{^Select failed: }, "Proper error on bad filedescriptor");

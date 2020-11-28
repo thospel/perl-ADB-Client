@@ -22,8 +22,6 @@ use constant {
     # It's up to the SPECIAL commands to give meaning to elements after this
     CODE	=> 2,
 
-    EMPTY_ARGUMENTS	=> [],
-
     SPECIAL	=> "",
 };
 
@@ -165,8 +163,9 @@ sub command_ref : method {
 sub arguments {
     return shift->{ARGUMENTS} if @_ <= 1;
 
-    my ($command, $arguments) = @_;
-    $command->{ARGUMENTS} = $arguments;
+    my $command = shift;
+    $command->{ARGUMENTS} = shift;
+    return;
 }
 
 sub command_name {
@@ -175,6 +174,13 @@ sub command_name {
 
 sub out {
     return shift->{OUT};
+}
+
+sub data {
+    my $command = shift;
+
+    return ref $command->{DATA} eq "" ? \$command->{DATA} : $command->{DATA} if !@_;
+    $command->{DATA} = shift;
 }
 
 sub objects {

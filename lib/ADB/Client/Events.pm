@@ -2,14 +2,19 @@ package ADB::Client::Events;
 # A small event core
 use strict;
 use warnings;
+
+our $VERSION = '1.000';
+
 use Carp;
 use Errno qw(EINTR);
+use Scalar::Util qw(weaken isweak);
 
 use ADB::Client::Timer qw(timers_collect timers_run);
-use ADB::Client::Utils qw(info caller_info $DEBUG $VERBOSE);
+use ADB::Client::Utils qw(dumper info caller_info $DEBUG $VERBOSE);
 
 our $EVENT_INITER = \&event_init;
 our $AIO_INITER = \&aio_init;
+# our ($DEBUG, $VERBOSE);
 
 my ($timer, $immediate);
 BEGIN {
@@ -56,41 +61,13 @@ my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
 
-package ADB::Client;
-our ($DEBUG, $VERBOSE);
-
-package ADB::Client::Events;
-sub add_read(*$ ) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
-    caller_info("add_read $fd") if $DEBUG;
-    croak "Descriptor $fd already selected for read" if $read_refs{$fd};
-    $read_refs{$fd} = shift;
-    vec($read_mask, $fd, 1) = 1;
-}
-
-sub add_write(*$ ) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
-    caller_info("add_write $fd") if $DEBUG;
-    croak "Descriptor $fd already selected for write" if $write_refs{$fd};
-    $write_refs{$fd} = shift;
-    vec($write_mask, $fd, 1) = 1;
-}
-
-sub add_error(*$ ) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
-    caller_info("add_error $fd") if $DEBUG;
-    croak "Descriptor $fd already selected for error" if $error_refs{$fd};
-    $error_refs{$fd} = shift;
-    vec($error_mask, $fd, 1) = 1;
-}
-
-sub delete_read(*) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
+use constant NOP => [sub {}, -1, []];
+sub ADB::Client::Events::Read::DESTROY {
+    my $fd = shift->[1] // die "No filedescriptor";
     caller_info("delete_read $fd") if $DEBUG;
-    croak "Descriptor $fd wasn't selected for read" unless $read_refs{$fd};
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $read_refs{$fd} = undef;
+    $read_refs{$fd} = NOP;
     delete $read_refs{$fd};
     if (%read_refs) {
         vec($read_mask, $fd, 1) = 0;
@@ -100,13 +77,12 @@ sub delete_read(*) {
     }
 }
 
-sub delete_write(*) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
-    caller_info("delete_write $fd") if $DEBUG;
-    croak "Descriptor $fd wasn't selected for write" unless $write_refs{$fd};
+sub ADB::Client::Events::Write::DESTROY {
+    my $fd = shift->[1] // die "No filedescriptor";
+    caller_info("delete_write $fd") if $ADB::Client::Events::DEBUG;
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $write_refs{$fd} = undef;
+    $write_refs{$fd} = NOP;
     delete $write_refs{$fd};
     if (%write_refs) {
         vec($write_mask, $fd, 1) = 0;
@@ -116,13 +92,12 @@ sub delete_write(*) {
     }
 }
 
-sub delete_error(*) {
-    my $fd = fileno(shift) // croak "Not a filehandle";
-    caller_info("delete_error $fd") if $DEBUG;
-    croak "Descriptor $fd wasn't selected for error" unless $error_refs{$fd};
+sub ADB::Client::Events::Error::DESTROY {
+    my $fd = shift->[1] // die "No filedescriptor";
+    caller_info("delete_error $fd") if $ADB::Client::Events::DEBUG;
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $error_refs{$fd} = undef;
+    $error_refs{$fd} = NOP;
     delete $error_refs{$fd};
     if (%error_refs) {
         vec($error_mask, $fd, 1) = 0;
@@ -130,6 +105,47 @@ sub delete_error(*) {
     } else {
         $error_mask = "";
     }
+}
+
+package ADB::Client::Events;
+sub add_read {
+    my $fd = fileno(shift) // croak "Not a filehandle";
+    caller_info("add_read $fd") if $DEBUG;
+    croak "Descriptor $fd already selected for read" if $read_refs{$fd};
+    vec($read_mask, $fd, 1) = 1;
+    weaken($read_refs{$fd} = my $obj =
+           bless [shift, $fd, [@_]], "ADB::Client::Events::Read");
+    weaken($obj->[2][0]);
+    return $obj;
+}
+
+sub add_write {
+    my $fd = fileno(shift) // croak "Not a filehandle";
+    caller_info("add_write $fd") if $DEBUG;
+    croak "Descriptor $fd already selected for write" if $write_refs{$fd};
+    vec($write_mask, $fd, 1) = 1;
+    weaken($write_refs{$fd} = my $obj =
+           bless [shift, $fd, [@_]], "ADB::Client::Events::Write");
+    weaken($obj->[2][0]);
+    return $obj;
+}
+
+sub add_error {
+    my $fd = fileno(shift) // croak "Not a filehandle";
+    caller_info("add_error $fd") if $DEBUG;
+    croak "Descriptor $fd already selected for error" if $error_refs{$fd};
+    vec($error_mask, $fd, 1) = 1;
+    weaken($error_refs{$fd} = my $obj =
+           bless [shift, $fd, [@_]], "ADB::Client::Events::Error");
+    weaken($obj->[2][0]);
+    return $obj;
+}
+
+sub reader {
+    my $fh = shift;
+    my $callback = shift;
+    my $object = shift;
+    $fh->add_read
 }
 
 sub unloop {
@@ -149,14 +165,22 @@ sub mainloop {
     eval {
         info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
-        my ($r, $w, $e);
+        my ($r, $w, $e, $name);
         until ($unlooping[-1]) {
             my $timeout = timers_collect();
             $timeout // (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
             if ((select($r = $read_mask,
                         $w = $write_mask,
                         $e = $error_mask, $timeout) || next) > 0) {
-                $$_ && $$_->() for
+                # The reference taking is because the stack doesn't keep values
+                # alive, so any deletes on xxx_refs during the loop can make
+                # the value go poof. The reference temporarily increases the
+                # refcount so the value doesn't go away. That is also why the
+                # delete_xxx functions set the value to false before delete
+                # $$_ and $name = $$_->[1] and $$_->[0]->$name(@{$$_->[2]}) for
+                # $$_ and $$_->() for
+                $$_->[0]->(@{$$_->[2]}) for
+                # $$_ and $$_->[0]->(@{$$_->[1]}[1..$#{$$_->[1]}]) for
                     \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     \@write_refs{grep vec($w, $_, 1), keys %write_refs},
                     \@error_refs{grep vec($e, $_, 1), keys %error_refs};
@@ -184,9 +208,6 @@ sub event_init {
     *IO::Handle::add_read     = \&add_read;
     *IO::Handle::add_write    = \&add_write;
     *IO::Handle::add_error    = \&add_error;
-    *IO::Handle::delete_read  = \&delete_read;
-    *IO::Handle::delete_write = \&delete_write;
-    *IO::Handle::delete_error = \&delete_error;
     *timer     = \&ADB::Client::Timer::timer;
     *immediate = \&ADB::Client::Timer::immediate;
 

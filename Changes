@@ -1,7 +1,0 @@
-Revision history for Perl extension ADB::Client.
-
-1.000	2020-11-27 20:52:12 UT
-
-0.01  Tue Oct 13 16:54:24 2020
-	- original version; created by h2xs 1.23 with options
-		-b 5.8.1 -AXn ADB::Client

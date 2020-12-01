@@ -27,7 +27,8 @@ $SIG{__DIE__} = sub {
     BAIL_OUT("Unexpected exception: @_");
 };
 
-immediate(sub {});
+my $obj = bless [];
+immediate($obj, sub {});
 
 my $port = adb_start();
 # $port = 5037;

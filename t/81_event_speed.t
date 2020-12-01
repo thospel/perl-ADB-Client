@@ -61,7 +61,7 @@ $count = 0;
 $buffer = "a";
 $reader = $rd->add_read ($ref, \&reader);
 $writer = $wr->add_write($ref, \&writer);
-my $timeout = timer(1, \&stop_loop);
+my $timeout = timer(1, $ref, \&stop_loop);
 
 my $period = clocktime();
 mainloop();

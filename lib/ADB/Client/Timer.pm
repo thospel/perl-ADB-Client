@@ -24,42 +24,22 @@ my @expired;
 my @immediate;
 
 # Timer indices
-sub TIME	() { 0 };
-sub INDEX	() { 1 };
-sub CODE	() { 2 };	# Must come after INDEX
-sub CALLERS	() { 3 };
-
-# Timers are kept in a simple binary heap @timers
-sub new {
-    my ($class, $time, $fun) = @_;
-
-    $time += clocktime();
-    my $i = @timers;
-    while ($i > 1 && $time < $timers[$i >> 1][TIME]) {
-        weaken($timers[$i] = $timers[$i >> 1]);
-        $i = ($timers[$i][INDEX] = $i) >> 1;
-    }
-    my $timer = bless [$time, $i, $fun], $class;
-    weaken($timers[$i] = $timer);
-    if ($DEBUG) {
-        my $callers = callers();
-        $timer->[CALLERS] = $callers;
-        info("add Timer(%s) %08x [%s]", $_[1], refaddr($timer), $callers);
-    }
-    return $timer;
-}
+sub INDEX	() { 0 };
+sub TIME	() { 1 };
+sub OBJ		() { 2 };	# Must come after TIME
+sub CODE	() { 3 };
+sub CALLERS	() { 4 };
 
 # Timers are kept in a simple binary heap @timers
 sub timer {
-    my ($time, $fun) = @_;
-
-    $time += clocktime();
+    my $time = shift() + clocktime();
     my $i = @timers;
     while ($i > 1 && $time < $timers[$i >> 1][TIME]) {
         weaken($timers[$i] = $timers[$i >> 1]);
         $i = ($timers[$i][INDEX] = $i) >> 1;
     }
-    my $timer = bless [$time, $i, $fun];
+    my $timer = bless [$i, $time, @_];
+    weaken($timer->[OBJ]);
     weaken($timers[$i] = $timer);
     if ($DEBUG) {
         my $callers = callers();
@@ -70,10 +50,9 @@ sub timer {
 }
 
 sub immediate {
-    my ($fun) = @_;
-
     # If we ever expose the TIME element we should put clocktime() there
-    my $timer = bless [0, 0, $fun];
+    my $timer = bless [0, 0, @_];
+    weaken($timer->[OBJ]);
     weaken($immediate[@immediate] = $timer);
     if ($DEBUG) {
         my $callers = callers();
@@ -98,7 +77,7 @@ sub delete : method {
     if (!$i) {
         croak "Not a timer reference" unless defined($i) && $i == 0;
         # Could be a timer sitting on the expired queue in run_now
-        $#$timer = INDEX if @$timer > INDEX;
+        $#$timer = TIME if @$timer > TIME;
         return;
     }
     $timer->[INDEX] = 0;
@@ -216,7 +195,7 @@ sub timers_run {
     my $fun;
 
     # Using while instead of for in case a callback dies
-    ($fun = shift @expired) && $fun->[CODE] && $fun->[CODE]->() while @expired;
+    ($fun = shift @expired) && $fun->[OBJ] && $fun->[CODE]->($fun->[OBJ]) while @expired;
 }
 
 1;

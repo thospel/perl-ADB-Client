@@ -44,7 +44,7 @@ sub track {
     if ($tracker->{in} eq "") {
         $tracker->{reader} = $tracker->{socket}->add_read($tracker, \&_reader);
     } else {
-        $tracker->{timeout} = immediate(sub { $tracker->_process });
+        $tracker->{timeout} = immediate($tracker, \&_process);
     }
     $tracker->{callback} = $callback;
 }

@@ -184,22 +184,22 @@ cmp_ok(\&immediate, '!=', \&ADB::Client::Events::immediate,
 
 package Foo;
 my @timers = (
-    ::timer(0,  sub { ++$timed }),			# 0
-    ::immediate(sub { ++$immed }),			# 1
-    ::immediate(sub { ++$immed }),
-    ADB::Client::Timer->new(-1, sub { ++$timed }),
-    ADB::Client::Timer->new(-3, sub { ++$timed }),
-    ADB::Client::Timer->new(-6, sub { ++$timed }),
-    ADB::Client::Timer->new(-2, sub { ++$timed }),
-    ADB::Client::Timer->new(-4, sub { ++$timed }),
-    ADB::Client::Timer->new(-5, sub { ++$timed }),
-    ADB::Client::Timer->new(1e-6, sub { ++$timed }),
-    ADB::Client::Timer->new(2e-6, sub { ++$timed }),
-    ADB::Client::Timer->new(3e-6, sub { ++$timed }),
-    ADB::Client::Timer->new(4e-6, sub { ++$timed }),
-    ADB::Client::Timer->new(2, sub { ++$timed }),
-    ADB::Client::Timer->new(4, sub { ++$timed }),
-    ADB::Client::Timer->new(3, sub { ++$timed }),
+    ::timer(0,  $obj, sub { ++$timed }),			# 0
+    ::immediate($obj, sub { ++$immed }),			# 1
+    ::immediate($obj, sub { ++$immed }),
+    ::timer(-1, $obj, sub { ++$timed }),
+    ::timer(-3, $obj, sub { ++$timed }),
+    ::timer(-6, $obj, sub { ++$timed }),
+    ::timer(-2, $obj, sub { ++$timed }),
+    ::timer(-4, $obj, sub { ++$timed }),
+    ::timer(-5, $obj, sub { ++$timed }),
+    ::timer(1e-6, $obj, sub { ++$timed }),
+    ::timer(2e-6, $obj, sub { ++$timed }),
+    ::timer(3e-6, $obj, sub { ++$timed }),
+    ::timer(4e-6, $obj, sub { ++$timed }),
+    ::timer(2, $obj, sub { ++$timed }),
+    ::timer(4, $obj, sub { ++$timed }),
+    ::timer(3, $obj, sub { ++$timed }),
 );
 $timers[2] = undef;
 $timers[5] = undef;
@@ -229,8 +229,8 @@ cmp_ok(\&timer, '!=', \&ADB::Client::Events::timer,
        "timer is the placeholder");
 cmp_ok(\&immediate, '!=', \&ADB::Client::Events::immediate,
        "immediate is the placeholder");
-push @timers, timer(0, sub { ++$timed });
-push @timers, immediate(sub { ++$immed });
+push @timers, timer(0, $obj, sub { ++$timed });
+push @timers, immediate($obj, sub { ++$immed });
 cmp_ok(\&timer, '==', \&ADB::Client::Events::timer,
        "timer is replaced");
 cmp_ok(\&immediate, '==', \&ADB::Client::Events::immediate,
@@ -308,10 +308,12 @@ ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { retu
 eval { ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]) };
 like($@, qr{^Attempt to redefine already existing command 'version0' at },
      "Cannot create command twice");
+diag(__LINE__);
 eval { $client->version0 };
 like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
+diag(__LINE__);
 
 eval {
     local @ADB::Client::Ref::BUILTINS = [foo => "foo", -1, SERIAL];

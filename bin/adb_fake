@@ -205,14 +205,15 @@ sub timed_out {
     finish();
 }
 
+my $dummy_obj = bless [];
 # Push the idle timeout forward
 sub unidle {
-    $idle_timer = timer($idle_timeout, \&timed_out);
+    $idle_timer = timer($idle_timeout, $dummy_obj, \&timed_out);
 }
 
 # Push the alarm forward
 sub unalarm {
-    $alarm_timer = timer($idle_timeout, \&unalarm);
+    $alarm_timer = timer($idle_timeout, $dummy_obj, \&unalarm);
     # This alarm should never trigger.
     # But it's our last resort in case the event system gets stuck
     alarm $idle_timeout + 3;
@@ -273,7 +274,9 @@ sub daemon {
         !$all ? "127.0.0.1" :
         IPV6 ? "::" :
         "0.0.0.0";
-    $sleeper = timer($sleep, sub {
+    $sleeper = timer($sleep,
+                     $dummy_obj,
+                     sub {
         my $p = add_listener(LISTENER, $ADB_VERSION2, $ip, $port);
         my $OK = $port ? "OK" : "OK $p";
         print($reply "$OK\n") || die "Could not write to fd $reply_fd: $^E";
@@ -366,8 +369,9 @@ sub output {
 
     if ($state->{out} eq "") {
         $state->{writer} = $state->{socket}->add_write($state, \&writer);
-        weaken(my $s = $state);
-        $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
+        $state->{timeout} = timer($state->{write_timeout}, $state, sub {
+                                      my $state = shift;
+                                      $state->{on_error}->($state, "Write timed out") });
     }
     $state->{out} .= $str;
 }

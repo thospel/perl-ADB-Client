@@ -119,16 +119,19 @@ sub close : method {
     $starter->{pid_adb} = undef;
 
     for my $client_ref (@{$starter->{client_refs}}{sort { $a <=> $b } keys %{$starter->{client_refs}}}) {
-        # The DESTROY should clean out $starter->{client_refs}
+        # $client_ref is weak everywhere, so it can have gone poof
+        $client_ref || next;
+        # The SpawnRef DESTROY should clean out $starter->{client_refs}
         $client_ref->{starter} = undef;
         # don't naively try to optimise this without timers
         # join() can call this method and when join returns the caller does not
         # yet expect the carpet to have been yanked out from under him
         $client_ref->{timeout} = immediate(
+            $client_ref,
             sub {
                 # It's up to _spawn_result to clear timeout
                 # $client_ref->{timeout} = undef;
-                $client_ref->_spawn_result(@msg);
+                shift->_spawn_result(@msg);
             }
         );
     }
@@ -256,7 +259,7 @@ sub join {
     my ($addr, $adb_socket);
     if (defined fileno $bind_addr) {
         $addr = getsockname($bind_addr) ||
--            return "Cannot getsockname: $^E";
+            return "Cannot getsockname: $^E";
         if (!eval { is_listening($bind_addr) }) {
             $@ || return "Socket is not listening";
             $@ =~ s/ at .*//s;
@@ -348,7 +351,7 @@ sub _reader_exec {
             return;
         }
 
-        $starter->{timeout} = timer($ADB_SPAWN_TIMEOUT, sub {$starter->_timeout("TERM")});
+        $starter->{timeout} = timer($ADB_SPAWN_TIMEOUT, $starter, sub {shift->_timeout("TERM")});
 
         $starter->{exec_rd} = undef;
         # This also deletes the reader on socket exec_rd
@@ -381,11 +384,11 @@ sub _timeout {
     } else {
         $starter->{killed} = $signal;
         if ($signal ne "KILL") {
-            $starter->{timeout} = timer($SIGTERM_TIMEOUT, sub {$starter->_timeout("KILL")});
+            $starter->{timeout} = timer($SIGTERM_TIMEOUT, $starter, sub {shift->_timeout("KILL")});
             return;
         }
     }
-    $starter->{timeout} = timer($SIGKILL_TIMEOUT, sub {$starter->_timeout});
+    $starter->{timeout} = timer($SIGKILL_TIMEOUT, $starter, \&_timeout);
 }
 
 sub _reader_log {

@@ -60,10 +60,12 @@ my $callback = sub { push @results, [shift->connected, @{dclone(\@_)}] };
 $client->version(callback => $callback);
 $client->_fatal(callback => $callback);
 $client->version(callback => $callback);
+diag(__LINE__);
 eval { mainloop() };
 like($@, qr{^Attempt to restart a dead ADB::Client at },
      "Expected dead ADB::Client");
 ok($client->is_fatal, "We know the client is fatal");
+diag(__LINE__);
 
 # dumper(\@results);
 is_deeply(\@results, [ [ 0, undef, 39 ]], "The commands before _fatal do run");

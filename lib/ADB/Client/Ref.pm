@@ -325,6 +325,7 @@ sub delete {
 sub fatal {
     my ($client_ref, $msg) = @_;
     $client_ref->delete;
+    # confess "Fatal: Assertion: $msg";
     confess "Fatal: Assertion: $msg";
 }
 
@@ -916,6 +917,17 @@ sub success {
     return;
 }
 
+sub activate_delayed {
+    my ($client_ref) = @_;
+
+    $client_ref->{active} ||
+        $client_ref->fatal("Something deactived but left timeout");
+    $client_ref->{timeout} = undef;
+    $client_ref->{in} = "" if $client_ref->{socket};
+    $client_ref->{active} = 0;
+    $client_ref->activate;
+}
+
 # If used inside a calback (toplevel false) nothing after this call should
 # change client_ref state, so typically this should be the last thing you do
 sub activate {
@@ -940,13 +952,7 @@ sub activate {
             # First get rid of top_level.
             # It's too annoying to always have to handle that as a special case
             if ($top_level) {
-                $client_ref->{timeout} = immediate(sub {
-                    $client_ref->{active} ||
-                        $client_ref->fatal("Something deactived but left timeout");
-                    $client_ref->{timeout} = undef;
-                    $client_ref->{in} = "" if $client_ref->{socket};
-                    $client_ref->{active} = 0;
-                    $client_ref->activate });
+                $client_ref->{timeout} = immediate($client_ref, \&activate_delayed);
                 # We don't expect any read here, but it's needed to maintain our
                 # invariant active & socket => reader || !defined in
                 $client_ref->{in} = undef if $client_ref->{socket};
@@ -989,7 +995,7 @@ sub activate {
         $client_ref->{timeout} = timer(
             $command->{transaction_timeout} //
             $client_ref->fatal("No transaction_timeout"),
-            sub { $client_ref->_transaction_timed_out });
+            $client_ref, \&_transaction_timed_out);
 
         $command->{source}->($client_ref, $command) if
             $command->{source} &&
@@ -1319,8 +1325,7 @@ sub _connect_next {
             $client_ref->{timeout} = timer(
                 $addr->{connection_timeout} // $command->{connection_timeout} //
                 $client_ref->fatal("No connection_timeout"),
-                sub { $client_ref->_connection_timeout }
-            );
+                $client_ref, \&_connection_timeout);
             $client_ref->{active} = 1;
             return;
         } else {
@@ -1584,7 +1589,8 @@ sub _connect_step_spawn {
     $client_ref->{starter} = $result;
     $client_ref->{timeout} = timer(
         $addr->{spawn_timeout} // $client_ref->{spawn_timeout},
-        sub { $client_ref->_spawn_result("Operation timed out")});
+        $client_ref,
+        sub { shift->_spawn_result("Operation timed out")});
     $client_ref->{active} = 1;
 }
 
@@ -1661,7 +1667,7 @@ sub resume_read {
                                      "transaction_timeout2" : "transaction_timeout"};
             $client_ref->{timeout} = timer(
                 $timeout // $client_ref->fatal("No transaction_timeout"),
-                sub { $client_ref->_transaction_timed_out });
+                $client_ref, \&_transaction_timed_out);
         }
     }
     $client_ref->{read_suspended} = 0;
@@ -1696,8 +1702,7 @@ sub resume_write {
             $client_ref->{timeout} = timer(
                 $addr->{connection_timeout} // $command->{connection_timeout} //
                 $client_ref->fatal("No connection_timeout"),
-                sub { $client_ref->_connection_timeout }
-            );
+                $client_ref, \&_connection_timeout);
         } elsif ($client_ref->{read_suspended}) {
             my $command = $client_ref->{commands}[0] ||
                 $client_ref->fatal("resume without command");
@@ -1705,7 +1710,7 @@ sub resume_write {
                                      "transaction_timeout2" : "transaction_timeout"};
             $client_ref->{timeout} = timer(
                 $timeout // $client_ref->fatal("No transaction_timeout"),
-                sub { $client_ref->_transaction_timed_out });
+                $client_ref, \&_transaction_timed_out);
         }
     }
     $client_ref->{write_suspended} = 0;

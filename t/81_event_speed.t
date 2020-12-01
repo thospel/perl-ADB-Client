@@ -29,8 +29,6 @@ $wr->blocking(0);
 my ($rc, $buffer, $count);
 
 my $ref = bless [];
-my $nread  = "reader";
-my $nwrite = "writer";
 my ($reader, $writer);
 
 sub reader {

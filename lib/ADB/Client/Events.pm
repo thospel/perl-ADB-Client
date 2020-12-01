@@ -61,7 +61,7 @@ my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
 
-my @NOP = (sub {}, []);
+my @NOP = (sub {}, undef);
 sub ADB::Client::Events::Read::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_read $fd") if $DEBUG;
@@ -110,7 +110,7 @@ sub add_read {
     caller_info("add_read $fd") if $DEBUG;
     croak "Descriptor $fd already selected for read" if $read_refs{$fd};
     vec($read_mask, $fd, 1) = 1;
-    weaken(($read_refs{$fd} = [shift, [@_]])->[1][0]);
+    weaken(($read_refs{$fd} = [shift, shift])->[1]);
     return bless \$fd, "ADB::Client::Events::Read";
 }
 
@@ -119,7 +119,7 @@ sub add_write {
     caller_info("add_write $fd") if $DEBUG;
     croak "Descriptor $fd already selected for write" if $write_refs{$fd};
     vec($write_mask, $fd, 1) = 1;
-    weaken(($write_refs{$fd} = [shift, [@_]])->[1][0]);
+    weaken(($write_refs{$fd} = [shift, shift])->[1]);
     return bless \$fd, "ADB::Client::Events::Write";
 }
 
@@ -128,7 +128,7 @@ sub add_error {
     caller_info("add_error $fd") if $DEBUG;
     croak "Descriptor $fd already selected for error" if $error_refs{$fd};
     vec($error_mask, $fd, 1) = 1;
-    weaken(($error_refs{$fd} = [shift, [@_]])->[1][0]);
+    weaken(($error_refs{$fd} = [shift, shift])->[1]);
     return bless \$fd, "ADB::Client::Events::Error";
 }
 
@@ -149,10 +149,10 @@ sub mainloop {
     eval {
         info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
         local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
-        my ($r, $w, $e, $name);
+        my ($r, $w, $e, $name, $timeout);
         until ($unlooping[-1]) {
-            my $timeout = timers_collect();
-            $timeout // (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
+            ($timeout = timers_collect()) //
+                (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
             if ((select($r = $read_mask,
                         $w = $write_mask,
                         $e = $error_mask, $timeout) || next) > 0) {
@@ -163,7 +163,8 @@ sub mainloop {
                 # delete_xxx functions set the value to false before delete
                 # $$_ and $name = $$_->[1] and $$_->[0]->$name(@{$$_->[2]}) for
                 # $$_ and $$_->() for
-                $_->[0]->(@{$_->[1]}) for my @a=(
+                # $_->[0]->($_->[1]) for my @a=(
+                $_->[0]->($_->[1]) for my @a=(
                 # $$_ and $$_->[0]->(@{$$_->[1]}[1..$#{$$_->[1]}]) for
                     @read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     @write_refs{grep vec($w, $_, 1), keys %write_refs},

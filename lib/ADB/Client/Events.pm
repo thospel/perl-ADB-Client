@@ -61,11 +61,11 @@ my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
 
-my @NOP = (sub {}, undef);
+my @NOP = (bless([]), sub {});
 sub ADB::Client::Events::Read::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_read $fd") if $DEBUG;
-    # This strange assign before delete is to poison the reference the for in
+    # This strange assign after delete is to update the reference the for in
     # sub mainloop may still have
     @{delete $read_refs{$fd}} = @NOP;
     if (%read_refs) {
@@ -79,7 +79,7 @@ sub ADB::Client::Events::Read::DESTROY {
 sub ADB::Client::Events::Write::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_write $fd") if $DEBUG;
-    # This strange assign before delete is to poison the reference the for in
+    # This strange assign after delete is to update the reference the for in
     # sub mainloop may still have
     @{delete $write_refs{$fd}} = @NOP;
     if (%write_refs) {
@@ -93,7 +93,7 @@ sub ADB::Client::Events::Write::DESTROY {
 sub ADB::Client::Events::Error::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_error $fd") if $DEBUG;
-    # This strange assign before delete is to poison the reference the for in
+    # This strange assign after delete is to update the reference the for in
     # sub mainloop may still have
     @{delete $error_refs{$fd}} = @NOP;
     if (%error_refs) {
@@ -110,7 +110,7 @@ sub add_read {
     caller_info("add_read $fd") if $DEBUG;
     croak "Descriptor $fd already selected for read" if $read_refs{$fd};
     vec($read_mask, $fd, 1) = 1;
-    weaken(($read_refs{$fd} = [shift, shift])->[1]);
+    weaken(($read_refs{$fd} = [shift, shift])->[0]);
     return bless \$fd, "ADB::Client::Events::Read";
 }
 
@@ -119,7 +119,7 @@ sub add_write {
     caller_info("add_write $fd") if $DEBUG;
     croak "Descriptor $fd already selected for write" if $write_refs{$fd};
     vec($write_mask, $fd, 1) = 1;
-    weaken(($write_refs{$fd} = [shift, shift])->[1]);
+    weaken(($write_refs{$fd} = [shift, shift])->[0]);
     return bless \$fd, "ADB::Client::Events::Write";
 }
 
@@ -128,7 +128,7 @@ sub add_error {
     caller_info("add_error $fd") if $DEBUG;
     croak "Descriptor $fd already selected for error" if $error_refs{$fd};
     vec($error_mask, $fd, 1) = 1;
-    weaken(($error_refs{$fd} = [shift, shift])->[1]);
+    weaken(($error_refs{$fd} = [shift, shift])->[0]);
     return bless \$fd, "ADB::Client::Events::Error";
 }
 
@@ -156,15 +156,13 @@ sub mainloop {
             if ((select($r = $read_mask,
                         $w = $write_mask,
                         $e = $error_mask, $timeout) || next) > 0) {
-                # The reference taking is because the stack doesn't keep values
+                # The copy to @tmp is because the stack doesn't keep values
                 # alive, so any deletes on xxx_refs during the loop can make
-                # the value go poof. The reference temporarily increases the
+                # the value go poof. The copy temporarily increases the
                 # refcount so the value doesn't go away. That is also why the
-                # delete_xxx functions set the value to false before delete
-                # $$_ and $name = $$_->[1] and $$_->[0]->$name(@{$$_->[2]}) for
-                # $$_ and $$_->() for
-                # $_->[0]->($_->[1]) for my @a=(
-                $_->[0]->($_->[1]) for my @a=(
+                # delete_xxx functions modify the value before delete
+                # $name = $_->[1], $_->[0]->$name for my @tmp=(
+                $_->[1]->($_->[0]) for my @tmp=(
                 # $$_ and $$_->[0]->(@{$$_->[1]}[1..$#{$$_->[1]}]) for
                     @read_refs{ grep vec($r, $_, 1), keys %read_refs},
                     @write_refs{grep vec($w, $_, 1), keys %write_refs},

@@ -138,7 +138,7 @@ sub acceptable {
     my $state = $class->new($socket, $listener->{type}, $listener->next_id);
     weaken($state->{listener} = $listener);
     $listener->{accepted}{$state->{key}} = $state;
-    $state->{reader} = $socket->add_read(\&Accepted::reader, $state);
+    $state->{reader} = $socket->add_read($state, \&Accepted::reader);
     if ($listener->{type} == BLACKHOLE) {
         $state->output($listener->{arg}{hello}) if $listener->{arg}{hello} ne "";
         $state->{bytes_left} = $listener->{arg}{n};
@@ -186,7 +186,7 @@ sub add_listener {
     } else {
         $specials{$key} = $listener;
     }
-    $listener->{reader} = $socket->add_read(\&acceptable, $listener) if
+    $listener->{reader} = $socket->add_read($listener, \&acceptable) if
         $type != UNACCEPTABLE && $type != UNREACHABLE;
     return $listener->{port};
 }
@@ -365,7 +365,7 @@ sub output {
     die "Unexpected upgrade string" if utf8::is_utf8($str);
 
     if ($state->{out} eq "") {
-        $state->{writer} = $state->{socket}->add_write(\&writer, $state);
+        $state->{writer} = $state->{socket}->add_write($state, \&writer);
         weaken(my $s = $state);
         $state->{timeout} = timer($state->{write_timeout}, sub { $s->{on_error}->($s, "Write timed out") });
     }

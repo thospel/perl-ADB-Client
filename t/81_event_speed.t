@@ -33,7 +33,7 @@ my ($reader, $writer);
 
 sub reader {
     if ($rc = sysread($rd, $buffer, 2**16)) {
-        $writer = $wr->add_write(\&writer, $ref);
+        $writer = $wr->add_write($ref, \&writer);
         ++$count;
         return;
     }
@@ -59,8 +59,8 @@ sub stop_loop {
 
 $count = 0;
 $buffer = "a";
-$reader = $rd->add_read (\&reader, $ref);
-$writer = $wr->add_write(\&writer, $ref);
+$reader = $rd->add_read ($ref, \&reader);
+$writer = $wr->add_write($ref, \&writer);
 my $timeout = timer(1, \&stop_loop);
 
 my $period = clocktime();

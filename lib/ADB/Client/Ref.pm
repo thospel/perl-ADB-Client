@@ -984,8 +984,8 @@ sub activate {
         $client_ref->{sent} = 0;
         info("Sending to ADB: " . display_string($client_ref->{out})) if $DEBUG;
 
-        $client_ref->{writer} = $client_ref->{socket}->add_write(\&_writer, $client_ref);
-        $client_ref->{reader} = $client_ref->{socket}->add_read(\&_reader, $client_ref);
+        $client_ref->{writer} = $client_ref->{socket}->add_write($client_ref, \&_writer);
+        $client_ref->{reader} = $client_ref->{socket}->add_read($client_ref, \&_reader);
         $client_ref->{timeout} = timer(
             $command->{transaction_timeout} //
             $client_ref->fatal("No transaction_timeout"),
@@ -1313,8 +1313,8 @@ sub _connect_next {
             $client_ref->{socket} = $socket;
             $addr->{connected} = 0;
             $client_ref->{out} = "Dummy";
-            $client_ref->{writer} = $socket->add_write(\&_connect_writable, $client_ref);
-            # $client_ref->{errorer} = $socket->add_error(\&_connect_writable, $client_ref);
+            $client_ref->{writer} = $socket->add_write($client_ref, \&_connect_writable);
+            # $client_ref->{errorer} = $socket->add_error($client_ref, \&_connect_writable);
             $client_ref->{in} = undef;
             $client_ref->{timeout} = timer(
                 $addr->{connection_timeout} // $command->{connection_timeout} //
@@ -1653,7 +1653,7 @@ sub resume_read {
     $client_ref->{socket} || $client_ref->fatal("resume without socket");
     $client_ref->{active} || $client_ref->fatal("resume without active");
     if (defined $client_ref->{in}) {
-        $client_ref->{reader} = $client_ref->{socket}->add_read(\&_reader, $client_ref);
+        $client_ref->{reader} = $client_ref->{socket}->add_read($client_ref, \&_reader);
         if ($client_ref->{out} eq "" || $client_ref->{write_suspended}) {
             my $command = $client_ref->{commands}[0] ||
                 $client_ref->fatal("resume without command");
@@ -1688,7 +1688,7 @@ sub resume_write {
     $client_ref->{socket} || $client_ref->fatal("resume without socket");
     $client_ref->{active} || $client_ref->fatal("resume without active");
     if ($client_ref->{out} ne "") {
-        $client_ref->{writer} = $client_ref->{socket}->add_write(\&_writer, $client_ref);
+        $client_ref->{writer} = $client_ref->{socket}->add_write($client_ref, \&_writer);
         if (!defined $client_ref->{in}) {
             my $command = $client_ref->{commands}[0] ||
                 $client_ref->fatal("resume without command");

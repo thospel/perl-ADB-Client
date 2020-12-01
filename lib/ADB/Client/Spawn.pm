@@ -233,7 +233,7 @@ sub _spawn {
     close($wr) || die "Assertion: Error closing adb writer: $^E";
 
     $exec_rd->blocking(0);
-    $starter->{reader} = $exec_rd->add_read(\&_reader_exec, $starter);
+    $starter->{reader} = $exec_rd->add_read($starter, \&_reader_exec);
     $starter->{exec_rd} = $exec_rd;
     $starter->{log_rd}  = $log_rd;
 
@@ -352,8 +352,8 @@ sub _reader_exec {
 
         $starter->{exec_rd} = undef;
         # This also deletes the reader on socket exec_rd
-        $starter->{reader} = $starter->{rd}->add_read(\&_reader, $starter);
-        $starter->{log_reader} = $starter->{log_rd}->add_read(\&_reader_log, $starter);
+        $starter->{reader} = $starter->{rd}->add_read($starter, \&_reader);
+        $starter->{log_reader} = $starter->{log_rd}->add_read($starter, \&_reader_log);
 
         my $pid = waitpid($starter->{pid}, 0);
         warn("Assertion: Failed to wait for $pid") if $pid <= 0;

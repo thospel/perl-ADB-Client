@@ -170,9 +170,9 @@ mainloop();
 event_init();
 
 my $read = 0;
-my $obj = [];
+my $obj = bless [];
 my $reader;
-$reader = $socket->add_read(sub { $reader = undef; return $read = 1 }, $obj);
+$reader = $socket->add_read($obj, sub { $reader = undef; return $read = 1 });
 
 my $timed = 0;
 my $immed = 0;
@@ -254,14 +254,14 @@ for my $name (qw(read write error)) {
     my $add_name = "add_$name";
     my $add_fun  = ADB::Client::Events->can($add_name);
 
-    my $handle = $socket1->$add_name(sub {}, $obj);
+    my $handle = $socket1->$add_name($obj, sub {});
 
     eval { $add_fun->(0) };
     like($@, qr{^Not a filehandle at },
          "Proper eror from $add_name call on non fh");
 
-    $handle = $socket->$add_name(sub {}, $obj);
-    eval { $socket->$add_name(sub {}, $obj) };
+    $handle = $socket->$add_name($obj, sub {});
+    eval { $socket->$add_name($obj, sub {}) };
     like($@, qr{^Descriptor \d+ already selected for $name at },
          "Proper eror from duplicate $add_name call");
 }
@@ -593,7 +593,7 @@ $ADB::Client::Command::DEBUG = 1;
 }
 for my $name (qw(read write error)) {
     my $add_name    = "add_$name";
-    my $handle = $socket->$add_name(sub {}, $obj);
+    my $handle = $socket->$add_name($obj, sub {});
 }
 $ADB::Client::Events::VERBOSE = 1;
 mainloop();
@@ -607,7 +607,7 @@ mainloop();
     local *ADB::Client::Events::info        = sub {};
     # Avoid ADB::Client::Ref::delete creating a final FATAL command object
     *ADB::Client::Command::new = sub {};
-    my $reader = $socket->add_read(sub {}, $obj);
+    my $reader = $socket->add_read($obj, sub {});
     close($socket);
     eval { mainloop() };
     like($@, qr{^Select failed: }, "Proper error on bad filedescriptor");

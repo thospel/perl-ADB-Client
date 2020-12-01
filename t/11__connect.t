@@ -16,7 +16,7 @@ use lib $Bin;
 use Storable qw(dclone);
 use Socket qw(AF_INET);
 
-use Test::More tests => 636;
+use Test::More tests => 635;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
                  adb_blackhole adb_closer adb_echo addr_filter dumper
                  $CONNECTION_TIMEOUT $UNREACHABLE);

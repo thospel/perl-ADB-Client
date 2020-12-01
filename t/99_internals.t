@@ -13,7 +13,7 @@ use warnings;
 our $VERSION = "1.000";
 
 my $client_name = my $ref_name = my $cmd_name = "dummy";
-my (@info_command, @info_client, @info_ref, @info_events);
+my (@info_command, @info_client, @info_events);
 my $socket_fd = -1;
 
 use FindBin qw($Bin);
@@ -21,31 +21,22 @@ use lib $Bin;
 
 use IO::Socket::IP qw();
 
-use Test::More tests => 747;
+use Test::More tests => 746;
 
 # END must come before ADB::Client gets imported so we can catch the END blocks
 # from ADB::Client and its helper modules
 # However it must come AFTER Test::More so done_testing doesn't get confused
 END {
-    # dumper(\@info_command);
     is_deeply(\@info_command, [
         "DESTROY $cmd_name",
         "Still have -1 ADB::Client::Command objects at program end",
     ], "Expected ADB::Client::Command object counter complaint $cmd_name") ||
         dumper(\@info_command);
-    # dumper(\@info_ref);
-    is_deeply(\@info_ref, [
-        "DESTROY $ref_name",
-        "Still have -1 ADB::Client::Ref objects at program end",
-    ], "Expected ADB::Client::Command object counter complaint") ||
-        dumper(\@info_ref);
-    # dumper(\@info_client);
     is_deeply(\@info_client, [
         "DESTROY $client_name",
         "Still have -1 ADB::Client objects at program end",
     ], "Expected ADB::Client::Command object counter complaint") ||
         dumper(\@info_client);
-    # dumper(\@info_events);
     is_deeply(\@info_events, [
         [ "add_read $socket_fd" ],
         [ "delete_read $socket_fd" ],
@@ -67,7 +58,7 @@ use TestDrive qw(adb_start adb_unreachable dumper
                  collect_stderr collected_stderr uncollect_stderr
                  %expect_objects);
 
-use ADB::Client qw(mainloop event_init unloop timer immediate);
+use ADB::Client qw(mainloop event_init unloop timer immediate $DEBUG $VERBOSE);
 use ADB::Client::Events qw($IGNORE_PIPE_LOCAL);
 use ADB::Client::Utils qw(callers info caller_info addr_info
                           realtime_running clocktime_running get_home);
@@ -304,31 +295,31 @@ is($@, "Killer\n", "Expected error exit");
 is($client->version, 39, "We can still do blocking commands");
 
 # Cause errors during the PROCESS callback
-ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]);
-eval { ADB::Client->add_command([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]) };
+ADB::Client->command_add([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]);
+eval { ADB::Client->command_add([version0 => "host:version", -1, EXPECT_EOF, sub { return {} }]) };
 like($@, qr{^Attempt to redefine already existing command 'version0' at },
      "Cannot create command twice");
-diag(__LINE__);
+# diag(__LINE__);
 eval { $client->version0 };
 like($@, qr{^Fatal: Assertion: Could not process host:version output: Neither a string nor an ARRAY reference at}, "process must not return HASH");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
-diag(__LINE__);
+# diag(__LINE__);
 
 eval {
-    local @ADB::Client::Ref::BUILTINS = [foo => "foo", -1, SERIAL];
-    ADB::Client->add_commands;
+    local @ADB::Client::BUILTINS = [foo => "foo", -1, SERIAL];
+    ADB::Client->commands_add;
 };
 like($@, qr{^No : in command 'foo' at },
      "Cannot create a serial command without :");
 
-eval { ADB::Client->add_command(["foo"]) };
+eval { ADB::Client->command_add(["foo"]) };
 like($@, qr{^No COMMAND in command 'foo' at },
      "Cannot create a normal command without actually having an ADB command");
 
 # Try an out of order wait
 $client2->marker(callback => sub {
-    eval { $client->client_ref->wait };
+    eval { $client->_wait_blocking };
     like($@,
          qr{^\QFatal: Assertion: Already have a blocking command pending at },
          "Test out of order wait");
@@ -340,12 +331,12 @@ like($@,
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $port]);
 
-ADB::Client->add_command([version1 => "host:version", -1, EXPECT_EOF, sub { die "Boem\n" }]);
+ADB::Client->command_add([version1 => "host:version", -1, EXPECT_EOF, sub { die "Boem\n" }]);
 eval { $client->version1 };
 like($@, qr{Assertion: Could not process host:version output "0027": Boem at },
      "process must not die");
 
-ADB::Client->add_command([version2 => "host:version", -1, EXPECT_EOF, sub { return "Bad" }]);
+ADB::Client->command_add([version2 => "host:version", -1, EXPECT_EOF, sub { return "Bad" }]);
 my @result;
 $client->version2(blocking => 0, callback => sub { shift; push @result, [@_] });
 mainloop();
@@ -354,13 +345,13 @@ eval { $client->version2 };
 like($@, qr{^\QBad at }, "Blocking bad process");
 
 # Add a command that is invalid as a perl identifier
-eval { ADB::Client->add_command(["space space" => "Wee", 0, EXPECT_EOF]) };
+eval { ADB::Client->command_add(["space space" => "Wee", 0, EXPECT_EOF]) };
 like($@, qr{^\QCommand_name 'space space' is invalid as a perl identifier at },
      "Cannot use invalid perl identifiers");
-eval { ADB::Client->add_command(["0space" => "Wee", 0, EXPECT_EOF]) };
+eval { ADB::Client->command_add(["0space" => "Wee", 0, EXPECT_EOF]) };
 like($@, qr{^\QCommand_name '0space' is invalid as a perl identifier at },
      "Cannot use invalid perl identifiers");
-eval { ADB::Client->add_command(["space" => "%%", 0, EXPECT_EOF]) };
+eval { ADB::Client->command_add(["space" => "%%", 0, EXPECT_EOF]) };
 like($@, qr{^\QInvalid format in command 'space': %% at },
      "Cannot use invalid perl identifiers");
 
@@ -368,7 +359,7 @@ like($@, qr{^\QInvalid format in command 'space': %% at },
 # Don't define new commands below this point
 my $index = -1;
 while (1) {
-    my ($command_name, $nr_vars, $special) = eval { ADB::Client::Ref->command_get(++$index) } or last;
+    my ($command_name, $nr_vars, $special) = eval { ADB::Client->command_get(++$index) } or last;
     # diag("$command_name $nr_vars $special");
     my $code = ADB::Client->can($command_name);
     ok($code, "Command $command_name exists");
@@ -404,10 +395,7 @@ like($@, qr{^Odd nuber of arguments at },
 eval { ADB::Client->new(undef) };
 like($@, qr{^Odd number of arguments at }, "");
 
-eval { ADB::Client->new(model => bless [], "Foo") };
-like($@, qr{^Model without client_ref at }, "");
-
-# Try some bad ADB::Client::Ref commands
+# Try some bad ADB::Client commands
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 eval { $client->post_action() };
@@ -423,35 +411,35 @@ like($@, qr{^post_action outside success or error callback at },
 is($client->connection_data, undef, "connection_data starts undef");
 eval { $client->version(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Expected error from version");
-eval { $client->client_ref->command_simple({}, undef, 1000000) };
+eval { $client->command_simple({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from command_simple");
 
 eval { $client->marker(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Expected error from special_simple");
-eval { $client->client_ref->special_simple({}, undef, 1000000) };
+eval { $client->special_simple({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from command_simple");
 
-eval { ADB::Client::Ref->command_get(1000000) };
+eval { ADB::Client->command_get(1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from command_get");
 eval {
-    local $ADB::Client::Ref::COMMANDS[0] = [];
-    ADB::Client::Ref->command_get(0);
+    local $ADB::Client::COMMANDS[0] = [];
+    ADB::Client->command_get(0);
 };
 like($@, qr{^Assertion: No COMMAND_NAME at },
      "Expected error from command_get");
 
 eval { $client->_connect(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Expected error from connect");
-eval { $client->client_ref->_connect({}, undef, 1000000) };
+eval { $client->_special__connect({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from version");
 
 eval { $client->spawn(foo => 9) };
 like($@, qr{^Unknown argument foo at }, "Expected error from spawn");
-eval { $client->client_ref->spawn({}, undef, 1000000) };
+eval { $client->_special_spawn({}, undef, 1000000) };
 like($@, qr{^No command at index '1000000' at },
      "Expected error from version");
 
@@ -481,8 +469,8 @@ is($client->resolve(host => undef, port => undef), undef,
 is($client->host, "127.0.0.1", "Host was set");
 is($client->port, 5037, "Port was set");
 {
-    local $ADB::Client::Ref::ADB_HOST = "";
-    local $ADB::Client::Ref::ADB_PORT = 0;
+    local $ADB::Client::ADB_HOST = "";
+    local $ADB::Client::ADB_PORT = 0;
 
     is($client->resolve(host => undef, port => undef,
                         addr_info => addr_info("1.2.3.4", 2)), undef,
@@ -490,9 +478,9 @@ is($client->port, 5037, "Port was set");
     is($client->host, "", "Host was set");
     is($client->port, 0, "Port was set");
 }
-eval { $client->client_ref->_resolve() };
+eval { $client->_resolve() };
 like($@, qr{^Fatal: Assertion: No command at }, "Resolve without commands");
-my $fatal_ref = $client->client_ref->{commands}[0]->command_ref;
+my $fatal_ref = $client->{commands}[0]->command_ref;
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
@@ -508,9 +496,8 @@ $client->resolve(
     });
 {
     no warnings "redefine";
-    local *ADB::Client::Ref::utils_addr_info = sub { return $hash};
-    is_deeply([$client->client_ref->_resolve], [],
-              "Bad _resolv returns nothing");
+    local *ADB::Client::utils_addr_info = sub { return $hash};
+    is_deeply([$client->_resolve], [], "Bad _resolv returns nothing");
 };
 cmp_ok($result, "==", $hash, "Bad addr_info");
 isa_ok($retired, "ADB::Client::Command", "Can get command");
@@ -524,40 +511,40 @@ $retired->command_ref($fatal_ref);
 is($retired->command_ref, $fatal_ref, "Command ref is now FATAL");
 $retired = undef;
 
-eval { $client->client_ref->error("Boem") };
+eval { $client->error("Boem") };
 like($@, qr{^Fatal: Assertion: Error without command at },
      "Expected error from version");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
-eval { $client->client_ref->success("Success") };
+eval { $client->success("Success") };
 like($@, qr{^Fatal: Assertion: Success without command at },
      "Expected error from version");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 $client->version;
-eval { $client->client_ref->success("Success") };
+eval { $client->success("Success") };
 like($@, qr{^Fatal: Assertion: Active during success at },
      "Expected error from version");
 # This broke $client. Create a new one
 $client = new_ok("ADB::Client", [port => $rport, blocking => 0]);
 
 # Trigger some internal sanity checks
-my $callback = $client->client_ref->callback_blocking;
+my $callback = $client->callback_blocking;
 eval { $callback->(ADB::Client->new) };
 like($@, qr{^\QFatal: Assertion: No wait pending at },
      "callback blocking needs result to be set");
 eval {
     my $client = ADB::Client->new;
-    $client->client_ref->{result} = 5;
+    $client->{result} = 5;
     $callback->($client);
 };
 like($@, qr{^\QFatal: Assertion: Result already set at }, "zz");
 eval {
     my $client = ADB::Client->new;
     $client->version(blocking => 0);
-    $client->client_ref->{result} = "";
+    $client->{result} = "";
     $callback->($client);
 };
 like($@, qr{^\QFatal: Assertion: We are not the final command at }, "zz");
@@ -568,20 +555,21 @@ $client = undef;
 @timers = ();
 
 # Triggers callers
-$ADB::Client::Command::DEBUG = 1;
+$DEBUG = 1;
 $client = ADB::Client->new;
-$ADB::Client::Command::DEBUG = 0;
+$DEBUG = 0;
+#use Devel::Peek;
+#Dump($client);
+is(ADB::Client->objects, 1);
 $client = undef;
+is(ADB::Client->objects, 0);
 
-$ADB::Client::Command::DEBUG = 1;
+$DEBUG = 1;
 {
 
     no warnings "redefine";
     *ADB::Client::Command::info = sub {
         push @info_command, @_ == 1 ? shift : sprintf(shift, @_);
-    };
-    *ADB::Client::Ref::info = sub {
-        push @info_ref, @_ == 1 ? shift : sprintf(shift, @_);
     };
     *ADB::Client::info = sub {
         push @info_client, @_ == 1 ? shift : sprintf(shift, @_);
@@ -590,16 +578,16 @@ $ADB::Client::Command::DEBUG = 1;
         push @info_events, @_ == 1 ? shift : sprintf(shift, @_);
     };
 
-    *ADB::Client::Ref::caller_info    = sub { push @info_ref,    \@_ };
+    *ADB::Client::caller_info    = sub { push @info_client,    \@_ };
     *ADB::Client::Events::caller_info = sub { push @info_events, \@_ };
 }
 for my $name (qw(read write error)) {
     my $add_name    = "add_$name";
     my $handle = $socket->$add_name($obj, sub {});
 }
-$ADB::Client::Events::VERBOSE = 1;
+$VERBOSE = 1;
 mainloop();
-$ADB::Client::Events::VERBOSE = 0;
+$VERBOSE = 0;
 unloop(0, 1);
 mainloop();
 
@@ -607,8 +595,10 @@ mainloop();
     no warnings "redefine";
     local *ADB::Client::Events::caller_info = sub {};
     local *ADB::Client::Events::info        = sub {};
-    # Avoid ADB::Client::Ref::delete creating a final FATAL command object
+    # Avoid ADB::Client::delete creating a final FATAL command object
     *ADB::Client::Command::new = sub {};
+
+    # Now that we are in a scope do a quick test on bad filedescriptor
     my $reader = $socket->add_read($obj, sub {});
     close($socket);
     eval { mainloop() };
@@ -616,10 +606,8 @@ mainloop();
 }
 
 my $cmd = bless [], "ADB::Client::Command";
-my $ref = bless {}, "ADB::Client::Ref";
-$client = bless \$ref, "ADB::Client";
+my $c = bless {}, "ADB::Client";
 
 $cmd_name = "$cmd";
-$ref_name = "$ref";
-$client_name = "$client";
---$expect_objects{$_} for qw(ADB::Client::Command ADB::Client::Ref ADB::Client);
+$client_name = "$c";
+--$expect_objects{$_} for qw(ADB::Client::Command ADB::Client);

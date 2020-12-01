@@ -43,15 +43,15 @@ use ADB::Client qw($ADB);
 use ADB::Client::Command qw(EXPECT_EOF UTF8_IN UTF8_OUT);
 
 # We tested in t/02_adb_client (with BAIL_OUT) that we can add these commands
-ADB::Client->add_command(["failer" => "Wee", 0, EXPECT_EOF]);
-ADB::Client->add_command(["echo" => "internal:echo:%s", -1,
+ADB::Client->command_add(["failer" => "Wee", 0, EXPECT_EOF]);
+ADB::Client->command_add(["echo" => "internal:echo:%s", -1,
                           EXPECT_EOF | UTF8_IN | UTF8_OUT ]);
-ADB::Client->add_command(["discard" => "internal:discard:%s", 9, 0]);
-ADB::Client->add_command(["device_drop" => "internal:device_drop:%s", -1, 0]);
-ADB::Client->add_command(["device_add"  => "internal:device_add:%s",  -1, 0]);
-ADB::Client->add_command(["filesystem"  => "internal:filesystem:%s",  -1, EXPECT_EOF]);
-ADB::Client->add_command(["pid" => "internal:pid", -1, EXPECT_EOF]);
-ADB::Client->add_command(["argv" => "internal:argv", -1, EXPECT_EOF, sub { return [ split /\0/, shift]}]);
+ADB::Client->command_add(["discard" => "internal:discard:%s", 9, 0]);
+ADB::Client->command_add(["device_drop" => "internal:device_drop:%s", -1, 0]);
+ADB::Client->command_add(["device_add"  => "internal:device_add:%s",  -1, 0]);
+ADB::Client->command_add(["filesystem"  => "internal:filesystem:%s",  -1, EXPECT_EOF]);
+ADB::Client->command_add(["pid" => "internal:pid", -1, EXPECT_EOF]);
+ADB::Client->command_add(["argv" => "internal:argv", -1, EXPECT_EOF, sub { return [ split /\0/, shift]}]);
 
 use Exporter::Tidy
     other =>
@@ -103,7 +103,7 @@ our $tmp_dir;
 our $old_stderr;
 
 # Classes for which we count bless/destruct cycles
-my @object_classes = qw(ADB::Client ADB::Client::Ref ADB::Client::Command
+my @object_classes = qw(ADB::Client ADB::Client::Command
                         ADB::Client::Spawn ADB::Client::SpawnRef
                         ADB::Client::Tracker);
 our %expect_objects;

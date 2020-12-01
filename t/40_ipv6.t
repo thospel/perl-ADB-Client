@@ -22,7 +22,7 @@ BEGIN {
         plan skip_all => "IPv6 not supported on this host";
         exit;
     }
-    plan tests => 87;
+    plan tests => 86;
 }
 
 use TestDrive qw(adb_start adb_version6 adb_unreachable6 addr_filter dumper);

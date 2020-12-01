@@ -15,7 +15,7 @@ use Socket qw(AF_INET SOCK_STREAM IPPROTO_TCP);
 use IO::Socket::IP qw();
 
 my $tests;
-BEGIN { $tests = 38 }
+BEGIN { $tests = 37 }
 use Test::More tests => $tests;
 
 use TestDrive qw(addr_filter dumper adb_server $developer $tests_driver);

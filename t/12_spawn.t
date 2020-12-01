@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 406;
+use Test::More tests => 405;
 
 use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper unalarm);
 

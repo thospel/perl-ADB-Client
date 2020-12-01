@@ -10,7 +10,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 10;
+use Test::More tests => 9;
 use TestDrive qw(collect_stderr collected_stderr uncollect_stderr);
 
 sub check {

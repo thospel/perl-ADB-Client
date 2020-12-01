@@ -10,7 +10,6 @@ lib/ADB/Client.pm
 lib/ADB/Client/Command.pm
 lib/ADB/Client/Events.pm
 lib/ADB/Client/Package.pm
-lib/ADB/Client/Ref.pm
 lib/ADB/Client/Spawn.pm
 lib/ADB/Client/SpawnRef.pm
 lib/ADB/Client/Timer.pm

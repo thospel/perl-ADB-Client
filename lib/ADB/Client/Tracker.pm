@@ -8,7 +8,7 @@ use Scalar::Util qw(weaken);
 use Errno qw(ECONNRESET EAGAIN EINTR EWOULDBLOCK);
 use Storable qw(dclone);
 use Carp;
-our @CARP_NOT = qw(ADB::Client::Ref);
+our @CARP_NOT = qw(ADB::Client);
 
 use ADB::Client::Events qw(mainloop loop_levels unloop immediate);
 use ADB::Client::Utils qw(display_string info $DEBUG $QUIET);

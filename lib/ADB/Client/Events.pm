@@ -51,7 +51,7 @@ use Exporter::Tidy
     };
 
 # We want errors reported at the call site since they are bugs
-# our @CARP_NOT = qw(ADB::Client::Ref);
+# our @CARP_NOT = qw(ADB::Client);
 
 our $IGNORE_PIPE_LOCAL = 0;
 

@@ -5,7 +5,7 @@ use warnings;
 our $VERSION = '1.000';
 
 use Carp;
-our @CARP_NOT = qw(ADB::Client::Ref);
+our @CARP_NOT = qw(ADB::Client);
 
 use ADB::Client::Utils qw(display_string info $DEBUG $QUIET);
 

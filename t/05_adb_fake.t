@@ -13,7 +13,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 106;
+use Test::More tests => 105;
 use TestDrive qw(adb_start adb_stop adb_unacceptable adb_unreachable addr_filter
                  dumper $UNREACHABLE);
 
@@ -41,7 +41,7 @@ for (1..2) {
     my ($echo, $c);
     my $err = "No error";
     $client->echo("Foo", callback => sub {
-                      # The command is still stored in retired
+                      # The command is still stored in current
                       $obj_failed += !is(ADB::Client::Command->objects, 1, "Command objects are gone");
                       ($c, $err, $echo) = @_;
                   });
@@ -233,11 +233,11 @@ $err = $@;
 like($err, qr{^ADB server 127\.0\.0\.1 port $port: Connect error: },
      "Must have a connection error") ||
     BAIL_OUT("Stopped fake adb server does not lead to the proper error message: $err");
-$obj_failed += !is(ADB::Client::Ref->objects, 1, "Client object still exists");
+$obj_failed += !is(ADB::Client->objects, 1, "Client object still exists");
 $obj_failed += !is(ADB::Client->objects, 1, "Client objects still exists");
 $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 $client = undef;
-$obj_failed += !is(ADB::Client::Ref->objects, 0, "Client object is gone");
+$obj_failed += !is(ADB::Client->objects, 0, "Client object is gone");
 $obj_failed += !is(ADB::Client->objects, 0, "Client objects is gone");
 $obj_failed += !is(ADB::Client::Command->objects, 0, "Command objects are gone");
 BAIL_OUT("Object management is broken") if $obj_failed;

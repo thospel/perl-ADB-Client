@@ -15,7 +15,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 
 my $tests;
-BEGIN { $tests = 49 }
+BEGIN { $tests = 48 }
 use Test::More tests => $tests;
 
 use TestDrive qw($tests_driver $tests_pre

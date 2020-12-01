@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w
 # Before `make install' is performed this script should be runnable with
-# `make test'. After `make install' it should work as `perl 20_sync.t'
+# `make test'. After `make install' it should work as `perl 81_event_speed.t'
 #########################
 ## no critic (UselessNoCritic MagicNumbers)
 # Test some simple commands

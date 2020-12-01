@@ -15,7 +15,7 @@ use lib $Bin;
 use Errno qw(ENOPROTOOPT);
 
 my $tests;
-BEGIN { $tests = 72 }
+BEGIN { $tests = 71 }
 use Test::More tests => $tests;
 
 use TestDrive qw($tests_driver $tests_pre $t_dir

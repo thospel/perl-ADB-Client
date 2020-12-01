@@ -17,7 +17,7 @@ use Socket qw(:addrinfo unpack_sockaddr_in unpack_sockaddr_in6 inet_ntop
 use Scalar::Util qw(dualvar);
 our $SO_ACCEPTCONN = eval { SO_ACCEPTCONN };
 use Carp;
-our @CARP_NOT = qw(ADB::Client::Ref);
+our @CARP_NOT = qw(ADB::Client);
 
 use Exporter::Tidy
     other =>[qw(addr_info adb_addr_info info caller_info callers dumper

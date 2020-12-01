@@ -11,7 +11,7 @@ our $VERSION = "1.000";
 
 use FindBin qw($Bin);
 use lib $Bin;
-use Test::More tests => 16;
+use Test::More tests => 15;
 use TestDrive qw(adb_start adb_stop);
 
 # We already checked loading in 04_adb_client.t

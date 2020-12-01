@@ -248,7 +248,6 @@ sub new {
         sync		=> 0,
         active		=> undef,
         commands	=> [],
-        command_retired	=> undef,
         post_action	=> undef,
         result		=> undef,
         starter		=> undef,

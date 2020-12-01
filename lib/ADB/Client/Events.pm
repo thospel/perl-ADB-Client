@@ -61,14 +61,13 @@ my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
 
-use constant NOP => [sub {}, -1, []];
+my @NOP = (sub {}, []);
 sub ADB::Client::Events::Read::DESTROY {
-    my $fd = shift->[1] // die "No filedescriptor";
+    my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_read $fd") if $DEBUG;
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $read_refs{$fd} = NOP;
-    delete $read_refs{$fd};
+    @{delete $read_refs{$fd}} = @NOP;
     if (%read_refs) {
         vec($read_mask, $fd, 1) = 0;
         $read_mask =~ s/\x00+\z//;
@@ -78,12 +77,11 @@ sub ADB::Client::Events::Read::DESTROY {
 }
 
 sub ADB::Client::Events::Write::DESTROY {
-    my $fd = shift->[1] // die "No filedescriptor";
-    caller_info("delete_write $fd") if $ADB::Client::Events::DEBUG;
+    my $fd = ${shift()} // die "No filedescriptor";
+    caller_info("delete_write $fd") if $DEBUG;
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $write_refs{$fd} = NOP;
-    delete $write_refs{$fd};
+    @{delete $write_refs{$fd}} = @NOP;
     if (%write_refs) {
         vec($write_mask, $fd, 1) = 0;
         $write_mask =~ s/\x00+\z//;
@@ -93,12 +91,11 @@ sub ADB::Client::Events::Write::DESTROY {
 }
 
 sub ADB::Client::Events::Error::DESTROY {
-    my $fd = shift->[1] // die "No filedescriptor";
-    caller_info("delete_error $fd") if $ADB::Client::Events::DEBUG;
+    my $fd = ${shift()} // die "No filedescriptor";
+    caller_info("delete_error $fd") if $DEBUG;
     # This strange assign before delete is to poison the reference the for in
     # sub mainloop may still have
-    $error_refs{$fd} = NOP;
-    delete $error_refs{$fd};
+    @{delete $error_refs{$fd}} = @NOP;
     if (%error_refs) {
         vec($error_mask, $fd, 1) = 0;
         $error_mask =~ s/\x00+\z//;
@@ -113,10 +110,8 @@ sub add_read {
     caller_info("add_read $fd") if $DEBUG;
     croak "Descriptor $fd already selected for read" if $read_refs{$fd};
     vec($read_mask, $fd, 1) = 1;
-    weaken($read_refs{$fd} = my $obj =
-           bless [shift, $fd, [@_]], "ADB::Client::Events::Read");
-    weaken($obj->[2][0]);
-    return $obj;
+    weaken(($read_refs{$fd} = [shift, [@_]])->[1][0]);
+    return bless \$fd, "ADB::Client::Events::Read";
 }
 
 sub add_write {
@@ -124,10 +119,8 @@ sub add_write {
     caller_info("add_write $fd") if $DEBUG;
     croak "Descriptor $fd already selected for write" if $write_refs{$fd};
     vec($write_mask, $fd, 1) = 1;
-    weaken($write_refs{$fd} = my $obj =
-           bless [shift, $fd, [@_]], "ADB::Client::Events::Write");
-    weaken($obj->[2][0]);
-    return $obj;
+    weaken(($write_refs{$fd} = [shift, [@_]])->[1][0]);
+    return bless \$fd, "ADB::Client::Events::Write";
 }
 
 sub add_error {
@@ -135,17 +128,8 @@ sub add_error {
     caller_info("add_error $fd") if $DEBUG;
     croak "Descriptor $fd already selected for error" if $error_refs{$fd};
     vec($error_mask, $fd, 1) = 1;
-    weaken($error_refs{$fd} = my $obj =
-           bless [shift, $fd, [@_]], "ADB::Client::Events::Error");
-    weaken($obj->[2][0]);
-    return $obj;
-}
-
-sub reader {
-    my $fh = shift;
-    my $callback = shift;
-    my $object = shift;
-    $fh->add_read
+    weaken(($error_refs{$fd} = [shift, [@_]])->[1][0]);
+    return bless \$fd, "ADB::Client::Events::Error";
 }
 
 sub unloop {
@@ -179,11 +163,11 @@ sub mainloop {
                 # delete_xxx functions set the value to false before delete
                 # $$_ and $name = $$_->[1] and $$_->[0]->$name(@{$$_->[2]}) for
                 # $$_ and $$_->() for
-                $$_->[0]->(@{$$_->[2]}) for
+                $_->[0]->(@{$_->[1]}) for my @a=(
                 # $$_ and $$_->[0]->(@{$$_->[1]}[1..$#{$$_->[1]}]) for
-                    \@read_refs{ grep vec($r, $_, 1), keys %read_refs},
-                    \@write_refs{grep vec($w, $_, 1), keys %write_refs},
-                    \@error_refs{grep vec($e, $_, 1), keys %error_refs};
+                    @read_refs{ grep vec($r, $_, 1), keys %read_refs},
+                    @write_refs{grep vec($w, $_, 1), keys %write_refs},
+                    @error_refs{grep vec($e, $_, 1), keys %error_refs});
             } elsif ($! == EINTR) {
                 redo;
             } else {

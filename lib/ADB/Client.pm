@@ -311,8 +311,7 @@ sub blocking {
 sub fatal {
     my ($client, $msg) = @_;
     $client->delete;
-    die "Fatal: Assertion: $msg";
-    # confess "Fatal: Assertion: $msg";
+    confess "Fatal: Assertion: $msg";
 }
 
 sub _fatal_run {
@@ -320,8 +319,7 @@ sub _fatal_run {
 
     # Can be non-deleted if we get here via the command queue
     $client->delete;
-    die "Attempt to restart a dead ADB::Client";
-    # confess "Attempt to restart a dead ADB::Client";
+    confess "Attempt to restart a dead ADB::Client";
 }
 
 sub is_fatal {

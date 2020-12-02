@@ -15,6 +15,7 @@ use ADB::Client::Utils qw(dumper info caller_info $DEBUG $VERBOSE);
 our $EVENT_INITER = \&event_init;
 our $AIO_INITER = \&aio_init;
 # our ($DEBUG, $VERBOSE);
+our $loop_level = -1;
 
 my ($timer, $immediate);
 BEGIN {
@@ -61,13 +62,18 @@ my $write_mask = "";
 my $error_mask = "";
 my (%read_refs, %write_refs, %error_refs, @unlooping);
 
-my @NOP = (bless([]), sub {});
+# All placeholder subs are the same sub
+use constant NOP => sub {};
+
 sub ADB::Client::Events::Read::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_read $fd") if $DEBUG;
     # This strange assign after delete is to update the reference the for in
-    # sub mainloop may still have
-    @{delete $read_refs{$fd}} = @NOP;
+    # sub mainloop may still have in such a way that element 0 keeps existing
+    # (otherwise a confess during the callback will access freed memory)
+    # We could set either the object (index 0) or the callback (index 1)
+    # But the object is already weak and the callback may be a closure
+    delete($read_refs{$fd})->[1] = NOP;
     if (%read_refs) {
         vec($read_mask, $fd, 1) = 0;
         $read_mask =~ s/\x00+\z//;
@@ -80,8 +86,11 @@ sub ADB::Client::Events::Write::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_write $fd") if $DEBUG;
     # This strange assign after delete is to update the reference the for in
-    # sub mainloop may still have
-    @{delete $write_refs{$fd}} = @NOP;
+    # sub mainloop may still have in such a way that element 0 keeps existing
+    # (otherwise a confess during the callback will access freed memory)
+    # We could set either the object (index 0) or the callback (index 1)
+    # But the object is already weak and the callback may be a closure
+    delete($write_refs{$fd})->[1] = NOP;
     if (%write_refs) {
         vec($write_mask, $fd, 1) = 0;
         $write_mask =~ s/\x00+\z//;
@@ -94,8 +103,11 @@ sub ADB::Client::Events::Error::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
     caller_info("delete_error $fd") if $DEBUG;
     # This strange assign after delete is to update the reference the for in
-    # sub mainloop may still have
-    @{delete $error_refs{$fd}} = @NOP;
+    # sub mainloop may still have in such a way that element 0 keeps existing
+    # (otherwise a confess during the callback will access freed memory)
+    # We could set either the object (index 0) or the callback (index 1)
+    # But the object is already weak and the callback may be a closure
+    delete($error_refs{$fd})->[1] = NOP;
     if (%error_refs) {
         vec($error_mask, $fd, 1) = 0;
         $error_mask =~ s/\x00+\z//;
@@ -139,47 +151,46 @@ sub unloop {
 }
 
 sub loop_levels {
-    return scalar @unlooping;
+    return $loop_level+1;
 }
 
 sub mainloop {
     local $@;
     $EVENT_INITER->() if $EVENT_INITER;
-    my $level = push(@unlooping, undef)-1;
-    eval {
-        info("Entering mainloop (level $level)") if $VERBOSE || $DEBUG;
-        local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
-        my ($r, $w, $e, $name, $timeout);
-        until ($unlooping[-1]) {
-            ($timeout = timers_collect()) //
-                (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
-            if ((select($r = $read_mask,
-                        $w = $write_mask,
-                        $e = $error_mask, $timeout) || next) > 0) {
-                # The copy to @tmp is because the stack doesn't keep values
-                # alive, so any deletes on xxx_refs during the loop can make
-                # the value go poof. The copy temporarily increases the
-                # refcount so the value doesn't go away. That is also why the
-                # delete_xxx functions modify the value before delete
-                # $name = $_->[1], $_->[0]->$name for my @tmp=(
-                $_->[1]->($_->[0]) for my @tmp=(
+    local $loop_level = $loop_level + 1;
+    local $unlooping[$loop_level] = undef;
+    local $SIG{PIPE} = "IGNORE" if $IGNORE_PIPE_LOCAL;
+
+    info("Entering mainloop (level $loop_level)") if $VERBOSE || $DEBUG;
+    my ($r, $w, $e, $name, $timeout);
+    until ($unlooping[$loop_level]) {
+        ($timeout = timers_collect()) //
+            (keys %read_refs > $read_fixed || %write_refs || %error_refs || !$AIO_INITER && IO::AIO::nreqs() || last);
+        if ((select($r = $read_mask,
+                    $w = $write_mask,
+                    $e = $error_mask, $timeout) || next) > 0) {
+            # The copy to @tmp is because the stack doesn't keep values
+            # alive, so any deletes on xxx_refs during the loop can make
+            # the value go poof. The copy temporarily increases the
+            # refcount so the value doesn't go away. That is also why the
+            # delete_xxx functions modify the value before delete
+            # $name = $_->[1], $_->[0]->$name for my @tmp=(
+            $_->[1]->($_->[0] || next) for my @tmp=(
                 # $$_ and $$_->[0]->(@{$$_->[1]}[1..$#{$$_->[1]}]) for
-                    @read_refs{ grep vec($r, $_, 1), keys %read_refs},
-                    @write_refs{grep vec($w, $_, 1), keys %write_refs},
-                    @error_refs{grep vec($e, $_, 1), keys %error_refs});
-            } elsif ($! == EINTR) {
-                redo;
-            } else {
-                die "Select failed: $^E";
-            }
-        } continue {
-            timers_run();
+                @read_refs{ grep vec($r, $_, 1), keys %read_refs},
+                @write_refs{grep vec($w, $_, 1), keys %write_refs},
+                @error_refs{grep vec($e, $_, 1), keys %error_refs});
+        } elsif ($! == EINTR) {
+            redo;
+        } else {
+            die "Select failed: $^E";
         }
-        info("Exiting mainloop (level $level)") if $VERBOSE || $DEBUG;
-    };
-    my $tmp = pop @unlooping;
-    die $@ if $@;
-    return $tmp;
+    } continue {
+        timers_run();
+    }
+    info("Exiting mainloop (level $loop_level)") if $VERBOSE || $DEBUG;
+    $#unlooping = $loop_level;
+    return pop @unlooping;
 }
 
 sub event_init {

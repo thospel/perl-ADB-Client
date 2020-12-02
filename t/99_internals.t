@@ -47,8 +47,8 @@ END {
         "Entering mainloop (level 0)",
         "Exiting mainloop (level 0)",
         "Unloop (level 0)",
-        "Entering mainloop (level 1)",
-        "Exiting mainloop (level 1)",
+        "Entering mainloop (level 0)",
+        "Exiting mainloop (level 0)",
     ], "Expected add and delete info lines") ||
         dumper(\@info_events);
 }

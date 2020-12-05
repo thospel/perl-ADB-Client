@@ -13,12 +13,12 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Socket qw(AF_INET);
 
-use Test::More tests => 405;
+use Test::More tests => 411;
 
 use TestDrive qw(adb_start adb_version adb_unreachable addr_filter dumper unalarm);
 
 # We already checked loading in 04_adb_client.t
-use ADB::Client qw(mainloop $ADB);
+use ADB::Client qw(mainloop timer $ADB);
 use ADB::Client::Utils qw(addr_info);
 
 my ($addr_info, $client, @result, $_addr_info, $callback,
@@ -631,13 +631,25 @@ for my $adb_socket (0, 1) {
     my $client2 = new_ok("ADB::Client" =>
                          [host => "127.0.0.1", port => $rport, blocking => 0,
                           adb_socket => $adb_socket ? "foo" : ""]);
+    # Use client3 to make sure spawning doesn't keep clients alive
+    my $client3 = new_ok("ADB::Client" =>
+                         [host => "127.0.0.1", port => $rport, blocking => 0,
+                          adb_socket => -$adb_socket]);
     is ($client1->adb_socket, -$adb_socket, "Expected adb_socket");
     is ($client2->adb_socket, $adb_socket, "Expected adb_socket");
+    is ($client3->adb_socket, -$adb_socket, "Expected adb_socket");
     $callback = sub { shift; push @result, [@_] };
     $spawns0 = ADB::Client::Spawn->spawns;
     @result = ();
     $client1->spawn(callback => $callback);
     $client2->spawn(callback => $callback);
+    $client3->spawn(callback => $callback);
+    my $t = timer(0.05, $client2, sub {
+        my $objects = ADB::Client->objects;
+        $client3 = undef;
+        is(ADB::Client->objects, $objects-1,
+           "ADB::Clients can be immediately freed");
+    });
     mainloop;
     $spawns1 = ADB::Client::Spawn->spawns;
     $spawns = $spawns1 - $spawns0;

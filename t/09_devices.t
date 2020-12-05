@@ -512,7 +512,6 @@ is_deeply(\@tracked, [
     },
     { "10.253.0.13:5555" => [ "device", "offline" ] }
 ], "First event") || dumper(\@tracked);
-
 @tracked = $tracker->wait;
 is_deeply(\@tracked, [
     { "52000c4748d6a283" => "device" },

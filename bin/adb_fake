@@ -142,7 +142,7 @@ sub acceptable {
     if ($listener->{type} == BLACKHOLE) {
         $state->output($listener->{arg}{hello}) if $listener->{arg}{hello} ne "";
         $state->{bytes_left} = $listener->{arg}{n};
-        $state->adb_close_soon if $state->{bytes_left} <= 0;
+        $state->adb_close_soon("Maximum input bytes") if $state->{bytes_left} <= 0;
     }
     $state->output("adb_fake $VERSION\n") if $listener->{type} == CONTROL;
 }
@@ -354,7 +354,7 @@ sub writer {
     die "Assertion: Length 0 write" if defined $rc;
     return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
     ::unidle();
-    die "Write error: $^E";
+    $state->adb_close("Write error: $^E");
 }
 
 sub output {
@@ -535,7 +535,9 @@ sub new {
         $type == ::ECHO		? \&adb_echo :
         die("Unhandled type $type"),
         on_error	=> \&adb_error,
-        on_close	=> \&adb_close,
+        on_close	=> sub {
+            shift->adb_close("Connection closed by peer");
+        },
         write_timeout	=> $TIMEOUT,
 
         sync		=> 0,
@@ -550,14 +552,14 @@ sub adb_error {
     my ($state, $err) = @_;
 
     warn($err);
-    $state->adb_close;
+    $state->adb_close($err);
 }
 
 sub adb_close {
-    my ($state) = @_;
+    my ($state, $reason) = @_;
 
-    # Carp::cluck("Close");
-    info("Close   (%s)", $state->{id}) if $verbose;
+    # Carp::cluck("Close $reason");
+    info("Close   (%s) |\t%s", $state->{id}, $reason) if $verbose;
     # print STDERR "ADB CLOSE ", callers();
     # This can get called during _reader which will inspect this after return
     $state->{on_read} = \&adb_discard;
@@ -566,13 +568,13 @@ sub adb_close {
 }
 
 sub adb_close_soon {
-    my ($state) = @_;
+    my ($state, $reason) = @_;
 
     if ($state->{out} eq "") {
-        $state->adb_close;
+        $state->adb_close($reason);
     } elsif (!$state->{written}) {
         $state->{on_read} = \&adb_discard;
-        $state->{written} = \&adb_close;
+        $state->{written} = sub { shift->adb_close($reason) };
     }
 }
 
@@ -585,17 +587,17 @@ sub adb_discard {
 sub adb_closer {
     my ($state, $rc) = @_;
 
-    info("Discard (%s) > \t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
+    info("Discard (%s) >\t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
 
     $state->{bytes_left} -= $rc;
-    $state->adb_close_soon if $state->{bytes_left} <= 0;
+    $state->adb_close_soon("Maximum input bytes") if $state->{bytes_left} <= 0;
     $state->{in} = "";
 }
 
 sub adb_echo {
     my ($state, $rc) = @_;
 
-    info("Echo    (%s) > \t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
+    info("Echo    (%s) >\t%s", $state->{id}, string_from_value($state->{in})) if $verbose;
     $state->output($state->{in});
     $state->{in} = "";
 }
@@ -609,7 +611,7 @@ sub wait_interrupt {
 }
 
 my %command_sync = (
-    QUIT	=> \&adb_close,
+    QUIT	=> \&command_quit,
     STAT	=> \&command_lstat_v1,
     LST2	=> \&command_lstat_v2,
     STA2	=> \&command_lstat_v2,
@@ -665,7 +667,8 @@ sub adb_read {
 sub send_read {
     my ($state) = @_;
 
-    while (length $state->{in} >= 4) {
+    while (1) {
+        length $state->{in} >= 4 || return;
         my ($id, $length) = unpack("a4V", $state->{in});
         if ($id eq "DATA") {
             defined $length && length $state->{in} >= 8 + $length || return;
@@ -717,7 +720,7 @@ sub adb_output {
                 $response);
             # $state->{written} = \&adb_close;
         }
-        $state->adb_close_soon if !$keep_open || $status == FAIL;
+        $state->adb_close_soon($status == FAIL ? "Close on fail" : "Auto closing command") if !$keep_open || $status == FAIL;
     } else {
         # Close after OKAY send (used by host:kill)
         $state->output("OKAY");
@@ -731,7 +734,7 @@ sub adb_sync_fail {
 
     die "Already have 'written" if $state->{written};
     $state->output(pack("a*V/a*", "FAIL", $err));
-    $state->adb_close_soon;
+    $state->adb_close_soon("Close on fail");
 }
 
 sub transport_type_name {
@@ -982,7 +985,9 @@ sub command_host {
         $state->{transport} = 0;
         $listener->{device_events}{$state->{key}} = $state;
         $state->{on_device_event} = \&tracker,
-        $state->{on_read} = \&adb_close;
+        $state->{on_read} = sub {
+            shift->adb_close("Interrupted by input");
+        };
     } elsif ($command eq "host-features") {
         $state->adb_output(OKAY, join "," => @host_features);
     } elsif ($command =~ m{^connect:(.*?)(?::(\d+))?\z}as) {
@@ -1217,7 +1222,7 @@ sub sync_filecheck {
     my ($state, $file) = @_;
 
     if ($file !~ m{^/}) {
-        $state->adb_sync_fail("Not absolute");
+        $state->adb_sync_fail("Path '$file' not absolute");
         return undef;
     }
     if ("$file/" =~ m{/\.\./}) {
@@ -1253,6 +1258,10 @@ sub stat_massage {
     for my $i (MTIME, CTIME, ATIME) {
         $_[$i] = time_to_adb($_[$i]);
     }
+}
+
+sub command_quit {
+    shift->adb_close("Peer QUIT");
 }
 
 sub command_lstat_v1 {
@@ -1758,7 +1767,7 @@ sub drop {
     for my $state (values %{$listener->{accepted}}) {
         if ($state->{transport} == $device) {
             # print STDERR "Closing $state->{id} because transport $device->{serial} was lost\n";
-            $state->adb_close_soon;
+            $state->adb_close_soon("Transport device lost");
         }
     }
 }

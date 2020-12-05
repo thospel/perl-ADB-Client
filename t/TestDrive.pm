@@ -39,9 +39,10 @@ BEGIN {
 # We tested in 01_adb_check_response.t (with BAIL_OUT) that this can be used
 use ADB::Client::Utils qw(display_string);
 # We tested in t/02_adb_client (with BAIL_OUT) that this can be used
-use ADB::Client qw($ADB);
+use ADB::Client qw($ADB $BLOCK_SIZE);
 use ADB::Client::Command qw(EXPECT_EOF UTF8_IN UTF8_OUT);
 
+$BLOCK_SIZE = $ENV{ADB_CLIENT_TEST_BLOCK_SIZE} || $BLOCK_SIZE;
 # We tested in t/02_adb_client (with BAIL_OUT) that we can add these commands
 ADB::Client->command_add(["failer" => "Wee", 0, EXPECT_EOF]);
 ADB::Client->command_add(["echo" => "internal:echo:%s", -1,

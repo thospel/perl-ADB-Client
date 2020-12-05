@@ -82,7 +82,7 @@ sub _process {
 
     if ($tracker->{timeout}) {
         $tracker->{timeout} = undef;
-        $tracker->{reader} = undef;
+        $tracker->{reader} = $tracker->{socket}->add_read($tracker, \&_reader);
     }
     while (length $tracker->{in} >= 4) {
         my $len = substr($tracker->{in}, 0, 4);
@@ -175,13 +175,13 @@ sub is_empty {
 sub wait : method {
     my ($tracker) = @_;
 
-    croak "Assertion: Already are waiting" if defined $tracker->{result};
+    croak "Assertion: Already waiting" if defined $tracker->{result};
     my $loop_levels = loop_levels();
     $tracker->track(sub {
         my $tracker = shift;
 
         defined $tracker->{result} || die "Assertion: Not waiting";
-        die "Assertion: Result already set" if $tracker->{result};
+        confess "Assertion: Result already set" if $tracker->{result};
         $tracker->{result} = \@_;
         unloop($loop_levels);
         $tracker->untrack;
@@ -197,7 +197,7 @@ sub wait : method {
 
     my $result = $tracker->{result};
     $tracker->{result} = undef;
-    $result || die "Assertion: Exit mainloop without setting result";
+    $result || confess "Assertion: Exit mainloop without setting result";
     # croak $result->[0] =~ s{(.*) at .* line \d+\.?\n}{$1}sar if $result->[0];
     $result->[0] =~ /\n\z/ ? die $result->[0] : croak $result->[0] if $result->[0];
     wantarray || return $result->[1];

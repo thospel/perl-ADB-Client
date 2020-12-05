@@ -33,7 +33,9 @@ use ADB::Client::Tracker;
 use Exporter::Tidy
     events	=> [qw(mainloop event_init unloop loop_levels timer immediate)],
     other	=> [qw(string_from_value
-                       $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET)];
+                       $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
+                       $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $SPAWN_TIMEOUT
+                       $BLOCK_SIZE)];
 
 our @CARP_NOT = qw(ADB::Client::Events ADB::Client::Timer);
 
@@ -41,6 +43,8 @@ our @CARP_NOT = qw(ADB::Client::Events ADB::Client::Timer);
 die "Bad file '", __FILE__, "'" if __FILE__ =~ /["\n\0]/;
 
 our $BLOCK_SIZE = int(2**16);
+# DATA_BLOCK_SIZE must never be greater than 2**16
+our $DATA_BLOCK_SIZE = int(2**16);
 
 our $CALLBACK_DEFAULT	= \&callback_default;
 our $ADB_SOCKET	= undef;
@@ -278,6 +282,10 @@ sub port {
     return shift->{port};
 }
 
+sub block_size {
+    return shift->{block_size};
+}
+
 sub adb_socket {
     return shift->{adb_socket};
 }
@@ -495,7 +503,7 @@ sub command_add {
                 croak "SYNC command '$command' does not have length 4";
             $command_ref[NR_BYTES] >= 0 ||
                 croak "SYNC command '$command' cannot be counted";
-            $command_ref[NR_BYTES] < 2**32 ||
+            $command_ref[NR_BYTES] < int(2**32) ||
                 croak "SYNC command '$command' expected response out of range";
             # In check_response() we only have special handling for this case
             # (QUIT should be the only EXPECT_EOF SYNC command)
@@ -1042,37 +1050,26 @@ sub _send_data {
     my ($client, $command) = @_;
 
     my $arguments = $command->arguments;
-    my $length = length $arguments->[1];
-    if ($length) {
-        my $want = $command->{high_water} - length $client->{out};
-        $want > 0 || $client->fatal("Bad water calculation: $want <= 0");
-        while (1) {
-            $length = $want if $length > $want;
-            $length = 2**16 if $length > 2**16;
-            $client->{out} .= pack("a4V", "DATA", $length);
-            $client->{out} .= substr($arguments->[1], 0, $length, "");
-            $client->{nr_bytes} += $length;
-            $want = $command->{high_water} - length $client->{out};
-            last if $want <= 0;
-            $length = length $arguments->[1] || last;
-        }
+    while (my $length = length $arguments->[1]) {
+        return if length $client->{out} >= $command->{high_water};
+        $length = $DATA_BLOCK_SIZE if $length > $DATA_BLOCK_SIZE;
+        $client->{out} .= pack("a4V", "DATA", $length);
+        $client->{out} .= substr($arguments->[1], 0, $length, "");
+        $client->{nr_bytes} += $length;
     }
-    if ($arguments->[1] eq "") {
-        delete $command->{source};
-        $client->{out} .=
-            pack("a4V", "DONE",
-                 ($command->{mtime} //= int(realtime())) - EPOCH1970);
-    }
+    delete $command->{source};
+    $client->{out} .=
+        pack("a4V", "DONE",
+             ($command->{mtime} //= int(realtime())) - EPOCH1970);
 }
 
 sub _send_data_raw {
     my ($client, $command) = @_;
 
     my $arguments = $command->arguments;
-    my $length = length $arguments->[1];
-    if ($length) {
+    if (my $length = length $arguments->[1]) {
         my $want = $command->{high_water} - length $client->{out};
-        $want > 0 || $client->fatal("Bad water calculation: $want <= 0");
+        return if $want <= 0;
         $length = $want if $length > $want;
         $client->{out} .= substr($arguments->[1], 0, $length, "");
         $client->{nr_bytes} += $length;
@@ -1134,7 +1131,7 @@ sub connector {
     if (defined $command->{version_min}) {
         $command->{version_min} =~ /^[1-9][0-9]*\z|^0\z/ ||
             croak "Version_min is not a natural number";
-        $command->{version_min} < 2**16 ||
+        $command->{version_min} < int(2**16) ||
             croak "Version_min '$command->{version_min}' out of range";
         $command->{version_scan} ||= 1;
     }
@@ -1142,7 +1139,7 @@ sub connector {
     if (defined $command->{version_max}) {
         $command->{version_max} =~ /^[1-9][0-9]*\z|^0\z/ ||
             croak "Version_max is not a natural number";
-        #$command->{version_max} < 2**16 ||
+        #$command->{version_max} < int(2**16) ||
         #    croak "Version_max '$command->{version_max}' out of range";
         $command->{version_scan} ||= 1;
     }
@@ -1816,7 +1813,7 @@ sub _writer {
         return;
     }
     return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
-    $client->error("Unexpected error writing to adb socket: $^E");
+    $client->error("Unexpected error while writing to adb socket: $^E");
 }
 
 sub _reader {
@@ -2377,7 +2374,7 @@ sub spawn_socket {
     my $socket;
     {
         # Make a copy without CLOEXEC
-        local $^F = 2**31-1;
+        local $^F = int(2**31-1);
         open($socket, "+>&", $s) || croak "Could not dup socket: $^E";
     }
     my $addr = getsockname($socket) || croak "Cannot getsockname: $^E";

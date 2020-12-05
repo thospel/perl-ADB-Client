@@ -34,8 +34,8 @@ BEGIN {
         # After OKAY we still expect the connection to be closed
         "EXPECT_EOF",
 
-        # After the expected number of bytes more bytes may follow even though we
-        # didn't send a new command.
+        # After the expected number of bytes more bytes may follow even though
+        # we didn't send a new command.
         # Should never appear in combination with EXPECT_EOF
         # The combination of SYNC and MAYBE_MORE implies an on_progress callback
         "MAYBE_MORE",
@@ -155,7 +155,7 @@ sub command_ref : method {
             }
             $command->{OUT} = sprintf("%04X", length $out) . $out;
         }
-        $command->{ARGUMENTS} = \@_;
+        $command->{ARGUMENTS} = [@_];
     }
     $command->{COMMAND_REF} = $command_ref;
 }

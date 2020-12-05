@@ -15,6 +15,7 @@ use FindBin qw($Bin);
 use lib $Bin;
 use Storable qw(dclone);
 use Socket qw(AF_INET);
+use Errno qw(ECONNRESET);
 
 use Test::More tests => 635;
 use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
@@ -25,6 +26,8 @@ use TestDrive qw(adb_start adb_unacceptable adb_unreachable adb_version
 use ADB::Client qw(mainloop);
 use ADB::Client::Utils qw(addr_info clocktime_running);
 
+my $ECONNRESET = $! = ECONNRESET;
+
 my $port  = adb_start();
 my $port2 = adb_version(10);
 my $rport = adb_unreachable();
@@ -32,7 +35,7 @@ my $port_ssh = adb_blackhole("SSH-2.0-OpenSSH_8.4p1 Debian-2\n");
 my $port_closer = adb_closer();
 my $port_echo = adb_echo();
 
-my (@results, $err, $result);
+my (@results, $result, $response);
 my $callback = sub {
     $_[2] = addr_filter($_[2]) if ref $_[2] eq "HASH";
     push @results, [shift->connected, @{dclone(\@_)}];
@@ -193,21 +196,22 @@ is_deeply(\@results, [
 isa_ok($client_closer->_connect, "HASH",
        "We will reconnect an immediate closer");
 eval { $client_closer->version };
-$err = $@;
 # The EOF can happen before or after we sent the command
 # This depends on how fast the fake server is, so we can't predict without wait
-like($err,
-     qr{^Unexpected EOF while still writing "000Chost:version" to adb socket at |Unexpected EOF at },
+like($@,
+     qr{^Unexpected EOF while still writing ".+" to adb socket at |Unexpected EOF at |Unexpected error while writing to adb socket: $ECONNRESET at },
      "But actual commands will fail with unexpected EOF");
 eval { $client_ssh->_connect };
-$err = $@;
-like($err,
-     qr{^Response without having sent anything: "ssh-2\.0-openssh_8.4p1 debian-2\\n" at },
+$response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client_ssh->block_size);
+$response =~ s/\n/\\n/g;
+like($@,
+     qr{^Response without having sent anything: "\Q$response\E" at },
      "We can't reconnect a greeter");
 eval { $client_ssh2->version };
-$err = $@;
-like($err,
-     qr{^Response while command has not yet completed: "ssh-2\.0-openssh_8\.4p1 debian-2\\n" at },
+$response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client_ssh2->block_size);
+$response =~ s/\n/\\n/g;
+like($@,
+     qr{^Response while command has not yet completed: "\Q$response\E" at },
      "We cant's end commands to a greeter");
 
 # Connect to something that listens but does not accept
@@ -359,12 +363,11 @@ for my $i (0..2) {
             my $result;
             if ($direct == 0) {
                 $result = eval { $client->_connect() };
-                my $err = $@;
                 if ($retry == 3) {
-                    like($err, qr{^ADB server 127\.0\.0\.1 port $old_port: Connect error: },
+                    like($@, qr{^ADB server 127\.0\.0\.1 port $old_port: Connect error: },
                          "Connection error [$i, $direct, $retry]");
                 } else {
-                    is($err, "", "No connection error [$i, $direct, $retry]");
+                    is($@, "", "No connection error [$i, $direct, $retry]");
                     my $r = $client->connection_data;
                     is_deeply($r, $result,
                               "connection_data corresponds to connection result [$i, $direct, $retry]");
@@ -373,13 +376,12 @@ for my $i (0..2) {
                 }
             } else {
                 my $r = eval { $client->version() };
-                my $err = $@;
                 if ($retry == 3) {
-                    like($err,
+                    like($@,
                          qr{^ADB server 127\.0\.0\.1 port $old_port: Connect error: },
                          "Connection error [$i, $direct, $retry]");
                 } else {
-                    is($err, "", "No connection error [$i, $direct, $retry]");
+                    is($@, "", "No connection error [$i, $direct, $retry]");
                     is($r, 39, "Expected version [$i, $direct, $retry]");
                 }
             }
@@ -468,13 +470,11 @@ for my $direct (0..1) {
     for my $retry (0..2) {
         if ($direct == 0) {
             my $dummy = eval { $client->_connect() };
-            my $err = $@;
-            like($err, qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
+            like($@, qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
                  "Connection error [$direct, $retry]");
         } else {
             my $dummy = eval { $client->version() };
-            my $err = $@;
-            like($err, qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
+            like($@, qr{^ADB server 127\.0\.0\.1 port $rport: Connect error: },
                  "Connection error [$direct, $retry]");
         }
         # dumper($_addr_info);
@@ -612,11 +612,11 @@ is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
 $dummy = eval { $client->_connect(version_min => 0) };
 like($@,
-     qr{^ADB server 127\.0\.0\.1 port $port_closer: Unexpected EOF(?: while still writing "000Chost:version" to adb socket)? at },
+     qr{^ADB server 127\.0\.0\.1 port $port_closer: (?:Unexpected EOF(?: while still writing ".+" to adb socket)?|Unexpected error while writing to adb socket: $ECONNRESET) at },
      "Error from Closer");
 cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to closer");
 like($_addr_info->[0]{last_connect_error},
-   qr{^Unexpected EOF(?: while still writing "000Chost:version" to adb socket)?\z},
+   qr{^(?:Unexpected EOF(?: while still writing ".+" to adb socket)?|Unexpected error while writing to adb socket: $ECONNRESET)\z},
    "We didn't like closer");
 ok(!exists $_addr_info->[1]{connected}, "We never tried after closer");
 ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after closer");
@@ -632,12 +632,14 @@ $client = new_ok("ADB::Client" =>
 is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
 $dummy = eval { $client->_connect(version_min => 0) };
+$response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client->block_size);
+my $response0 = substr("ssh-", 0, $client->block_size);;
 like($@,
-     qr{^ADB server 127\.0\.0\.1 port $port_ssh: (?:Bad ADB status "ssh-"|\QResponse while command has not yet completed: "ssh-2.0-openssh_8.4p1 debian-2\n"\E) at },
+     qr{^ADB server 127\.0\.0\.1 port $port_ssh: (?:Bad ADB status "\Q$response0\E"|\QResponse while command has not yet completed: "$response"\E) at },
      "Error from greeter");
 cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to greeter");
 like($_addr_info->[0]{last_connect_error},
-     qr{^(?:Bad ADB status "ssh-"|\QResponse while command has not yet completed: "ssh-2.0-openssh_8.4p1 debian-2\n"\E)\z},
+     qr{^(?:Bad ADB status "\Q$response0\E"|\QResponse while command has not yet completed: "$response"\E)\z},
    "We didn't like greeter");
 ok(!exists $_addr_info->[1]{connected}, "We never tried after greeter");
 ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after greeter");
@@ -653,12 +655,15 @@ $client = new_ok("ADB::Client" =>
 is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
 $dummy = eval { $client->_connect(version_min => 0) };
+my $status = substr("000C", 0, $client->block_size);
+$status = $status eq "0" ? $status : qq{"$status"};
 like($@,
-     qr{^ADB server 127\.0\.0\.1 port $port_echo: Bad ADB status "000C" at },
+     qr{^ADB server 127\.0\.0\.1 port $port_echo: (?:Bad ADB status \Q$status\E|Response while command has not yet completed: \Q$status\E) at },
      "Error from echo");
 cmp_ok($_addr_info->[0]{connected}, ">", 0, "We could connect to echo");
-is($_addr_info->[0]{last_connect_error},
-   'Bad ADB status "000C"', "We didn't like echo");
+like($_addr_info->[0]{last_connect_error},
+     qr{^(?:Bad ADB status|Response while command has not yet completed:) $status\z},
+     "We didn't like echo");
 ok(!exists $_addr_info->[1]{connected}, "We never tried after echo");
 ok(!exists $_addr_info->[1]{last_connect_error}, "We never tried after echo");
 

@@ -32,6 +32,14 @@ sub CALLERS	() { 4 };
 
 # Timers are kept in a simple binary heap @timers
 sub timer {
+    if ($DEBUG) {
+        local $DEBUG;
+        my $timer = timer(@_);
+        my $callers = callers();
+        $timer->[CALLERS] = $callers;
+        info("add Timer(%s) %08x [%s]", $_[0], refaddr($timer), $callers);
+        return $timer;
+    }
     my $time = shift() + clocktime();
     my $i = @timers;
     while ($i > 1 && $time < $timers[$i >> 1][TIME]) {
@@ -41,11 +49,6 @@ sub timer {
     my $timer = bless [$i, $time, @_];
     weaken($timer->[OBJ]);
     weaken($timers[$i] = $timer);
-    if ($DEBUG) {
-        my $callers = callers();
-        $timer->[CALLERS] = $callers;
-        info("add Timer(%s) %08x [%s]", $_[0], refaddr($timer), $callers);
-    }
     return $timer;
 }
 

@@ -22,7 +22,9 @@ BEGIN {
 }
 
 my $name = (getpwnam($me))[6];
-diag("Reminder: Set environment variables ADB_CLIENT_TEST_DEVELOPER and ADB_CLIENT_TEST_REAL for some tests against the real ADB server") if !$ENV{ADB_CLIENT_TEST_DEVELOPER} && $name eq "Ton Hospel";
+# As far as I know there are only 2 people in the world with this name and the
+# other one won't ever run a perl "make test"
+diag("Reminder:\nSet environment variables ADB_CLIENT_TEST_DEVELOPER and ADB_CLIENT_TEST_REAL for some tests against the real ADB server\nSet environment variable ADB_CLIENT_TEST_BLOCK_SIZE for tests with non standard block size\nSet environment variable ADB_CLIENT_TEST_VERBOSE to make adb_fake verbose") if !$ENV{ADB_CLIENT_TEST_DEVELOPER} && $name eq "Ton Hospel";
 
 my $long_string = "ABC\nde\"zz\0fg\th\x{c1}zwarf\tha" . "-" x DISPLAY_MAX;
 my @args;

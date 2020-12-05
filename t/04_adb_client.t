@@ -21,6 +21,8 @@ BEGIN {
            qw(mainloop event_init unloop loop_levels timer immediate
               string_from_value
               $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
+              $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $SPAWN_TIMEOUT
+              $BLOCK_SIZE
               :events :other)) ||
         BAIL_OUT("Cannot even use ADB::Client");
     use_ok("ADB::Client::Utils",

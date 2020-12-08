@@ -184,6 +184,8 @@ sub objects {
 }
 
 END {
+    # Carp.pm can stash objects in @DB::args causing them not to get freed
+    @DB::args = ();
     # $QUIET first for easier code coverage
     info("Still have %d %s objects at program end", $objects, __PACKAGE__) if !$QUIET && $objects;
 }
@@ -237,6 +239,7 @@ sub new {
         reader		=> undef,
         writer		=> undef,
         timeout		=> undef,
+        handlers	=> {},
         adb		=> $adb,
         adb_socket	=> $adb_socket,
         block_size	=> $block_size,
@@ -257,7 +260,6 @@ sub new {
         commands	=> [],
         post_action	=> undef,
         result		=> undef,
-        starter		=> undef,
         $DEBUG ? (callers => callers()) : (),
     }, $class;
     ++$objects;
@@ -638,17 +640,22 @@ sub command_simple {
         exists $arguments->{on_progress} &&
         ($flags & (SYNC|MAYBE_MORE)) == (SYNC|MAYBE_MORE);
 
+    if ($command_ref->[FLAGS] & RECV) {
+        $command->{DATA} = "";
+        $command->{done} = 0;
+        if ($command->{socket} = delete $arguments->{socket}) {
+            $command->{sink} = \&_send_socket;
+            # The user must accept that his socket becomes non-blocking
+            $command->{socket}->blocking(0);
+        }
+    }
+
     if (ref $command_ref->[PROCESS] eq "ARRAY") {
         my $keys = $command_ref->[PROCESS];
         # Skip first (the actual processing code)
         for my $key (@$keys[1..$#$keys]) {
-            $command->{$key} = delete $arguments->{$key} if exists $arguments->{$key};
+            $command->{$key} = delete $arguments->{$key} if exists $arguments->{$key} && !exists $command->{$key};
         }
-    }
-
-    if ($command_ref->[FLAGS] & RECV) {
-        $command->{DATA} = "";
-        $command->{done} = 0;
     }
 
     if ($command_ref->[FLAGS] & SEND) {
@@ -839,8 +846,8 @@ sub close : method {
     $client->{write_suspended} = 0;
     $client->{sync} = 0;
     $client->{active}  = 0;
+    %{$client->{handlers}} = ();
     $client->{timeout} = undef;
-    $client->{starter} = undef;
 }
 
 sub command_current {
@@ -958,6 +965,23 @@ sub success {
     return;
 }
 
+sub _success_delayed {
+    my ($client) = @_;
+
+    # This makes sure write is suspended
+    $client->{out} eq "" ||
+        $client->fatal("Done while command has not yet completed");
+    # Don't expect any more input
+    $client->{reader} = undef;
+    # Drop transaction timeout
+    $client->{timeout} = undef;
+    # That should have been the only pending activity
+    # (We already checked that out = "")
+    $client->{active} = 0;
+
+    $client->success();
+}
+
 sub _activate_delayed {
     my ($client) = @_;
 
@@ -998,7 +1022,8 @@ sub _activate {
                 # We don't expect any read here, but it's needed to maintain our
                 # invariant active & socket => reader || !defined in
                 $client->{in} = undef if $client->{socket};
-                last;
+                $client->{active} = 1;
+                return;
             }
 
             my $code = $command_ref->[CODE] ||
@@ -1032,18 +1057,20 @@ sub _activate {
         $client->{sent} = 0;
         info("Sending to ADB: " . display_string($client->{out})) if $DEBUG;
 
-        $client->{writer} = $client->{socket}->add_write($client, \&_writer);
+        $client->{active} = 1;
         $client->{reader} = $client->{socket}->add_read($client, \&_reader);
         $client->{timeout} = timer(
             $command->{transaction_timeout} //
             $client->fatal("No transaction_timeout"),
             $client, \&_transaction_timed_out);
-
         $command->{source}->($client, $command) if
             $command->{source} &&
             length $client->{out} < $command->{high_water};
+        if ($client->{out} ne "") {
+            $client->{writer} = $client->{socket}->add_write($client, \&_writer);
+            $client->_writer;
+        }
     }
-    $client->{active} = 1;
 }
 
 sub _send_data {
@@ -1617,7 +1644,7 @@ sub _connect_step_spawn {
         $client->_connector_final($command->{first_error});
         return;
     }
-    $client->{starter} = $result;
+    $client->{handlers}{starter} = $result;
     $client->{timeout} = timer(
         $addr->{spawn_timeout} // $client->{spawn_timeout},
         $client,
@@ -1748,13 +1775,11 @@ sub resume_write {
 }
 
 sub suspendable {
-    my ($client, $state) = @_;
+    my ($client, $state_new) = @_;
 
-    my $command = $client->{commands}[0] ||
-        $client->fatal("No command");
-    $command->{suspendable} //
-        $client->fatal("Not a suspendable command");
-    if ($state > 0) {
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    $command->{suspendable} // $client->fatal("Not a suspendable command");
+    if ($state_new > 0) {
         # State > 0
         !$command->{suspendable} ||
             $client->fatal("Command already suspendable");
@@ -1763,26 +1788,17 @@ sub suspendable {
         $client->suspend_read if
             length $command->{DATA} >= $command->{high_water};
     } else {
-        $command->{suspendable} ||
-            $client->fatal("Command not suspendable");
-        if ($state) {
+        $command->{suspendable} || $client->fatal("Command not suspendable");
+        if ($state_new) {
             # State < 0
-            if ($command->{done}) {
-               $client->{out} eq "" ||
-                   $client->fatal("Done while command has not yet completed");
-               $command->arguments([delete $command->{DATA}]);
-               $command->command_ref(MARKER);
-               $client->suspend_read if !$client->{read_suspended};
-               $client->{read_suspended} = 0;
-               $client->{active} = 0;
-            } else {
-                $client->resume_read if $client->{read_suspended} &&
-                    length $command->{DATA} < $command->{high_water};
-            }
+            $client->resume_read if $client->{read_suspended} &&
+                length $command->{DATA} < $command->{high_water};
         } else {
             # State == 0
             $command->{suspendable} = 0;
             $client->resume_read if $client->{read_suspended};
+            $client->{timeout} = immediate($client, \&_success_delayed) if
+                $command->{done};
         }
     }
 }
@@ -1792,6 +1808,7 @@ sub _writer {
 
     my $rc = syswrite($client->{socket}, $client->{out}, $BLOCK_SIZE);
     if ($rc) {
+        $client->{sent} += $rc;
         substr($client->{out}, 0, $rc, "");
         if ($client->{sync}) {
             my $command = $client->{commands}[0] ||
@@ -1804,8 +1821,6 @@ sub _writer {
             $client->{writer} = undef;
             $client->{timeout} = undef if $client->{read_suspended};
         }
-
-        $client->{sent} += $rc;
         return;
     }
     if (defined $rc) {
@@ -1870,7 +1885,6 @@ sub _reader {
         }
         return;
     }
-
     my $command = $client->{commands}[0] ||
         $client->fatal("No command");
     my $command_ref = $command->{COMMAND_REF};
@@ -1985,6 +1999,40 @@ sub check_response {
         utf8::decode($str) if $command_ref->[FLAGS] & UTF8_IN;
     }
     return $error, $str;
+}
+
+sub _socket_writer {
+    my ($client) = @_;
+
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    my ($rc, $written);
+    while ($rc = syswrite($command->{socket}, $command->{DATA}, $client->{block_size})) {
+        substr($command->{DATA}, 0, $rc) = "";
+        $written ||= 1;
+        # if (length $command->{DATA} < ($command->{done} ? 1 : $command->{low_water})) {
+        if (length $command->{DATA} < $command->{low_water}) {
+            $client->{handlers}{socket_writer} = undef;
+            $client->suspendable(0);
+            return;
+        }
+    }
+    if (defined $rc) {
+        $client->error("Assertion: Length 0 write");
+    } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
+        $client->suspendable(-1) if $written;
+        return;
+    } else {
+        $client->error("Could not write to socket: $^E");
+    }
+}
+
+sub _send_socket {
+    my ($client, $data_ref, $done) = @_;
+
+    return if $$data_ref eq "";
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    $client->{handlers}{socket_writer} = $command->{socket}->add_write($client, \&_socket_writer);
+    $client->suspendable(1);
 }
 
 sub process_version {
@@ -2288,6 +2336,7 @@ sub process_list_v1 {
 sub process_recv_v1 {
     my (undef, undef, $client) = @_;
 
+    $client->{active} = 1;
     my $command = $client->command_current;
     while (length $client->{in} >= 4) {
         my ($id, $length) = unpack("a4V", $client->{in});
@@ -2339,15 +2388,18 @@ sub process_recv_v1 {
     if ($command->{sink} && !$command->{suspendable} &&
         length $command->{DATA} >= $command->{low_water}) {
         # my $continue = ADB::Client::Continue->new($client, $command);
-        $command->{sink}->($client, $command,
-                           \$command->{DATA}, $command->{done});
+        $command->{sink}->($client, \$command->{DATA}, $command->{done});
     }
 
-    return [delete $command->{DATA}] if $command->{done} && !$command->{suspendable};
+    if ($command->{done} && !$command->{suspendable}) {
+        $client->{active} = 0;
+        return [delete $command->{DATA}];
+    }
+    # Resuming read when command is done is not a problem since there should be
+    # nothing to read
 
     # Go read more bytes
     if (!$client->{read_suspended}) {
-        $client->{active} = 1;
         $client->{read_suspended} = 1;
         $client->resume_read;
     }
@@ -2370,6 +2422,9 @@ sub spawn_socket {
     my $callback = $keep_args{blocking} ? undef : delete $arguments{callback};
     croak "Unknown argument " . join(", ", keys %arguments) if %arguments;
 
+    # This test means we don't accept strings like "STDIN" even if STDIN is
+    # listening socket
+    croak "Socket is not an IO handle" if ref $s eq "";
     fileno($s) // croak "Socket is not an IO handle";
     my $socket;
     {

@@ -31,6 +31,7 @@ t/11__connect.t
 t/12_spawn.t
 t/13_spawn_socket.t
 t/20_sync.t
+t/21_recv.t
 t/40_ipv6.t
 t/41_non_loopback.t
 t/80_syntax.t

@@ -203,6 +203,7 @@ like($@,
      "But actual commands will fail with unexpected EOF");
 eval { $client_ssh->_connect };
 $response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client_ssh->block_size);
+my $response0 = substr("ssh-", 0, $client->block_size);;
 $response =~ s/\n/\\n/g;
 like($@,
      qr{^Response without having sent anything: "\Q$response\E" at },
@@ -211,8 +212,8 @@ eval { $client_ssh2->version };
 $response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client_ssh2->block_size);
 $response =~ s/\n/\\n/g;
 like($@,
-     qr{^Response while command has not yet completed: "\Q$response\E" at },
-     "We cant's end commands to a greeter");
+     qr{^Response while command has not yet completed: "\Q$response\E" at |^Bad ADB status "\Q$response0\E" at t},
+     "We can't send commands to a greeter");
 
 # Connect to something that listens but does not accept
 # (but the OS will still accept for you)
@@ -633,7 +634,8 @@ is($client->connection_data, undef, "No connection_data yet");
 $_addr_info = $client->_addr_info;
 $dummy = eval { $client->_connect(version_min => 0) };
 $response = substr("ssh-2.0-openssh_8.4p1 debian-2\n", 0, $client->block_size);
-my $response0 = substr("ssh-", 0, $client->block_size);;
+$response0 = substr("ssh-", 0, $client->block_size);;
+$response =~ s/\n/\\n/g;
 like($@,
      qr{^ADB server 127\.0\.0\.1 port $port_ssh: (?:Bad ADB status "\Q$response0\E"|\QResponse while command has not yet completed: "$response"\E) at },
      "Error from greeter");

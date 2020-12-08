@@ -11,16 +11,16 @@ use ADB::Client::Utils qw(info $DEBUG $QUIET);
 my $objects = 0;
 
 sub new {
-    my ($class, $starter, $client_ref) = @_;
+    my ($class, $starter, $client) = @_;
 
-    weaken($starter->{client_refs}{++$starter->{index}} = $client_ref);
+    weaken($starter->{clients}{++$starter->{index}} = $client);
     ++$objects;
     my $starter_ref = bless {
         starter	=> $starter,
         index	=> $starter->{index},
     }, $class;
-    # weaken($starter_ref->{starter});
-    $client_ref->{starter} = $starter_ref;
+    # weaken($starter_ref->{handlers}{starter});
+    $client->{handlers}{starter} = $starter_ref;
     return $starter_ref;
 }
 
@@ -31,9 +31,9 @@ sub DESTROY {
     my ($starter_ref) = @_;
 
     if (my $starter = $starter_ref->{starter}) {
-        delete $starter->{client_refs}{$starter_ref->{index}};
+        delete $starter->{clients}{$starter_ref->{index}};
     }
-    # Starter continues running even if no more client_refs in
+    # Starter continues running even if no more clients in
     # case another join gets done before the end
 }
 

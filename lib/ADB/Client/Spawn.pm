@@ -89,11 +89,11 @@ sub delete {
     return if $deleted;
 
     delete $starters{$starter->{key}};
-    if (%{$starter->{client_refs}}) {
-        warn("Assertion: Still have client_refs during destruction of $starter") if $DEBUG || !$ended;
-        my @client_refs = values %{$starter->{client_refs}};
-        %{$starter->{client_refs}} = ();
-        $_->{starter} = undef for @client_refs;
+    if (%{$starter->{clients}}) {
+        warn("Assertion: Still have clients during destruction of $starter") if $DEBUG || !$ended;
+        my @clients = values %{$starter->{clients}};
+        %{$starter->{clients}} = ();
+        $_->{handlers}{starter} = undef for @clients;
     }
 }
 
@@ -118,19 +118,19 @@ sub close : method {
 
     $starter->{pid_adb} = undef;
 
-    for my $client_ref (@{$starter->{client_refs}}{sort { $a <=> $b } keys %{$starter->{client_refs}}}) {
-        # $client_ref is weak everywhere, so it can have gone poof
-        $client_ref || next;
-        # The SpawnRef DESTROY should clean out $starter->{client_refs}
-        $client_ref->{starter} = undef;
+    for my $client (@{$starter->{clients}}{sort { $a <=> $b } keys %{$starter->{clients}}}) {
+        # $client is weak everywhere, so it can have gone poof
+        $client || next;
+        # The SpawnRef DESTROY should clean out $starter->{clients}
+        $client->{handlers}{starter} = undef;
         # don't naively try to optimise this without timers
         # join() can call this method and when join returns the caller does not
         # yet expect the carpet to have been yanked out from under him
-        $client_ref->{timeout} = immediate(
-            $client_ref,
+        $client->{timeout} = immediate(
+            $client,
             sub {
                 # It's up to _spawn_result to clear timeout
-                # $client_ref->{timeout} = undef;
+                # $client->{timeout} = undef;
                 shift->_spawn_result(@msg);
             }
         );
@@ -246,15 +246,15 @@ sub _spawn {
 
 # Assumes it is being called during an event callback
 sub join {
-    my ($class, $client_ref, $bind_addr) = @_;
+    my ($class, $client, $bind_addr) = @_;
 
-    # info("Spawn::join($class, $client_ref, $bind_addr)") if $DEBUG;
+    # info("Spawn::join($class, $client, $bind_addr)") if $DEBUG;
 
-    $client_ref->fatal("Already spawning an ADB server") if
-        $client_ref->{starter};
+    $client->fatal("Already spawning an ADB server") if
+        $client->{handlers}{starter};
 
     # Make sure we don't lose events. Caller should set a timeout AFTER join()
-    $client_ref->fatal("Already have a timeout") if $client_ref->{timeout};
+    $client->fatal("Already have a timeout") if $client->{timeout};
 
     my ($addr, $adb_socket);
     if (defined fileno $bind_addr) {
@@ -279,7 +279,7 @@ sub join {
             $adb_socket = 1;
         }
     } else {
-        $adb_socket = $client_ref->{adb_socket} <=> 0;
+        $adb_socket = $client->{adb_socket} <=> 0;
         $adb_socket = 1 if $adb_socket < 0 && $family != AF_INET6;
     }
 
@@ -287,16 +287,16 @@ sub join {
     $key .= ":" . $id++ if $port == 0;
     my $starter = $starters{$key};
     if ($starter) {
-        $client_ref->{adb} eq $starter->{adb} ||
-            return "Attempt to start '$client_ref->{adb}' on $ip port $port while already busy starting '$starter->{adb}' there";
+        $client->{adb} eq $starter->{adb} ||
+            return "Attempt to start '$client->{adb}' on $ip port $port while already busy starting '$starter->{adb}' there";
         $adb_socket == $starter->{adb_socket} ||
             return "Attempt to start with adb_socket '$adb_socket' on $ip port $port while already busy starting with '$starter->{adb_socket}' there";
-        return ADB::Client::SpawnRef->new($starter, $client_ref);
+        return ADB::Client::SpawnRef->new($starter, $client);
     }
 
     $starters{$key} = $starter = bless {
         key		=> $key,
-        adb		=> $client_ref->{adb},
+        adb		=> $client->{adb},
         adb_socket	=> $adb_socket,
         family		=> $family,
         bind_addr	=> $bind_addr,
@@ -306,9 +306,9 @@ sub join {
         index		=> 0,
         pid		=> undef,
         pid_adb		=> undef,
-        client_refs	=> {},
+        clients		=> {},
         in		=> "",
-        log_in	=> "",
+        log_in		=> "",
         rd		=> undef,
         exec_rd		=> undef,
         # Shared reader for rd and exec_rd
@@ -325,7 +325,7 @@ sub join {
         $starter->close($err);
         return $err;
     }
-    return ADB::Client::SpawnRef->new($starter, $client_ref);
+    return ADB::Client::SpawnRef->new($starter, $client);
 }
 
 sub _reader_exec {

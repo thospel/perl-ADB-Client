@@ -57,7 +57,7 @@ use constant {
     NULL	=> "/dev/null",
 };
 
-my $IDLE_TIMEOUT = 10;
+my $IDLE_TIMEOUT = 60;
 
 $| = 1;
 
@@ -201,7 +201,7 @@ sub finish {
 }
 
 sub timed_out {
-    print STDERR "Timed out after $idle_timeout seconds of inactivity\n";
+    print STDERR "$Script timed out after $idle_timeout seconds of inactivity\n";
     finish();
 }
 

@@ -10,9 +10,10 @@ use List::Util qw(first);
 use Errno qw(EINPROGRESS EWOULDBLOCK EINTR EAGAIN ECONNRESET ETIMEDOUT
              ECONNREFUSED EACCES EPERM ENETUNREACH EHOSTUNREACH);
 use Storable qw(dclone);
+use Fcntl qw(O_CREAT O_WRONLY O_TRUNC);
 
 use ADB::Client::Events
-    qw(mainloop unloop loop_levels timer immediate event_init);
+    qw(mainloop unloop loop_levels timer immediate event_init aio_init);
 use ADB::Client::Spawn qw($ADB);
 use ADB::Client::Utils
     qw(info caller_info callers dumper display_string adb_check_response
@@ -31,11 +32,13 @@ use ADB::Client::Command qw
 use ADB::Client::Tracker;
 
 use Exporter::Tidy
-    events	=> [qw(mainloop event_init unloop loop_levels timer immediate)],
-    other	=> [qw(string_from_value
-                       $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
-                       $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $SPAWN_TIMEOUT
-                       $BLOCK_SIZE)];
+    events	=>
+    [qw(mainloop event_init aio_init unloop loop_levels timer immediate)],
+    other	=>
+    [qw(string_from_value
+        $ADB_HOST $ADB_PORT $ADB $DEBUG $VERBOSE $QUIET
+        $TRANSACTION_TIMEOUT $CONNECTION_TIMEOUT $SPAWN_TIMEOUT
+        $BLOCK_SIZE $TRANSFER_BLOCK_SIZE)];
 
 our @CARP_NOT = qw(ADB::Client::Events ADB::Client::Timer);
 
@@ -43,6 +46,7 @@ our @CARP_NOT = qw(ADB::Client::Events ADB::Client::Timer);
 die "Bad file '", __FILE__, "'" if __FILE__ =~ /["\n\0]/;
 
 our $BLOCK_SIZE = int(2**16);
+our $TRANSFER_BLOCK_SIZE = int(2**16);
 # DATA_BLOCK_SIZE must never be greater than 2**16
 our $DATA_BLOCK_SIZE = int(2**16);
 
@@ -221,6 +225,8 @@ sub new {
     my $spawn_timeout = delete $arguments{spawn_timeout} //
         $SPAWN_TIMEOUT;
     my $block_size = delete $arguments{block_size} || $BLOCK_SIZE;
+    my $transfer_block_size = delete $arguments{transfer_block_size} ||
+        $TRANSFER_BLOCK_SIZE;
     my $addr_info = delete $arguments{addr_info};
 
     croak "Unknown argument " . join(", ", keys %arguments) if %arguments;
@@ -240,9 +246,11 @@ sub new {
         writer		=> undef,
         timeout		=> undef,
         handlers	=> {},
+        aio		=> {},
         adb		=> $adb,
         adb_socket	=> $adb_socket,
         block_size	=> $block_size,
+        transfer_block_size => $transfer_block_size,
         socket		=> undef,
         expect_eof	=> undef,
         expect_fail	=> undef,
@@ -285,7 +293,12 @@ sub port {
 }
 
 sub block_size {
-    return shift->{block_size};
+    return shift->{block_size} if @_ <= 1;
+
+    my ($client, $new_size) = @_;
+    my $old_size = $client->{block_size};
+    $client->{block_size} = int($new_size);
+    return $old_size;
 }
 
 sub adb_socket {
@@ -641,12 +654,32 @@ sub command_simple {
         ($flags & (SYNC|MAYBE_MORE)) == (SYNC|MAYBE_MORE);
 
     if ($command_ref->[FLAGS] & RECV) {
-        $command->{DATA} = "";
+        $command->{DATA} = delete $arguments->{data} // "";
         $command->{done} = 0;
         if ($command->{socket} = delete $arguments->{socket}) {
             $command->{sink} = \&_send_socket;
             # The user must accept that his socket becomes non-blocking
             $command->{socket}->blocking(0);
+        } elsif (my $file = delete $arguments->{file}) {
+            if (ref $file eq "") {
+                utf8::downgrade($file, 1) ||
+                      croak "File is not an octet string";
+                require File::Spec;
+                File::Spec->file_name_is_absolute($file) ||
+                      croak "File '$file' is not absolute";
+                $command->{file} = $file;
+                $command->{mode} = delete $arguments->{mode} //
+                    O_WRONLY | O_CREAT | O_TRUNC;
+                $command->{perms} = delete $arguments->{perms} // 0666;
+                $command->{sink} = \&_send_file;
+            } elsif (defined fileno($file)) {
+                $file->blocking(1);
+                $command->{handle} = $file;
+                $command->{sink} = \&_send_handle;
+            } else {
+                croak "Not a file";
+            }
+            aio_init();
         }
     }
 
@@ -684,18 +717,22 @@ sub command_simple {
         $client->fatal("Both source and sink") if
             $command->{source} && $command->{sink};
 
+        $command->{transfer_block_size} =
+            delete $arguments->{transfer_block_size} ||
+            $client->{transfer_block_size};
+
         # As soon as we have bytes >= low_water we do a write. Except when the
         # read side got EOF, then we do a final write with whatever is left
         my $low_water =
-            delete $arguments->{low_water} // $client->{block_size};
+            delete $arguments->{low_water} // $command->{transfer_block_size};
         $low_water >= 1 || croak "low_water should be at least 1";
         # As soon as we have bytes >= high_water we stop reading
-        my $high_water =
-            delete $arguments->{high_water} // 3 * $client->{block_size};
+        my $high_water = delete $arguments->{high_water} //
+            3 * $command->{transfer_block_size};
         $high_water >= $low_water || croak "high_water must me >= low_water";
         $command->{low_water}  = $low_water;
         $command->{high_water} = $high_water;
-        $command->{suspendable} = 0;
+        $command->{$command->{sink} ? "read_suspendable" : "write_suspendable"} = 0;
     }
 
     croak "Unknown argument " . join(", ", keys %$arguments) if %$arguments;
@@ -847,6 +884,11 @@ sub close : method {
     $client->{sync} = 0;
     $client->{active}  = 0;
     %{$client->{handlers}} = ();
+    if (%{$client->{aio}}) {
+        my @values = values %{$client->{aio}};
+        %{$client->{aio}} = ();
+        $_->cancel for @values;
+    }
     $client->{timeout} = undef;
 }
 
@@ -1070,6 +1112,11 @@ sub _activate {
             $client->{writer} = $client->{socket}->add_write($client, \&_writer);
             $client->_writer;
         }
+        if ($command->{sink} && !$command->{read_suspendable} &&
+            length $command->{DATA} >= $command->{low_water}) {
+            # my $continue = ADB::Client::Continue->new($client, $command);
+            $command->{sink}->($client, \$command->{DATA}, $command->{done});
+        }
     }
 }
 
@@ -1084,7 +1131,7 @@ sub _send_data {
         $client->{out} .= substr($arguments->[1], 0, $length, "");
         $client->{nr_bytes} += $length;
     }
-    delete $command->{source};
+    $command->{source} = undef;
     $client->{out} .=
         pack("a4V", "DONE",
              ($command->{mtime} //= int(realtime())) - EPOCH1970);
@@ -1101,7 +1148,7 @@ sub _send_data_raw {
         $client->{out} .= substr($arguments->[1], 0, $length, "");
         $client->{nr_bytes} += $length;
     }
-    delete $command->{source} if $arguments->[1] eq "";
+    $command->{source} = undef if $arguments->[1] eq "";
 }
 
 sub _transaction_timed_out {
@@ -1774,28 +1821,28 @@ sub resume_write {
     $client->{write_suspended} = 0;
 }
 
-sub suspendable {
+sub read_suspendable {
     my ($client, $state_new) = @_;
 
     my $command = $client->{commands}[0] || $client->fatal("No command");
-    $command->{suspendable} // $client->fatal("Not a suspendable command");
+    $command->{read_suspendable} // $client->fatal("Not a read_suspendable command");
     if ($state_new > 0) {
         # State > 0
-        !$command->{suspendable} ||
-            $client->fatal("Command already suspendable");
-        $command->{suspendable} = 1;
+        !$command->{read_suspendable} ||
+            $client->fatal("Command already read_suspendable");
+        $command->{read_suspendable} = 1;
 
         $client->suspend_read if
             length $command->{DATA} >= $command->{high_water};
     } else {
-        $command->{suspendable} || $client->fatal("Command not suspendable");
+        $command->{read_suspendable} || $client->fatal("Command not read_suspendable");
         if ($state_new) {
             # State < 0
             $client->resume_read if $client->{read_suspended} &&
                 length $command->{DATA} < $command->{high_water};
         } else {
             # State == 0
-            $command->{suspendable} = 0;
+            $command->{read_suspendable} = 0;
             $client->resume_read if $client->{read_suspended};
             $client->{timeout} = immediate($client, \&_success_delayed) if
                 $command->{done};
@@ -1806,7 +1853,7 @@ sub suspendable {
 sub _writer {
     my ($client) = @_;
 
-    my $rc = syswrite($client->{socket}, $client->{out}, $BLOCK_SIZE);
+    my $rc = syswrite($client->{socket}, $client->{out}, $client->{block_size});
     if ($rc) {
         $client->{sent} += $rc;
         substr($client->{out}, 0, $rc, "");
@@ -1816,6 +1863,11 @@ sub _writer {
             $command->{source}->($client, $command) if
                 $command->{source} &&
                 length $client->{out} < $command->{high_water};
+            $client->{timeout} = timer(
+                $command->{transaction_timeout} //
+                $client->fatal("No transaction_timeout"),
+                $client, \&_transaction_timed_out) if
+                    $command->command_flags & SEND;
         }
         if ($client->{out} eq "") {
             $client->{writer} = undef;
@@ -1834,7 +1886,7 @@ sub _writer {
 sub _reader {
     my ($client) = @_;
 
-    my $rc = sysread($client->{socket}, my $buffer, $BLOCK_SIZE);
+    my $rc = sysread($client->{socket}, my $buffer, $client->{block_size});
     if (!$rc) {
         # Handle EOF and error
         if (defined $rc || $! == ECONNRESET) {
@@ -1978,6 +2030,7 @@ sub check_response {
             return SUCCEEDED, "" if
                 ($command_ref->[FLAGS] & EXPECT_EOF) &&
                 $command_ref->[NR_BYTES] == 0;
+            return BAD_ADB, "Unexpected EOF" if $client->{in} eq "";
             my $response = display_string($client->{in});
             return BAD_ADB, "Truncated ADB response $response";
         }
@@ -2005,21 +2058,26 @@ sub _socket_writer {
     my ($client) = @_;
 
     my $command = $client->{commands}[0] || $client->fatal("No command");
-    my ($rc, $written);
-    while ($rc = syswrite($command->{socket}, $command->{DATA}, $client->{block_size})) {
+    my $rc = syswrite($command->{socket}, $command->{DATA}, $command->{transfer_block_size});
+    if ($rc) {
         substr($command->{DATA}, 0, $rc) = "";
-        $written ||= 1;
         # if (length $command->{DATA} < ($command->{done} ? 1 : $command->{low_water})) {
         if (length $command->{DATA} < $command->{low_water}) {
             $client->{handlers}{socket_writer} = undef;
-            $client->suspendable(0);
-            return;
+            $client->{handlers}{timeout} = undef;
+            $client->read_suspendable(0);
+        } else {
+            $client->{handlers}{timeout} = timer(
+                $command->{transaction_timeout} //
+                $client->fatal("No transaction_timeout"),
+                $client, \&_transaction_timed_out);
+            $client->read_suspendable(-1);
         }
+        return;
     }
     if (defined $rc) {
         $client->error("Assertion: Length 0 write");
     } elsif ($! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK) {
-        $client->suspendable(-1) if $written;
         return;
     } else {
         $client->error("Could not write to socket: $^E");
@@ -2032,7 +2090,94 @@ sub _send_socket {
     return if $$data_ref eq "";
     my $command = $client->{commands}[0] || $client->fatal("No command");
     $client->{handlers}{socket_writer} = $command->{socket}->add_write($client, \&_socket_writer);
-    $client->suspendable(1);
+    $client->{handlers}{timeout} = timer(
+        $command->{transaction_timeout} //
+        $client->fatal("No transaction_timeout"),
+        $client, \&_transaction_timed_out);
+
+    $client->read_suspendable(1);
+}
+
+sub _send_handle {
+    my ($client, $data_ref, $done) = @_;
+
+    my $len = length $$data_ref;
+    # print STDERR "Have $len ($done)\n";
+    if (!$len) {
+        if ($done) {
+            my $command = $client->{commands}[0] ||
+                $client->fatal("No command");
+            if ($command->{file}) {
+                weaken($client);
+                # Possibly also implement datasync
+                $client->{aio}{file_writer} = IO::AIO::aio_close(
+                    $command->{handle}, sub {
+                        $client || return;
+                        delete $client->{aio}{file_writer};
+                        $client->{handlers}{timeout} = undef;
+                        # print STDERR "Close\n";
+                        $client->read_suspendable(0);
+                    }
+                );
+                $client->{handlers}{timeout} = timer(
+                    $command->{transaction_timeout} //
+                    $client->fatal("No transaction_timeout"),
+                    $client, \&_transaction_timed_out);
+                $client->read_suspendable(1);
+            }
+        }
+        return;
+    }
+
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    $len = $command->{transfer_block_size} if $len > $command->{transfer_block_size};
+    my $str = substr($$data_ref, 0, $len, "");
+    weaken($client);
+    $client->{aio}{file_writer} = IO::AIO::aio_write(
+        $command->{handle}, undef, $len, $str, 0,
+        sub {
+            $client || return;
+            return $client->error($_[0] == 0 ?
+                                  "Assertion: Length 0 write" :
+                                  "Write error: $^E") if $_[0] <= 0;
+            # print STDERR "Wrote $_[0]\n";
+            if ($_[0] != length $str) {
+                substr($str, 0, $_[0], "");
+                substr($$data_ref, 0, 0, $str);
+            }
+            delete $client->{aio}{file_writer};
+            $client->{handlers}{timeout} = undef;
+            $client->read_suspendable(0);
+        });
+    $client->{handlers}{timeout} = timer(
+        $command->{transaction_timeout} //
+        $client->fatal("No transaction_timeout"),
+        $client, \&_transaction_timed_out);
+    $client->read_suspendable(1);
+}
+
+sub _send_file {
+    my ($client) = @_;
+
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    weaken($client);
+    $client->{aio}{file_writer} = IO::AIO::aio_open(
+        $command->{file}, $command->{mode}, $command->{perms},
+        sub {
+            $client || return;
+            $command->{handle} = shift ||
+                return $client->error("Could not open '$command->{file}': $^E");
+            binmode $command->{handle};
+            $command->{sink} = \&_send_handle;
+            $client->{handlers}{timeout} = undef;
+            delete $client->{aio}{file_writer};
+            $client->read_suspendable(0);
+        });
+    $client->{handlers}{timeout} = timer(
+        $command->{transaction_timeout} //
+        $client->fatal("No transaction_timeout"),
+        $client, \&_transaction_timed_out);
+    $client->read_suspendable(1);
 }
 
 sub process_version {
@@ -2373,7 +2518,7 @@ sub process_recv_v1 {
                 my $str = display_string($client->{in});
                 return "Spurious response bytes: $str";
             }
-            $command->{done} = 1;
+            $command->{done} = -1;
             $command->{low_water} = 1;
             $command->{high_water} = INFINITY;
             last;
@@ -2385,15 +2530,21 @@ sub process_recv_v1 {
             return "Inconsistent response '$id'";
         }
     }
-    if ($command->{sink} && !$command->{suspendable} &&
+    if ($command->{sink} && !$command->{read_suspendable} &&
         length $command->{DATA} >= $command->{low_water}) {
         # my $continue = ADB::Client::Continue->new($client, $command);
         $command->{sink}->($client, \$command->{DATA}, $command->{done});
     }
 
-    if ($command->{done} && !$command->{suspendable}) {
-        $client->{active} = 0;
-        return [delete $command->{DATA}];
+    if ($command->{done} && !$command->{read_suspendable}) {
+        if ($command->{sink} && $command->{done} < 0) {
+            $command->{done} = 1;
+            $command->{sink}->($client, \$command->{DATA}, $command->{done});
+        }
+        if (!$command->{read_suspendable}) {
+            $client->{active} = 0;
+            return [delete $command->{DATA}];
+        }
     }
     # Resuming read when command is done is not a problem since there should be
     # nothing to read

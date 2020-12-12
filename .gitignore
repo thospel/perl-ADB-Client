@@ -27,7 +27,7 @@ MYMETA.yml
 MYMETA.json
 MYMETA.json.lock
 ~
-bl?b
+bl?b*
 core
 bin/test.pl
 *.apk

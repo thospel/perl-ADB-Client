@@ -15,10 +15,11 @@ use lib $Bin;
 use Errno qw(EAGAIN EINTR EWOULDBLOCK);
 
 my $tests;
-BEGIN { $tests = 30 }
+BEGIN { $tests = 36 }
 use Test::More tests => $tests;
 
-use TestDrive qw($tests_driver $tests_pre $t_dir
+use TestDrive qw($tests_driver $tests_pre $t_dir $tmp_dir
+                 unalarm
                  adb_server adb_start adb_run filesystem dumper $developer);
 
 # We already checked loading in 04_adb_client.t
@@ -118,30 +119,73 @@ is_deeply(\@result, [""], "No data is returned, it all goes into the socket");
 is($obj->{in}, "foo\n", "We received the file contents");
 ok($obj->{reader}, "Still reading from socket");
 
+unalarm();
 my $client1 = new_ok("ADB::Client", [block_size => 1]);
 $client1->transport_local;
 @result = $client1->sync;
 is_deeply(\@result, [""], "Can run sync");
 $obj->{in} = "";
-@result = $client1->recv_v1("$adb_dir/$utf8_file", socket => $wr);
+@result = $client1->recv_v1("$adb_dir/$utf8_file",
+                            socket => $wr,
+                           transfer_block_size => 1,
+                           data => "a" x 28);
 is_deeply(\@result, [""], "No data is returned, it all goes into the socket");
-is($obj->{in}, "foo\n$decoded_file\n", "We received the file contents");
+is($obj->{in},
+   "a" x 28 . "foo\n$decoded_file\n",
+   "We received the file contents");
 ok($obj->{reader}, "Still reading from socket");
 
-# Notice that this intentionally generates a file of size 4(2**16+1)
+# Notice that this intentionally generates a file of size 4(2**17+1)
 # The extra 4 bytes will test the handling of a short trailer
 my $content = "";
-$content .= pack("N", rand(2**32)) for 0..2**16;
+$content .= pack("N", rand(2**32)) for 0..2**17;
 my $content_length = length($content);
+my $bl = $client->block_size(2**16);
 my ($length, $mtime) = $client->send_v1("$adb_dir/bar", $content,
                                         mtime => 8,
                                         ftype => "REG",
                                         perms => 0444);
+$client->block_size($bl);
 is($length, $content_length, "Expected length");
 is($mtime, 8, "Expected mtime");
+
+unalarm();
 $obj->{in} = "";
 # $obj->{reader} = $rd->add_read($obj, \&_reader);
 @result = $client->recv_v1("$adb_dir/bar", socket => $wr);
 is_deeply(\@result, [""], "No data is returned, it all goes into the socket");
 is($obj->{in}, $content, "We received the file contents");
 ok($obj->{reader}, "Still reading from socket");
+
+unalarm();
+my $file = "$tmp_dir/out";
+@result = $client->recv_v1("$adb_dir/$utf8_file",
+                           file => $file,
+                           transfer_block_size => 1,
+                           data => "a" x 28);
+is_deeply(\@result, [""], "No data is returned, it all goes into the file");
+open(my $fh, "<", $file) || die "Could not open '$file': $^E";
+binmode $fh;
+my $c = do { local $/; <$fh> };
+is($c, "a" x 28 . "foo\n$decoded_file\n", "We received the file contents");
+
+unalarm();
+@result = $client->recv_v1("$adb_dir/bar", file => $file);
+is_deeply(\@result, [""], "No data is returned, it all goes into the file");
+$fh = undef;
+open($fh, "<", $file) || die "Could not open '$file': $^E";
+binmode $fh;
+$c = do { local $/; <$fh> };
+is($c, $content, "We received the file contents");
+
+unalarm();
+$fh = undef;
+open($fh, ">", $file) || die "Could not open '$file': $^E";
+binmode($fh);
+@result = $client->recv_v1("$adb_dir/bar", file => $fh);
+is_deeply(\@result, [""], "No data is returned, it all goes into the file");
+$fh = undef;
+open($fh, "<", $file) || die "Could not open '$file': $^E";
+binmode $fh;
+$c = do { local $/; <$fh> };
+is($c, $content, "We received the file contents");

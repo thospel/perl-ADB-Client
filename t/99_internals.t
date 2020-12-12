@@ -605,8 +605,8 @@ mainloop();
     like($@, qr{^Select failed: }, "Proper error on bad filedescriptor");
 }
 
-my $cmd = bless [], "ADB::Client::Command";
-my $c = bless {}, "ADB::Client";
+my $cmd = bless {}, "ADB::Client::Command";
+my $c = bless {aio=>{}}, "ADB::Client";
 
 $cmd_name = "$cmd";
 $client_name = "$c";

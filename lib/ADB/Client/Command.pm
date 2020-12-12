@@ -172,6 +172,10 @@ sub command_name {
     return shift->{COMMAND_REF}[COMMAND_NAME];
 }
 
+sub command_flags {
+    return shift->{COMMAND_REF}[FLAGS];
+}
+
 sub out {
     return shift->{OUT};
 }

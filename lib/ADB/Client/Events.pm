@@ -64,6 +64,7 @@ my (%read_refs, %write_refs, %error_refs, @unlooping);
 
 # All placeholder subs are the same sub
 use constant NOP => sub {};
+use constant OBJ => bless {};
 
 sub ADB::Client::Events::Read::DESTROY {
     my $fd = ${shift()} // die "No filedescriptor";
@@ -214,7 +215,7 @@ sub aio_init {
 
     $EVENT_INITER->() if $EVENT_INITER;
     my $fd = IO::AIO::poll_fileno();
-    $read_refs{$fd} = \&IO::AIO::poll_cb;
+    $read_refs{$fd} = [OBJ, \&IO::AIO::poll_cb];
     vec($read_mask, $fd, 1) = 1;
     ++$read_fixed;
 

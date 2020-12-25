@@ -622,7 +622,6 @@ sub command_get {
     my $nr_args = $command =~ tr/%//;
     if ($command_ref->[FLAGS] && ($command_ref->[FLAGS] & SYNC)) {
         $nr_args =
-            $command_ref->[FLAGS] & SEND ? 2 :
             $command_ref->[NR_BYTES] == 0 && ($command_ref->[FLAGS] & EXPECT_EOF) ?
             0 : 1;
     }
@@ -653,11 +652,15 @@ sub command_simple {
         exists $arguments->{on_progress} &&
         ($flags & (SYNC|MAYBE_MORE)) == (SYNC|MAYBE_MORE);
 
-    if ($command_ref->[FLAGS] & RECV) {
+    if ($command_ref->[FLAGS] & (RECV|SEND)) {
         $command->{DATA} = delete $arguments->{data} // "";
         $command->{done} = 0;
         if ($command->{socket} = delete $arguments->{socket}) {
-            $command->{sink} = \&_send_socket;
+            if ($command_ref->[FLAGS] & RECV) {
+                $command->{sink} = \&_send_socket;
+            } else {
+                $command->{source} = \&_recv_socket;
+            }
             # The user must accept that his socket becomes non-blocking
             $command->{socket}->blocking(0);
         } elsif (my $file = delete $arguments->{file}) {
@@ -668,14 +671,22 @@ sub command_simple {
                 File::Spec->file_name_is_absolute($file) ||
                       croak "File '$file' is not absolute";
                 $command->{file} = $file;
-                $command->{mode} = delete $arguments->{mode} //
-                    O_WRONLY | O_CREAT | O_TRUNC;
-                $command->{perms} = delete $arguments->{perms} // 0666;
-                $command->{sink} = \&_send_file;
+                if ($command_ref->[FLAGS] & RECV) {
+                    $command->{mode} = delete $arguments->{mode} //
+                        O_WRONLY | O_CREAT | O_TRUNC;
+                    $command->{perms} = delete $arguments->{perms} // 0666;
+                    $command->{sink} = \&_send_file;
+                } else {
+                    $command->{source} = \&_recv_file;
+                }
             } elsif (defined fileno($file)) {
                 $file->blocking(1);
                 $command->{handle} = $file;
-                $command->{sink} = \&_send_handle;
+                if ($command_ref->[FLAGS] & RECV) {
+                    $command->{sink} = \&_send_handle;
+                } else {
+                    $command->{sink} = \&_recv_handle;
+                }
             } else {
                 croak "Not a file";
             }
@@ -708,8 +719,7 @@ sub command_simple {
         $mode |= $adb_mode_from_file_type{REG} unless $mode & ADB_FILE_TYPE_MASK;
         adb_file_type_from_mode($mode);
         $args->[0] .= sprintf(",%d", $mode);
-        $command->{source} = $command->{raw} ?
-            \&_send_data_raw : \&_send_data;
+        $command->{source} = \&_send_data;
     }
 
     if ($command->{source} || $command->{sink}) {
@@ -1123,32 +1133,28 @@ sub _activate {
 sub _send_data {
     my ($client, $command) = @_;
 
-    my $arguments = $command->arguments;
-    while (my $length = length $arguments->[1]) {
-        return if length $client->{out} >= $command->{high_water};
-        $length = $DATA_BLOCK_SIZE if $length > $DATA_BLOCK_SIZE;
-        $client->{out} .= pack("a4V", "DATA", $length);
-        $client->{out} .= substr($arguments->[1], 0, $length, "");
-        $client->{nr_bytes} += $length;
+    if ($command->{raw}) {
+        if (my $length = length $command->{DATA}) {
+            my $want = $command->{high_water} - length $client->{out};
+            return if $want <= 0;
+            $length = $want if $length > $want;
+            $client->{out} .= substr($command->{DATA}, 0, $length, "");
+            $client->{nr_bytes} += $length;
+        }
+        $command->{source} = undef if $command->{DATA} eq "";
+    } else {
+        while (my $length = length $command->{DATA}) {
+            return if length $client->{out} >= $command->{high_water};
+            $length = $DATA_BLOCK_SIZE if $length > $DATA_BLOCK_SIZE;
+            $client->{out} .= pack("a4V", "DATA", $length);
+            $client->{out} .= substr($command->{DATA}, 0, $length, "");
+            $client->{nr_bytes} += $length;
+        }
+        $command->{source} = undef;
+        $client->{out} .=
+            pack("a4V", "DONE",
+                 ($command->{mtime} //= int(realtime())) - EPOCH1970);
     }
-    $command->{source} = undef;
-    $client->{out} .=
-        pack("a4V", "DONE",
-             ($command->{mtime} //= int(realtime())) - EPOCH1970);
-}
-
-sub _send_data_raw {
-    my ($client, $command) = @_;
-
-    my $arguments = $command->arguments;
-    if (my $length = length $arguments->[1]) {
-        my $want = $command->{high_water} - length $client->{out};
-        return if $want <= 0;
-        $length = $want if $length > $want;
-        $client->{out} .= substr($arguments->[1], 0, $length, "");
-        $client->{nr_bytes} += $length;
-    }
-    $command->{source} = undef if $arguments->[1] eq "";
 }
 
 sub _transaction_timed_out {
@@ -1825,7 +1831,8 @@ sub read_suspendable {
     my ($client, $state_new) = @_;
 
     my $command = $client->{commands}[0] || $client->fatal("No command");
-    $command->{read_suspendable} // $client->fatal("Not a read_suspendable command");
+    $command->{read_suspendable} //
+        $client->fatal("Not a read_suspendable command");
     if ($state_new > 0) {
         # State > 0
         !$command->{read_suspendable} ||
@@ -1835,7 +1842,8 @@ sub read_suspendable {
         $client->suspend_read if
             length $command->{DATA} >= $command->{high_water};
     } else {
-        $command->{read_suspendable} || $client->fatal("Command not read_suspendable");
+        $command->{read_suspendable} ||
+            $client->fatal("Command not read_suspendable");
         if ($state_new) {
             # State < 0
             $client->resume_read if $client->{read_suspended} &&
@@ -1846,6 +1854,37 @@ sub read_suspendable {
             $client->resume_read if $client->{read_suspended};
             $client->{timeout} = immediate($client, \&_success_delayed) if
                 $command->{done};
+        }
+    }
+}
+
+sub write_suspendable {
+    my ($client, $state_new) = @_;
+
+    my $command = $client->{commands}[0] || $client->fatal("No command");
+    $command->{write_suspendable} //
+        $client->fatal("Not a write_suspendable command");
+    if ($state_new > 0) {
+        # State > 0
+        !$command->{write_suspendable} ||
+            $client->fatal("Command alwritey write_suspendable");
+        $command->{write_suspendable} = 1;
+
+        $client->suspend_write if
+            length $client->{out} < $command->{low_water};
+    } else {
+        $command->{write_suspendable} ||
+            $client->fatal("Command not write_suspendable");
+        if ($state_new) {
+            # State < 0
+            $client->resume_write if $client->{write_suspended} &&
+                length $command->{out} >= $command->{low_water};
+        } else {
+            # State == 0
+            $command->{write_suspendable} = 0;
+            $client->resume_write if $client->{write_suspended};
+            #$client->{timeout} = immediate($client, \&_success_delayed) if
+            #    $command->{done};
         }
     }
 }
@@ -2739,7 +2778,8 @@ sub mkdir_unlink {
     my ($client, $file, %arguments) = @_;
 
     # These options are accepted by send_v1 but make no sense here
-    for my $key (qw(raw mode mtime perms ftype low_water high_water)) {
+    for my $key (qw(raw mode mtime perms ftype low_water high_water data socket
+                    handle)) {
         croak "Forbidden argument '$key'" if exists $arguments{$key};
     }
 
@@ -2748,7 +2788,7 @@ sub mkdir_unlink {
     $client->callback_unshift(\%arguments, sub {
         $_[1] = undef if $_[1] && $_[1] eq "invalid data message";
     });
-    return $client->send_v1($file, pack("a4x4", "DEAD"), %arguments, raw => 1);
+    return $client->send_v1($file, data => pack("a4x4", "DEAD"), %arguments, raw => 1);
 }
 
 __PACKAGE__->commands_add();

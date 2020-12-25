@@ -349,7 +349,7 @@ if (0) {
 my $time_before = int(realtime());
 my $content = "barbar\n";
 my $content_length = length $content;
-@result = $client->send_v1("$adb_dir/bar", $content);
+@result = $client->send_v1("$adb_dir/bar", data => $content);
 my $time_after = realtime();
 is(@result, 2, "Two results") || dumper(\@result);
 is($result[0], $content_length, "Return bytes transferred") || dumper(\@result);
@@ -372,7 +372,8 @@ SKIP: {
     my $content = "";
     $content .= pack("N", rand(2**32)) for 1..2**16;
     my $content_length = length($content);
-    my ($length, $mtime) = $client->send_v1("$adb_dir/bar", $content,
+    my ($length, $mtime) = $client->send_v1("$adb_dir/bar",
+                                            data => $content,
                                             mtime => 8,
                                             ftype => "REG",
                                             perms => 0444);
@@ -391,7 +392,7 @@ SKIP: {
 
 # Try send_v1raw
 @result = $client->send_v1("$adb_dir/bar",
-                           pack("(a4V/a*)3a4x4",
+                           data => pack("(a4V/a*)3a4x4",
                            DATA => "bar",
                            DATA => "",
                            DATA => "zzzef",
@@ -457,7 +458,7 @@ is_deeply(\@result, [$noproto_native, $noproto_adb], "File is gone") ||
 
 # Try to get a FAIL response while still sending
 eval { $client->send_v1("$adb_dir/baz",
-                        pack("(a4V/a*)2a4x4",
+                        data => pack("(a4V/a*)2a4x4",
                              DEAD => "bar",
                              DATA => "z" x 40,
                              "DONE"),

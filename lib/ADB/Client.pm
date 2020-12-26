@@ -255,7 +255,7 @@ sub new {
         expect_eof	=> undef,
         expect_fail	=> undef,
         read_suspended	=> 0,
-        write_suspended	=> 0,
+        write_suspended	=> 1,
         sent		=> 0,
         in		=> "",
         out		=> "",
@@ -890,7 +890,7 @@ sub close : method {
         # NOT the current connection state. Check $client->{socket} instead
     }
     $client->{read_suspended} = 0;
-    $client->{write_suspended} = 0;
+    $client->{write_suspended} = 1;
     $client->{sync} = 0;
     $client->{active}  = 0;
     %{$client->{handlers}} = ();
@@ -1119,7 +1119,7 @@ sub _activate {
             $command->{source} &&
             length $client->{out} < $command->{high_water};
         if ($client->{out} ne "") {
-            $client->{writer} = $client->{socket}->add_write($client, \&_writer);
+            $client->resume_write;
             $client->_writer;
         }
         if ($command->{sink} && !$command->{read_suspendable} &&
@@ -1429,15 +1429,16 @@ sub _connect_next {
                 warn("Could not set TCP_NODELAY on connecting socket: $^E");
             $client->{socket} = $socket;
             $addr->{connected} = 0;
-            $client->{out} = "Dummy";
-            $client->{writer} = $socket->add_write($client, \&_connect_writable);
-            # $client->{errorer} = $socket->add_error($client, \&_connect_writable);
+            $client->{active} = 1;
             $client->{in} = undef;
             $client->{timeout} = timer(
                 $addr->{connection_timeout} // $command->{connection_timeout} //
                 $client->fatal("No connection_timeout"),
                 $client, \&_connection_timeout);
-            $client->{active} = 1;
+            $client->{out} = "Dummy";
+            $client->{writer} = $socket->add_write($client, \&_connect_writable);
+            # $client->{write_suspended} = 0;
+            # $client->{errorer} = $socket->add_error($client, \&_connect_writable);
             return;
         } else {
             $client->_connected($!) || return;
@@ -1757,8 +1758,7 @@ sub suspend_read {
     $client->{active} || $client->fatal("suspend without active");
     if (defined $client->{in}) {
         $client->{reader} = undef;
-        $client->{timeout} = undef if
-            $client->{out} eq "" || $client->{write_suspended};
+        $client->{timeout} = undef if $client->{write_suspended};
     }
     $client->{read_suspended} = 1;
 }
@@ -1771,7 +1771,7 @@ sub resume_read {
     $client->{active} || $client->fatal("resume without active");
     if (defined $client->{in}) {
         $client->{reader} = $client->{socket}->add_read($client, \&_reader);
-        if ($client->{out} eq "" || $client->{write_suspended}) {
+        if ($client->{write_suspended}) {
             my $command = $client->{commands}[0] ||
                 $client->fatal("resume without command");
             my $timeout = $command->{$command->{COMMAND_REF}[FLAGS] & PHASE2 ?
@@ -1790,11 +1790,10 @@ sub suspend_write {
     $client->fatal("Already suspended") if $client->{write_suspended};
     $client->{socket} || $client->fatal("suspend without socket");
     $client->{active} || $client->fatal("suspend without active");
-    if ($client->{out} ne "") {
-        $client->{writer} = undef;
-        $client->{timeout} = undef if
-            !defined $client->{in} || $client->{read_suspended};
-    }
+    $client->{out} eq "" || $client->fatal("Should already be suspended");
+    $client->{writer} = undef;
+    $client->{timeout} = undef if
+        !defined $client->{in} || $client->{read_suspended};
     $client->{write_suspended} = 1;
 }
 
@@ -1804,25 +1803,24 @@ sub resume_write {
     $client->fatal("Not suspended") if !$client->{write_suspended};
     $client->{socket} || $client->fatal("resume without socket");
     $client->{active} || $client->fatal("resume without active");
-    if ($client->{out} ne "") {
-        $client->{writer} = $client->{socket}->add_write($client, \&_writer);
-        if (!defined $client->{in}) {
-            my $command = $client->{commands}[0] ||
-                $client->fatal("resume without command");
-            my $addr = $command->{address}[$command->{address_i}];
-            $client->{timeout} = timer(
-                $addr->{connection_timeout} // $command->{connection_timeout} //
-                $client->fatal("No connection_timeout"),
-                $client, \&_connection_timeout);
-        } elsif ($client->{read_suspended}) {
-            my $command = $client->{commands}[0] ||
-                $client->fatal("resume without command");
-            my $timeout = $command->{$command->{COMMAND_REF}[FLAGS] & PHASE2 ?
-                                     "transaction_timeout2" : "transaction_timeout"};
-            $client->{timeout} = timer(
-                $timeout // $client->fatal("No transaction_timeout"),
-                $client, \&_transaction_timed_out);
-        }
+    $client->{out} ne "" || $client->fatal("resume write without content");
+    $client->{writer} = $client->{socket}->add_write($client, \&_writer);
+    if (!defined $client->{in}) {
+        my $command = $client->{commands}[0] ||
+            $client->fatal("resume without command");
+        my $addr = $command->{address}[$command->{address_i}];
+        $client->{timeout} = timer(
+            $addr->{connection_timeout} // $command->{connection_timeout} //
+            $client->fatal("No connection_timeout"),
+            $client, \&_connection_timeout);
+    } elsif ($client->{read_suspended}) {
+        my $command = $client->{commands}[0] ||
+            $client->fatal("resume without command");
+        my $timeout = $command->{$command->{COMMAND_REF}[FLAGS] & PHASE2 ?
+                                 "transaction_timeout2" : "transaction_timeout"};
+        $client->{timeout} = timer(
+            $timeout // $client->fatal("No transaction_timeout"),
+            $client, \&_transaction_timed_out);
     }
     $client->{write_suspended} = 0;
 }
@@ -1893,33 +1891,31 @@ sub _writer {
     my ($client) = @_;
 
     my $rc = syswrite($client->{socket}, $client->{out}, $client->{block_size});
-    if ($rc) {
-        $client->{sent} += $rc;
-        substr($client->{out}, 0, $rc, "");
-        if ($client->{sync}) {
-            my $command = $client->{commands}[0] ||
-                $client->fatal("No command");
-            $command->{source}->($client, $command) if
-                $command->{source} &&
-                length $client->{out} < $command->{high_water};
-            $client->{timeout} = timer(
-                $command->{transaction_timeout} //
-                $client->fatal("No transaction_timeout"),
-                $client, \&_transaction_timed_out) if
-                    $command->command_flags & SEND;
-        }
-        if ($client->{out} eq "") {
-            $client->{writer} = undef;
-            $client->{timeout} = undef if $client->{read_suspended};
+    if (!$rc) {
+        if (defined $rc) {
+            $client->error("Assertion: Length 0 write");
+        } else {
+            $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK ||
+                $client->error("Unexpected error while writing to adb socket: $^E");
         }
         return;
     }
-    if (defined $rc) {
-        $client->error("Assertion: Length 0 write");
-        return;
+
+    $client->{sent} += $rc;
+    substr($client->{out}, 0, $rc, "");
+    if ($client->{sync}) {
+        my $command = $client->{commands}[0] ||
+            $client->fatal("No command");
+        $command->{source}->($client, $command) if
+            $command->{source} &&
+            length $client->{out} < $command->{high_water};
+        $client->{timeout} = timer(
+            $command->{transaction_timeout} //
+            $client->fatal("No transaction_timeout"),
+            $client, \&_transaction_timed_out) if
+                $command->command_flags & SEND;
     }
-    return if $! == EAGAIN || $! == EINTR || $! == EWOULDBLOCK;
-    $client->error("Unexpected error while writing to adb socket: $^E");
+    $client->suspend_write if $client->{out} eq "";
 }
 
 sub _reader {
